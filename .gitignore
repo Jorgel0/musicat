@@ -1,0 +1,12 @@
+# Editors / IDEs
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env overrides
+.env
+.env.*
