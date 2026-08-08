@@ -19,8 +19,12 @@ pluginManagement {
 
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
-    id("com.android.application") version "9.0.1" apply false
-    id("org.jetbrains.kotlin.android") version "2.3.20" apply false
+    // Pinned below AGP 9: several plugins we depend on (audiotags, and
+    // file_picker on older releases) still unconditionally self-apply the
+    // Kotlin Gradle Plugin, which AGP 9's "built-in Kotlin" default
+    // forbids. See docs/adr/0005-agp-8-pin.md.
+    id("com.android.application") version "8.11.1" apply false
+    id("org.jetbrains.kotlin.android") version "2.2.20" apply false
 }
 
 include(":app")
