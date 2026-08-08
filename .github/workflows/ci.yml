@@ -74,6 +74,13 @@ jobs:
   build-windows:
     runs-on: windows-latest
     needs: analyze-and-test
+    # Known-broken: the audiotags plugin's Windows CMake step fails
+    # extracting its native library through Flutter's .plugin_symlinks
+    # (upstream, unresolved as of 2026-08 — see issue #1 in this repo and
+    # https://github.com/erikas-taroza/audiotags/issues/35). Windows is a
+    # secondary target behind Android, so this doesn't block PRs until
+    # there's a fix or we swap the tag-reading library.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
