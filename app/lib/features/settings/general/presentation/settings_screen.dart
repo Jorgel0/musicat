@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../../core/design_system/theme.dart';
 import '../../../library/presentation/library_providers.dart';
@@ -71,6 +72,15 @@ class SettingsScreen extends ConsumerWidget {
                 }).toList(),
               ),
             ),
+          ),
+          const Divider(height: 32),
+          const _SectionHeader('Audio'),
+          ListTile(
+            leading: const Icon(Icons.graphic_eq),
+            title: const Text('Equalizer'),
+            subtitle: const Text('Android only, for now'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push('/settings/equalizer'),
           ),
           const Divider(height: 32),
           const _SectionHeader('Library folders'),

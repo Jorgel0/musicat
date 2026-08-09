@@ -4,6 +4,7 @@ Phase 1.5.
 
 - ✅ Sleep timer (`presentation/sleep_timer_controller.dart`), pure Dart,
   all platforms.
-- ⏳ Equalizer, mono/stereo, loudness normalization — not started yet. See
-  `docs/architecture.md` for why these are a separate phase from the base
-  player and which parts are Android-only.
+- ✅ Equalizer (`presentation/equalizer_controller.dart` +
+  `equalizer_screen.dart`), Android only — see ADR 0007 for why, and for
+  why mono/stereo was dropped rather than half-implemented.
+- ⏳ Loudness normalization — not started yet.

@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
@@ -5,6 +7,7 @@ import 'package:rxdart/rxdart.dart';
 
 import '../../features/library/domain/track.dart';
 import 'audio_player_controller.dart';
+import 'equalizer_info.dart';
 import 'playback_processing_state.dart';
 import 'repeat_mode.dart';
 
@@ -21,7 +24,18 @@ class MusicatAudioHandler extends BaseAudioHandler
     _init();
   }
 
-  final AudioPlayer _player = AudioPlayer();
+  // just_audio's own built-in Android equalizer support (backed by
+  // android.media.audiofx.Equalizer) — there's no equivalent on
+  // Linux/Windows (media_kit) or iOS/macOS, so it's Android-only by
+  // construction. See ADR 0007.
+  final AndroidEqualizer? _equalizer = Platform.isAndroid
+      ? AndroidEqualizer()
+      : null;
+  late final AudioPlayer _player = AudioPlayer(
+    audioPipeline: AudioPipeline(
+      androidAudioEffects: [if (_equalizer != null) _equalizer],
+    ),
+  );
   List<Track> _tracks = const [];
   final _queueSubject = BehaviorSubject<List<Track>>.seeded(const []);
   final _currentTrackSubject = BehaviorSubject<Track?>.seeded(null);
@@ -149,6 +163,42 @@ class MusicatAudioHandler extends BaseAudioHandler
   @override
   Future<void> setRepeat(PlaybackRepeatMode mode) =>
       _player.setLoopMode(_loopModeFromRepeatMode(mode));
+
+  @override
+  Future<EqualizerInfo?> getEqualizerInfo() async {
+    final equalizer = _equalizer;
+    if (equalizer == null) return null;
+    // Only resolves once the player has loaded at least one audio source
+    // (that's when just_audio activates the pipeline's effects) — callers
+    // are expected to only ask once something has been queued.
+    final params = await equalizer.parameters;
+    return EqualizerInfo(
+      enabled: equalizer.enabled,
+      minDecibels: params.minDecibels,
+      maxDecibels: params.maxDecibels,
+      bands: [
+        for (final band in params.bands)
+          EqualizerBandInfo(
+            index: band.index,
+            centerFrequencyHz: band.centerFrequency,
+            gainDb: band.gain,
+          ),
+      ],
+    );
+  }
+
+  @override
+  Future<void> setEqualizerEnabled(bool enabled) async {
+    await _equalizer?.setEnabled(enabled);
+  }
+
+  @override
+  Future<void> setEqualizerBandGain(int bandIndex, double gainDb) async {
+    final equalizer = _equalizer;
+    if (equalizer == null) return;
+    final params = await equalizer.parameters;
+    await params.bands[bandIndex].setGain(gainDb);
+  }
 
   // -- AudioHandler overrides: let system-triggered changes (Android Auto,
   // Bluetooth remotes) flow back through the same just_audio calls. Named

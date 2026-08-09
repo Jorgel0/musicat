@@ -1,4 +1,5 @@
 import '../../features/library/domain/track.dart';
+import 'equalizer_info.dart';
 import 'playback_processing_state.dart';
 import 'repeat_mode.dart';
 
@@ -32,4 +33,10 @@ abstract class AudioPlayerController {
   Future<void> skipToQueueItem(int index);
   Future<void> setShuffleModeEnabled(bool enabled);
   Future<void> setRepeat(PlaybackRepeatMode mode);
+
+  /// `null` if no track has been loaded yet, or the equalizer isn't
+  /// supported on this platform (Android only for now — see ADR 0007).
+  Future<EqualizerInfo?> getEqualizerInfo();
+  Future<void> setEqualizerEnabled(bool enabled);
+  Future<void> setEqualizerBandGain(int bandIndex, double gainDb);
 }

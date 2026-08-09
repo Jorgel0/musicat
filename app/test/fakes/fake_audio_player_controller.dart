@@ -1,4 +1,5 @@
 import 'package:musicat/core/audio/audio_player_controller.dart';
+import 'package:musicat/core/audio/equalizer_info.dart';
 import 'package:musicat/core/audio/playback_processing_state.dart';
 import 'package:musicat/core/audio/repeat_mode.dart';
 import 'package:musicat/features/library/domain/track.dart';
@@ -112,6 +113,42 @@ class FakeAudioPlayerController implements AudioPlayerController {
   Future<void> setRepeat(PlaybackRepeatMode mode) async {
     calls.add('setRepeat');
     _repeatMode.add(mode);
+  }
+
+  bool equalizerSupported = true;
+  bool equalizerEnabled = false;
+  final List<double> equalizerBandGains = [0, 0, 0, 0, 0];
+  static const _bandCenterFrequencies = [60.0, 230.0, 910.0, 3600.0, 14000.0];
+
+  @override
+  Future<EqualizerInfo?> getEqualizerInfo() async {
+    calls.add('getEqualizerInfo');
+    if (!equalizerSupported) return null;
+    return EqualizerInfo(
+      enabled: equalizerEnabled,
+      minDecibels: -15,
+      maxDecibels: 15,
+      bands: [
+        for (var i = 0; i < _bandCenterFrequencies.length; i++)
+          EqualizerBandInfo(
+            index: i,
+            centerFrequencyHz: _bandCenterFrequencies[i],
+            gainDb: equalizerBandGains[i],
+          ),
+      ],
+    );
+  }
+
+  @override
+  Future<void> setEqualizerEnabled(bool enabled) async {
+    calls.add('setEqualizerEnabled');
+    equalizerEnabled = enabled;
+  }
+
+  @override
+  Future<void> setEqualizerBandGain(int bandIndex, double gainDb) async {
+    calls.add('setEqualizerBandGain');
+    equalizerBandGains[bandIndex] = gainDb;
   }
 
   Future<void> dispose() async {
