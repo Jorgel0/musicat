@@ -4,6 +4,24 @@ import '../../../core/database/app_database.dart';
 import '../domain/library_repository.dart';
 import '../domain/track.dart';
 
+/// Shared with `features/playlists/data` so both repositories map a
+/// [TrackRow] to the domain [Track] the same way.
+Track trackFromRow(TrackRow row) {
+  return Track(
+    id: row.id,
+    filePath: row.filePath,
+    title: row.title,
+    artist: row.artist,
+    album: row.album,
+    source: TrackSource.values.byName(row.source),
+    trackNumber: row.trackNumber,
+    duration: row.durationMs == null
+        ? null
+        : Duration(milliseconds: row.durationMs!),
+    coverArtPath: row.coverArtPath,
+  );
+}
+
 class DriftLibraryRepository implements LibraryRepository {
   DriftLibraryRepository(this._db);
 
@@ -14,7 +32,7 @@ class DriftLibraryRepository implements LibraryRepository {
     return _db
         .select(_db.tracks)
         .watch()
-        .map((rows) => rows.map(_toDomain).toList(growable: false));
+        .map((rows) => rows.map(trackFromRow).toList(growable: false));
   }
 
   @override
@@ -47,21 +65,5 @@ class DriftLibraryRepository implements LibraryRepository {
           companion,
           onConflict: DoUpdate((_) => companion, target: [_db.tracks.filePath]),
         );
-  }
-
-  Track _toDomain(TrackRow row) {
-    return Track(
-      id: row.id,
-      filePath: row.filePath,
-      title: row.title,
-      artist: row.artist,
-      album: row.album,
-      source: TrackSource.values.byName(row.source),
-      trackNumber: row.trackNumber,
-      duration: row.durationMs == null
-          ? null
-          : Duration(milliseconds: row.durationMs!),
-      coverArtPath: row.coverArtPath,
-    );
   }
 }

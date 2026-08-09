@@ -2,14 +2,29 @@ import 'package:go_router/go_router.dart';
 
 import '../../features/library/presentation/library_screen.dart';
 import '../../features/player/presentation/now_playing_screen.dart';
+import '../../features/playlists/presentation/playlist_detail_screen.dart';
+import '../../features/playlists/presentation/playlists_screen.dart';
 import 'app_shell.dart';
 
 final appRouter = GoRouter(
   routes: [
     ShellRoute(
-      builder: (context, state, child) => AppShell(child: child),
+      builder: (context, state, child) =>
+          AppShell(location: state.uri.path, child: child),
       routes: [
         GoRoute(path: '/', builder: (context, state) => const LibraryScreen()),
+        GoRoute(
+          path: '/playlists',
+          builder: (context, state) => const PlaylistsScreen(),
+          routes: [
+            GoRoute(
+              path: ':id',
+              builder: (context, state) => PlaylistDetailScreen(
+                playlistId: int.parse(state.pathParameters['id']!),
+              ),
+            ),
+          ],
+        ),
       ],
     ),
     GoRoute(

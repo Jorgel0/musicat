@@ -21,12 +21,48 @@ class Tracks extends Table {
   DateTimeColumn get addedAt => dateTime().withDefault(currentDateAndTime)();
 }
 
-@DriftDatabase(tables: [Tracks])
+@DataClassName('PlaylistRow')
+class Playlists extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get name => text()();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+}
+
+@DataClassName('PlaylistTrackRow')
+class PlaylistTracks extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get playlistId =>
+      integer().references(Playlists, #id, onDelete: KeyAction.cascade)();
+  IntColumn get trackId =>
+      integer().references(Tracks, #id, onDelete: KeyAction.cascade)();
+  // Explicit ordering column rather than relying on row/insertion order, so
+  // drag-to-reorder has somewhere deterministic to write to.
+  IntColumn get position => integer()();
+}
+
+@DriftDatabase(tables: [Tracks, Playlists, PlaylistTracks])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(driftDatabase(name: 'musicat'));
 
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+    onCreate: (m) => m.createAll(),
+    onUpgrade: (m, from, to) async {
+      if (from < 2) {
+        await m.createTable(playlists);
+        await m.createTable(playlistTracks);
+      }
+    },
+    // SQLite ignores foreign key constraints (so the playlist_tracks
+    // CASCADE deletes above are a no-op) unless enforcement is turned on
+    // per connection.
+    beforeOpen: (details) async {
+      await customStatement('PRAGMA foreign_keys = ON');
+    },
+  );
 }

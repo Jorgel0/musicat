@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/audio/audio_providers.dart';
+import '../../playlists/presentation/add_to_playlist_sheet.dart';
 import 'library_providers.dart';
 
 class LibraryScreen extends ConsumerWidget {
@@ -45,6 +46,11 @@ class LibraryScreen extends ConsumerWidget {
                     : const Icon(Icons.music_note, size: 48),
                 title: Text(track.title),
                 subtitle: Text('${track.artist} — ${track.album}'),
+                trailing: IconButton(
+                  icon: const Icon(Icons.playlist_add),
+                  tooltip: 'Add to playlist',
+                  onPressed: () => showAddToPlaylistSheet(context, track),
+                ),
                 onTap: () async {
                   final controller = ref.read(audioPlayerControllerProvider);
                   await controller.setQueue(tracks, initialIndex: index);
