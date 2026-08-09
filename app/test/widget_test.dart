@@ -2,9 +2,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:musicat/app.dart';
+import 'package:musicat/core/audio/audio_providers.dart';
 import 'package:musicat/features/library/domain/library_repository.dart';
 import 'package:musicat/features/library/domain/track.dart';
 import 'package:musicat/features/library/presentation/library_providers.dart';
+
+import 'fakes/fake_audio_player_controller.dart';
 
 class _FakeEmptyLibraryRepository implements LibraryRepository {
   @override
@@ -30,6 +33,9 @@ void main() {
         overrides: [
           libraryRepositoryProvider.overrideWithValue(
             _FakeEmptyLibraryRepository(),
+          ),
+          audioPlayerControllerProvider.overrideWithValue(
+            FakeAudioPlayerController(),
           ),
         ],
         child: const MusicatApp(),

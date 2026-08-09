@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Prevents R8 from stripping audio_service's default notification icons,
+     since we don't yet provide our own. See
+     https://pub.dev/packages/audio_service#android-setup. -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+  tools:keep="@drawable/*" />

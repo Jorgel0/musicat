@@ -43,6 +43,14 @@ dependencies:
   file_picker: ^11.0.3
   audiotags: ^1.4.5
   drift_flutter: ^0.3.1
+  just_audio: ^0.10.6
+  audio_service: ^0.18.19
+  audio_session: ^0.2.4
+  rxdart: ^0.28.0
+  just_audio_media_kit: ^2.1.0
+  media_kit: ^1.2.6
+  media_kit_libs_linux: ^1.2.1
+  media_kit_libs_windows_audio: ^1.0.9
 
 dev_dependencies:
   flutter_test:

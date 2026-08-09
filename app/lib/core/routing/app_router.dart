@@ -1,9 +1,20 @@
 import 'package:go_router/go_router.dart';
 
 import '../../features/library/presentation/library_screen.dart';
+import '../../features/player/presentation/now_playing_screen.dart';
+import 'app_shell.dart';
 
 final appRouter = GoRouter(
   routes: [
-    GoRoute(path: '/', builder: (context, state) => const LibraryScreen()),
+    ShellRoute(
+      builder: (context, state, child) => AppShell(child: child),
+      routes: [
+        GoRoute(path: '/', builder: (context, state) => const LibraryScreen()),
+      ],
+    ),
+    GoRoute(
+      path: '/now-playing',
+      builder: (context, state) => const NowPlayingScreen(),
+    ),
   ],
 );

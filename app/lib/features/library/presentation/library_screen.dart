@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/audio/audio_providers.dart';
 import 'library_providers.dart';
 
 class LibraryScreen extends ConsumerWidget {
@@ -44,6 +45,11 @@ class LibraryScreen extends ConsumerWidget {
                     : const Icon(Icons.music_note, size: 48),
                 title: Text(track.title),
                 subtitle: Text('${track.artist} — ${track.album}'),
+                onTap: () async {
+                  final controller = ref.read(audioPlayerControllerProvider);
+                  await controller.setQueue(tracks, initialIndex: index);
+                  await controller.play();
+                },
               );
             },
           );

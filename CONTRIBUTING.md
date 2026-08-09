@@ -8,7 +8,10 @@ Thanks for your interest in contributing!
   constraint.
 - Android SDK (cmdline-tools + platform-tools) for the Android target.
 - On Linux, the desktop target needs `clang`, `cmake`, `ninja`, `pkg-config`,
-  and GTK 3 development headers.
+  and GTK 3 development headers, plus `libmpv` (e.g. `pacman -S mpv` on
+  Arch, `apt install libmpv-dev` on Debian/Ubuntu) — audio playback on
+  Linux runs through `media_kit`/libmpv, since `just_audio` has no native
+  Linux backend of its own. See `docs/adr/0006-just-audio-media-kit.md`.
 
 ```
 cd app
