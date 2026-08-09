@@ -44,6 +44,31 @@ class MusicatAudioHandler extends BaseAudioHandler
       _currentTrackSubject.add(track);
       if (track != null) mediaItem.add(_trackToMediaItem(track));
     });
+
+    // Safety net for a rare, not-yet-reproduced report: the player once sat
+    // on ProcessingState.completed with repeat-all on and never advanced
+    // back to the first track. If that happens again, nudge it forward
+    // manually instead of silently stalling. This is a no-op in the normal
+    // case, since just_audio/media_kit will have already advanced within
+    // the delay below.
+    _player.processingStateStream
+        .where((state) => state == ProcessingState.completed)
+        .listen((_) async {
+          final loopMode = _player.loopMode;
+          if (loopMode == LoopMode.off) return;
+          final stalledIndex = _player.currentIndex;
+          await Future<void>.delayed(const Duration(milliseconds: 800));
+          final stillStalled =
+              _player.processingState == ProcessingState.completed &&
+              _player.currentIndex == stalledIndex;
+          if (!stillStalled) return;
+          if (loopMode == LoopMode.all) {
+            await _player.seek(Duration.zero, index: 0);
+          } else {
+            await _player.seek(Duration.zero, index: stalledIndex);
+          }
+          await _player.play();
+        });
   }
 
   @override
