@@ -6,6 +6,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/audio/audio_providers.dart';
 import '../../../core/audio/repeat_mode.dart';
 import '../../library/domain/track.dart';
+import '../../settings/audio/presentation/sleep_timer_controller.dart';
+import '../../settings/audio/presentation/sleep_timer_sheet.dart';
 import 'player_providers.dart';
 
 class NowPlayingScreen extends ConsumerWidget {
@@ -20,6 +22,7 @@ class NowPlayingScreen extends ConsumerWidget {
     final shuffleEnabled = ref.watch(shuffleModeEnabledProvider).value ?? false;
     final repeatMode =
         ref.watch(repeatModeProvider).value ?? PlaybackRepeatMode.off;
+    final sleepTimer = ref.watch(sleepTimerControllerProvider);
     final controller = ref.read(audioPlayerControllerProvider);
 
     return Scaffold(
@@ -29,6 +32,18 @@ class NowPlayingScreen extends ConsumerWidget {
           onPressed: () => Navigator.of(context).maybePop(),
         ),
         title: const Text('Now Playing'),
+        actions: [
+          IconButton(
+            tooltip: sleepTimer.isActive ? 'Sleep timer active' : 'Sleep timer',
+            icon: Icon(
+              sleepTimer.isActive ? Icons.bedtime : Icons.bedtime_outlined,
+              color: sleepTimer.isActive
+                  ? Theme.of(context).colorScheme.primary
+                  : null,
+            ),
+            onPressed: () => showSleepTimerSheet(context),
+          ),
+        ],
       ),
       body: track == null
           ? const Center(child: Text('Nothing playing yet.'))
