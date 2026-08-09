@@ -66,4 +66,30 @@ class DriftLibraryRepository implements LibraryRepository {
           onConflict: DoUpdate((_) => companion, target: [_db.tracks.filePath]),
         );
   }
+
+  @override
+  Stream<List<String>> watchFolders() {
+    final query = _db.select(_db.watchedFolders)
+      ..orderBy([(f) => OrderingTerm(expression: f.addedAt)]);
+    return query.watch().map(
+      (rows) => rows.map((row) => row.path).toList(growable: false),
+    );
+  }
+
+  @override
+  Future<void> addFolder(String path) {
+    return _db
+        .into(_db.watchedFolders)
+        .insert(
+          WatchedFoldersCompanion.insert(path: path),
+          mode: InsertMode.insertOrIgnore,
+        );
+  }
+
+  @override
+  Future<void> removeFolder(String path) {
+    return (_db.delete(
+      _db.watchedFolders,
+    )..where((f) => f.path.equals(path))).go();
+  }
 }

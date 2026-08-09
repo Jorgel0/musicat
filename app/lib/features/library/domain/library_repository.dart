@@ -13,4 +13,10 @@ abstract interface class LibraryRepository {
     Duration? duration,
     String? coverArtPath,
   });
+
+  /// Folders added via "Add folder", so Settings can list/re-scan/forget
+  /// them without inferring folders back out of track file paths.
+  Stream<List<String>> watchFolders();
+  Future<void> addFolder(String path);
+  Future<void> removeFolder(String path);
 }

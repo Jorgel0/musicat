@@ -10,12 +10,13 @@ class MusicatApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final themeMode = ref.watch(themeModeProvider);
+    final accentColor = ref.watch(accentColorProvider);
     return MaterialApp.router(
       title: 'Musicat',
       debugShowCheckedModeBanner: false,
       themeMode: themeMode,
-      theme: MusicatTheme.light,
-      darkTheme: MusicatTheme.dark,
+      theme: MusicatTheme.light(accentColor),
+      darkTheme: MusicatTheme.dark(accentColor),
       routerConfig: appRouter,
     );
   }

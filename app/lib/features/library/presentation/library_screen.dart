@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,6 +8,7 @@ import '../../playlists/presentation/add_to_playlist_sheet.dart';
 import 'albums_tab.dart';
 import 'artists_tab.dart';
 import 'library_providers.dart';
+import 'pick_and_scan_folder.dart';
 
 class LibraryScreen extends ConsumerWidget {
   const LibraryScreen({super.key});
@@ -31,27 +31,13 @@ class LibraryScreen extends ConsumerWidget {
         floatingActionButton: FloatingActionButton.extended(
           icon: const Icon(Icons.create_new_folder_outlined),
           label: const Text('Add folder'),
-          onPressed: () => _pickAndScanFolder(context, ref),
+          onPressed: () => pickAndScanFolder(context, ref),
         ),
         body: const TabBarView(
           children: [_SongsTab(), AlbumsTab(), ArtistsTab()],
         ),
       ),
     );
-  }
-
-  Future<void> _pickAndScanFolder(BuildContext context, WidgetRef ref) async {
-    final folderPath = await FilePicker.getDirectoryPath();
-    if (folderPath == null) return;
-
-    final imported = await ref
-        .read(libraryScannerProvider)
-        .scanFolder(folderPath);
-
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('Imported $imported track(s).')));
   }
 }
 

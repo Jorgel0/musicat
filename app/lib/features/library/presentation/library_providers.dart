@@ -30,3 +30,7 @@ final artistsProvider = Provider<List<ArtistSummary>>((ref) {
   final tracks = ref.watch(tracksProvider).value ?? const [];
   return groupTracksByArtist(tracks);
 });
+
+final watchedFoldersProvider = StreamProvider<List<String>>((ref) {
+  return ref.watch(libraryRepositoryProvider).watchFolders();
+});

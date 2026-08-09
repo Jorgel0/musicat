@@ -5,6 +5,7 @@ import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 import 'app.dart';
 import 'core/audio/audio_providers.dart';
 import 'core/audio/audio_service_bootstrap.dart';
+import 'core/design_system/theme.dart';
 
 Future<void> bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -14,10 +15,17 @@ Future<void> bootstrap() async {
   // See docs/adr/0006-just-audio-media-kit.md.
   JustAudioMediaKit.ensureInitialized();
   final audioHandler = await initAudioService();
+  final themePreferences = await loadThemePreferences();
   runApp(
     ProviderScope(
       overrides: [
         audioPlayerControllerProvider.overrideWithValue(audioHandler),
+        themeModeProvider.overrideWith(
+          () => ThemeModeController(themePreferences.themeMode),
+        ),
+        accentColorProvider.overrideWith(
+          () => AccentColorController(themePreferences.accentColor),
+        ),
       ],
       child: const MusicatApp(),
     ),

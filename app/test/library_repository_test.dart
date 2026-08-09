@@ -59,4 +59,31 @@ void main() {
       expect(tracks.single.title, 'New title');
     },
   );
+
+  test('addFolder then watchFolders emits it', () async {
+    await repository.addFolder('/music/library');
+
+    final folders = await repository.watchFolders().first;
+
+    expect(folders, ['/music/library']);
+  });
+
+  test('addFolder ignores a path that is already watched', () async {
+    await repository.addFolder('/music/library');
+    await repository.addFolder('/music/library');
+
+    final folders = await repository.watchFolders().first;
+
+    expect(folders, hasLength(1));
+  });
+
+  test('removeFolder stops watching it', () async {
+    await repository.addFolder('/music/library');
+
+    await repository.removeFolder('/music/library');
+
+    final folders = await repository.watchFolders().first;
+
+    expect(folders, isEmpty);
+  });
 }

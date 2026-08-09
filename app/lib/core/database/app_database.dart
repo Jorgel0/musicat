@@ -40,14 +40,23 @@ class PlaylistTracks extends Table {
   IntColumn get position => integer()();
 }
 
-@DriftDatabase(tables: [Tracks, Playlists, PlaylistTracks])
+/// Folders the user has added via "Add folder" — tracked separately from
+/// the tracks they produced so Settings can list/re-scan/forget them
+/// without having to infer folders back out of file paths.
+class WatchedFolders extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get path => text().unique()();
+  DateTimeColumn get addedAt => dateTime().withDefault(currentDateAndTime)();
+}
+
+@DriftDatabase(tables: [Tracks, Playlists, PlaylistTracks, WatchedFolders])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(driftDatabase(name: 'musicat'));
 
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -56,6 +65,9 @@ class AppDatabase extends _$AppDatabase {
       if (from < 2) {
         await m.createTable(playlists);
         await m.createTable(playlistTracks);
+      }
+      if (from < 3) {
+        await m.createTable(watchedFolders);
       }
     },
     // SQLite ignores foreign key constraints (so the playlist_tracks
