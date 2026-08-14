@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../../../core/design_system/theme.dart';
 import '../../../library/presentation/library_providers.dart';
 import '../../../library/presentation/pick_and_scan_folder.dart';
+import '../../audio/presentation/normalization_controller.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -14,6 +15,7 @@ class SettingsScreen extends ConsumerWidget {
     final themeMode = ref.watch(themeModeProvider);
     final accentColor = ref.watch(accentColorProvider);
     final foldersAsync = ref.watch(watchedFoldersProvider);
+    final normalizationEnabled = ref.watch(normalizationControllerProvider);
 
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
@@ -81,6 +83,19 @@ class SettingsScreen extends ConsumerWidget {
             subtitle: const Text('Android only, for now'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => context.push('/settings/equalizer'),
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.volume_up_outlined),
+            title: const Text('Normalize volume'),
+            subtitle: const Text(
+              'Uses ReplayGain tags to even out loud/quiet tracks. '
+              'No effect on files without them (common with Soulseek '
+              'downloads).',
+            ),
+            value: normalizationEnabled,
+            onChanged: (value) => ref
+                .read(normalizationControllerProvider.notifier)
+                .setEnabled(value),
           ),
           const Divider(height: 32),
           const _SectionHeader('Library folders'),

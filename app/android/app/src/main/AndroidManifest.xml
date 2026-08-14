@@ -9,6 +9,13 @@
     <!-- Android 13+ requires runtime permission to show any notification,
          including the media playback one. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- The folder picker (file_picker's SAF directory chooser) only grants
+         a content:// URI permission; the library scanner reads folders with
+         plain dart:io, which needs its own storage permission to see
+         anything outside the app's private storage. See
+         docs/adr/0009-android-storage-permission.md. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
 
     <application
         android:label="musicat"

@@ -6,6 +6,7 @@ import 'app.dart';
 import 'core/audio/audio_providers.dart';
 import 'core/audio/audio_service_bootstrap.dart';
 import 'core/design_system/theme.dart';
+import 'features/settings/audio/presentation/normalization_controller.dart';
 
 Future<void> bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,6 +17,10 @@ Future<void> bootstrap() async {
   JustAudioMediaKit.ensureInitialized();
   final audioHandler = await initAudioService();
   final themePreferences = await loadThemePreferences();
+  final normalizationEnabled = await loadNormalizationPreference();
+  // The handler defaults to normalization on; bring it in line with the
+  // persisted preference before the first track ever plays.
+  await audioHandler.setNormalizationEnabled(normalizationEnabled);
   runApp(
     ProviderScope(
       overrides: [
@@ -25,6 +30,9 @@ Future<void> bootstrap() async {
         ),
         accentColorProvider.overrideWith(
           () => AccentColorController(themePreferences.accentColor),
+        ),
+        normalizationControllerProvider.overrideWith(
+          () => NormalizationController(normalizationEnabled),
         ),
       ],
       child: const MusicatApp(),

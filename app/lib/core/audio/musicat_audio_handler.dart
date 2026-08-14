@@ -9,6 +9,7 @@ import '../../features/library/domain/track.dart';
 import 'audio_player_controller.dart';
 import 'equalizer_info.dart';
 import 'playback_processing_state.dart';
+import 'replay_gain_reader.dart';
 import 'repeat_mode.dart';
 
 /// [AudioPlayerController] backed by `just_audio` (decoding/playback) and
@@ -40,6 +41,12 @@ class MusicatAudioHandler extends BaseAudioHandler
   final _queueSubject = BehaviorSubject<List<Track>>.seeded(const []);
   final _currentTrackSubject = BehaviorSubject<Track?>.seeded(null);
 
+  // ReplayGain-based volume normalization — on by default (it's a no-op
+  // for the very common case of a file with no ReplayGain tags at all).
+  // See ADR 0008.
+  bool _normalizationEnabled = true;
+  final _normalizationEnabledSubject = BehaviorSubject<bool>.seeded(true);
+
   Future<void> _init() async {
     final session = await AudioSession.instance;
     await session.configure(const AudioSessionConfiguration.music());
@@ -58,6 +65,7 @@ class MusicatAudioHandler extends BaseAudioHandler
       _currentTrackSubject.add(track);
       if (track != null) mediaItem.add(_trackToMediaItem(track));
     });
+    _currentTrackSubject.stream.listen(_applyNormalization);
 
     // Safety net for a rare, not-yet-reproduced report: the player once sat
     // on ProcessingState.completed with repeat-all on and never advanced
@@ -198,6 +206,26 @@ class MusicatAudioHandler extends BaseAudioHandler
     if (equalizer == null) return;
     final params = await equalizer.parameters;
     await params.bands[bandIndex].setGain(gainDb);
+  }
+
+  @override
+  Stream<bool> get normalizationEnabledStream =>
+      _normalizationEnabledSubject.stream;
+
+  @override
+  Future<void> setNormalizationEnabled(bool enabled) async {
+    _normalizationEnabled = enabled;
+    _normalizationEnabledSubject.add(enabled);
+    await _applyNormalization(_currentTrackSubject.value);
+  }
+
+  Future<void> _applyNormalization(Track? track) async {
+    if (!_normalizationEnabled || track == null) {
+      await _player.setVolume(1.0);
+      return;
+    }
+    final gainDb = readTrackReplayGainDb(track.filePath);
+    await _player.setVolume(volumeFromReplayGainDb(gainDb));
   }
 
   // -- AudioHandler overrides: let system-triggered changes (Android Auto,

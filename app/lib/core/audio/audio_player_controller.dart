@@ -39,4 +39,10 @@ abstract class AudioPlayerController {
   Future<EqualizerInfo?> getEqualizerInfo();
   Future<void> setEqualizerEnabled(bool enabled);
   Future<void> setEqualizerBandGain(int bandIndex, double gainDb);
+
+  /// Whether ReplayGain-based volume normalization is applied on track
+  /// change. Only has an audible effect on files that actually carry
+  /// ReplayGain tags — see ADR 0008.
+  Stream<bool> get normalizationEnabledStream;
+  Future<void> setNormalizationEnabled(bool enabled);
 }

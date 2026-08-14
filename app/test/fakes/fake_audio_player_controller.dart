@@ -151,6 +151,17 @@ class FakeAudioPlayerController implements AudioPlayerController {
     equalizerBandGains[bandIndex] = gainDb;
   }
 
+  final _normalizationEnabled = BehaviorSubject.seeded(true);
+
+  @override
+  Stream<bool> get normalizationEnabledStream => _normalizationEnabled.stream;
+
+  @override
+  Future<void> setNormalizationEnabled(bool enabled) async {
+    calls.add('setNormalizationEnabled');
+    _normalizationEnabled.add(enabled);
+  }
+
   Future<void> dispose() async {
     await Future.wait([
       _playing.close(),
@@ -162,6 +173,7 @@ class FakeAudioPlayerController implements AudioPlayerController {
       _shuffleModeEnabled.close(),
       _repeatMode.close(),
       _processingState.close(),
+      _normalizationEnabled.close(),
     ]);
   }
 }
