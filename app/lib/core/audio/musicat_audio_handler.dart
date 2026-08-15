@@ -46,6 +46,13 @@ class MusicatAudioHandler extends BaseAudioHandler
   // See ADR 0008.
   bool _normalizationEnabled = true;
   final _normalizationEnabledSubject = BehaviorSubject<bool>.seeded(true);
+  double _replayGainVolume = 1.0;
+
+  // User-set volume (the desktop volume slider — see ADR 0014), applied on
+  // top of the ReplayGain factor above rather than replacing it: the
+  // effective player volume is always the product of the two.
+  double _userVolume = 1.0;
+  final _volumeSubject = BehaviorSubject<double>.seeded(1.0);
 
   Future<void> _init() async {
     final session = await AudioSession.instance;
@@ -221,12 +228,26 @@ class MusicatAudioHandler extends BaseAudioHandler
 
   Future<void> _applyNormalization(Track? track) async {
     if (!_normalizationEnabled || track == null) {
-      await _player.setVolume(1.0);
-      return;
+      _replayGainVolume = 1.0;
+    } else {
+      final gainDb = readTrackReplayGainDb(track.filePath);
+      _replayGainVolume = volumeFromReplayGainDb(gainDb);
     }
-    final gainDb = readTrackReplayGainDb(track.filePath);
-    await _player.setVolume(volumeFromReplayGainDb(gainDb));
+    await _applyVolume();
   }
+
+  @override
+  Stream<double> get volumeStream => _volumeSubject.stream;
+
+  @override
+  Future<void> setVolume(double volume) async {
+    _userVolume = volume.clamp(0.0, 1.0);
+    _volumeSubject.add(_userVolume);
+    await _applyVolume();
+  }
+
+  Future<void> _applyVolume() =>
+      _player.setVolume(_userVolume * _replayGainVolume);
 
   // -- AudioHandler overrides: let system-triggered changes (Android Auto,
   // Bluetooth remotes) flow back through the same just_audio calls. Named

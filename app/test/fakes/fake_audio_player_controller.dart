@@ -162,6 +162,17 @@ class FakeAudioPlayerController implements AudioPlayerController {
     _normalizationEnabled.add(enabled);
   }
 
+  final _volume = BehaviorSubject<double>.seeded(1.0);
+
+  @override
+  Stream<double> get volumeStream => _volume.stream;
+
+  @override
+  Future<void> setVolume(double volume) async {
+    calls.add('setVolume');
+    _volume.add(volume.clamp(0.0, 1.0));
+  }
+
   Future<void> dispose() async {
     await Future.wait([
       _playing.close(),
@@ -174,6 +185,7 @@ class FakeAudioPlayerController implements AudioPlayerController {
       _repeatMode.close(),
       _processingState.close(),
       _normalizationEnabled.close(),
+      _volume.close(),
     ]);
   }
 }

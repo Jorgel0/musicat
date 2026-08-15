@@ -37,6 +37,10 @@ final processingStateProvider = StreamProvider<PlaybackProcessingState>((ref) {
   return ref.watch(audioPlayerControllerProvider).processingStateStream;
 });
 
+final volumeProvider = StreamProvider<double>((ref) {
+  return ref.watch(audioPlayerControllerProvider).volumeStream;
+});
+
 final _currentTrackStreamProvider = StreamProvider<Track?>((ref) {
   return ref.watch(audioPlayerControllerProvider).currentTrackStream;
 });

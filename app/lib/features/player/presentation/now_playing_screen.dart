@@ -10,6 +10,10 @@ import '../../settings/audio/presentation/sleep_timer_controller.dart';
 import '../../settings/audio/presentation/sleep_timer_sheet.dart';
 import 'player_providers.dart';
 
+// Desktop-only (see ADR 0014) — Android relies on the hardware volume keys.
+bool get _showVolumeControl => Platform.isLinux || Platform.isWindows;
+const _volumeControlWidth = 200.0;
+
 class NowPlayingScreen extends ConsumerWidget {
   const NowPlayingScreen({super.key});
 
@@ -76,50 +80,72 @@ class NowPlayingScreen extends ConsumerWidget {
                       onSeek: controller.seek,
                     ),
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        IconButton(
-                          icon: Icon(
-                            Icons.shuffle,
-                            color: shuffleEnabled
-                                ? Theme.of(context).colorScheme.primary
-                                : null,
+                        // Balances the volume control's width on the right
+                        // with an equal invisible gap on the left, so the
+                        // button row below stays centered on the whole
+                        // screen instead of drifting left.
+                        if (_showVolumeControl)
+                          const SizedBox(width: _volumeControlWidth),
+                        Expanded(
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              IconButton(
+                                icon: Icon(
+                                  Icons.shuffle,
+                                  color: shuffleEnabled
+                                      ? Theme.of(context).colorScheme.primary
+                                      : null,
+                                ),
+                                onPressed: () => controller
+                                    .setShuffleModeEnabled(!shuffleEnabled),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.skip_previous),
+                                iconSize: 36,
+                                onPressed: controller.skipToPrevious,
+                              ),
+                              IconButton(
+                                icon: Icon(
+                                  playing
+                                      ? Icons.pause_circle_filled
+                                      : Icons.play_circle_filled,
+                                ),
+                                iconSize: 64,
+                                onPressed: () => playing
+                                    ? controller.pause()
+                                    : controller.play(),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.skip_next),
+                                iconSize: 36,
+                                onPressed: controller.skipToNext,
+                              ),
+                              IconButton(
+                                icon: Icon(
+                                  repeatMode == PlaybackRepeatMode.one
+                                      ? Icons.repeat_one
+                                      : Icons.repeat,
+                                  color: repeatMode != PlaybackRepeatMode.off
+                                      ? Theme.of(context).colorScheme.primary
+                                      : null,
+                                ),
+                                onPressed: () => controller.setRepeat(
+                                  _nextRepeatMode(repeatMode),
+                                ),
+                              ),
+                            ],
                           ),
-                          onPressed: () =>
-                              controller.setShuffleModeEnabled(!shuffleEnabled),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.skip_previous),
-                          iconSize: 36,
-                          onPressed: controller.skipToPrevious,
-                        ),
-                        IconButton(
-                          icon: Icon(
-                            playing
-                                ? Icons.pause_circle_filled
-                                : Icons.play_circle_filled,
+                        if (_showVolumeControl)
+                          SizedBox(
+                            width: _volumeControlWidth,
+                            child: _VolumeControl(
+                              volume: ref.watch(volumeProvider).value ?? 1.0,
+                              onChanged: controller.setVolume,
+                            ),
                           ),
-                          iconSize: 64,
-                          onPressed: () =>
-                              playing ? controller.pause() : controller.play(),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.skip_next),
-                          iconSize: 36,
-                          onPressed: controller.skipToNext,
-                        ),
-                        IconButton(
-                          icon: Icon(
-                            repeatMode == PlaybackRepeatMode.one
-                                ? Icons.repeat_one
-                                : Icons.repeat,
-                            color: repeatMode != PlaybackRepeatMode.off
-                                ? Theme.of(context).colorScheme.primary
-                                : null,
-                          ),
-                          onPressed: () =>
-                              controller.setRepeat(_nextRepeatMode(repeatMode)),
-                        ),
                       ],
                     ),
                     const SizedBox(height: 16),
@@ -136,6 +162,30 @@ PlaybackRepeatMode _nextRepeatMode(PlaybackRepeatMode mode) => switch (mode) {
   PlaybackRepeatMode.all => PlaybackRepeatMode.one,
   PlaybackRepeatMode.one => PlaybackRepeatMode.off,
 };
+
+class _VolumeControl extends StatelessWidget {
+  const _VolumeControl({required this.volume, required this.onChanged});
+
+  final double volume;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(volume == 0 ? Icons.volume_off : Icons.volume_up, size: 20),
+        Expanded(
+          child: Slider(
+            min: 0,
+            max: 1,
+            value: volume.clamp(0.0, 1.0),
+            onChanged: onChanged,
+          ),
+        ),
+      ],
+    );
+  }
+}
 
 class _Cover extends StatelessWidget {
   const _Cover({required this.track});

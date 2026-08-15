@@ -107,4 +107,26 @@ void main() {
     await tester.pump();
     expect(controller.calls, contains('setRepeat'));
   });
+
+  testWidgets(
+    'NowPlayingScreen shows a volume slider on desktop and wires it',
+    (tester) async {
+      await tester.pumpWidget(wrap(const NowPlayingScreen()));
+      await controller.setQueue([_track(1, 'Song One')]);
+      await tester.pump();
+      await tester.pump();
+
+      // The seek bar is also a Slider — the volume control is the second
+      // one, gated to desktop platforms (see ADR 0014); this test only
+      // runs on desktop hosts (this dev machine, CI's Linux runner).
+      final sliders = find.byType(Slider);
+      expect(sliders, findsNWidgets(2));
+
+      final volumeSlider = tester.widget<Slider>(sliders.last);
+      volumeSlider.onChanged!(0.5);
+      await tester.pump();
+
+      expect(controller.calls, contains('setVolume'));
+    },
+  );
 }

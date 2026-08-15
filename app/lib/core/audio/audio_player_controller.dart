@@ -45,4 +45,10 @@ abstract class AudioPlayerController {
   /// ReplayGain tags — see ADR 0008.
   Stream<bool> get normalizationEnabledStream;
   Future<void> setNormalizationEnabled(bool enabled);
+
+  /// The user-set volume level, from 0.0 to 1.0 — independent of any
+  /// ReplayGain adjustment, which is applied on top of this rather than
+  /// replaced by it. See ADR 0014.
+  Stream<double> get volumeStream;
+  Future<void> setVolume(double volume);
 }
