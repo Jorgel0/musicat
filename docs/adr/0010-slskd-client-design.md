@@ -77,13 +77,18 @@ docs alone:
   reactive — the Search screen's presentation layer will drive its own
   polling timer against `getSearch`/`getDownloads`, same pattern as the
   sleep timer's plain-Dart `Timer`.
-- All of this is verified today only against mocked HTTP responses
-  (`test/slskd_soulseek_client_test.dart`, using a hand-written
-  `FakeHttpAdapter` rather than a mocking framework, consistent with
-  `FakeAudioPlayerController`). The blocking-POST/live-GET assumption in
-  particular (point 2 above) needs confirming against a real slskd
-  instance once one is available — everything else here is a direct
-  reading of slskd's source, not a guess.
+- Unit-tested against mocked HTTP (`test/slskd_soulseek_client_test.dart`,
+  using a hand-written `FakeHttpAdapter` rather than a mocking framework,
+  consistent with `FakeAudioPlayerController`), and separately verified
+  end-to-end against a real self-hosted `slskd` instance (Docker on a
+  Debian 12 CT): a real search (`"daft punk one more time"`) showed the
+  `inProgress` → `completed` transition live via polling while the
+  initiating POST was presumably still blocked server-side, real search
+  results parsed correctly (hundreds of peers, real filenames/sizes/
+  bitrates), and a real download was enqueued, tracked through
+  `inProgress` → `succeeded` with correct byte counts, and the file
+  landed on disk exactly where expected. The blocking-POST/live-GET design
+  (point 2 above) is therefore confirmed, not just inferred from source.
 - slskd's license is AGPL-3.0-only with additional terms that only trigger
   on distributing a *modified* copy (see `FORKING.md`); talking to an
   unmodified, self-hosted instance purely over its REST API — as this
