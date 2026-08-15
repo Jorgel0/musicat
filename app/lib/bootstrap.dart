@@ -7,6 +7,7 @@ import 'core/audio/audio_providers.dart';
 import 'core/audio/audio_service_bootstrap.dart';
 import 'core/design_system/theme.dart';
 import 'features/settings/audio/presentation/normalization_controller.dart';
+import 'features/settings/soulseek/presentation/soulseek_config_controller.dart';
 
 Future<void> bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,6 +22,7 @@ Future<void> bootstrap() async {
   // The handler defaults to normalization on; bring it in line with the
   // persisted preference before the first track ever plays.
   await audioHandler.setNormalizationEnabled(normalizationEnabled);
+  final soulseekConfig = await loadSoulseekConfigPreference();
   runApp(
     ProviderScope(
       overrides: [
@@ -33,6 +35,9 @@ Future<void> bootstrap() async {
         ),
         normalizationControllerProvider.overrideWith(
           () => NormalizationController(normalizationEnabled),
+        ),
+        soulseekConfigControllerProvider.overrideWith(
+          () => SoulseekConfigController(soulseekConfig),
         ),
       ],
       child: const MusicatApp(),

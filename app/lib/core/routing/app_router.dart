@@ -8,6 +8,7 @@ import '../../features/playlists/presentation/playlist_detail_screen.dart';
 import '../../features/playlists/presentation/playlists_screen.dart';
 import '../../features/settings/audio/presentation/equalizer_screen.dart';
 import '../../features/settings/general/presentation/settings_screen.dart';
+import '../../features/settings/soulseek/presentation/soulseek_settings_screen.dart';
 import 'app_shell.dart';
 
 final appRouter = GoRouter(
@@ -52,6 +53,10 @@ final appRouter = GoRouter(
             GoRoute(
               path: 'equalizer',
               builder: (context, state) => const EqualizerScreen(),
+            ),
+            GoRoute(
+              path: 'soulseek',
+              builder: (context, state) => const SoulseekSettingsScreen(),
             ),
           ],
         ),

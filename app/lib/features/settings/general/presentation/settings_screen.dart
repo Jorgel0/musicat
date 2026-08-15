@@ -98,6 +98,15 @@ class SettingsScreen extends ConsumerWidget {
                 .setEnabled(value),
           ),
           const Divider(height: 32),
+          const _SectionHeader('Soulseek'),
+          ListTile(
+            leading: const Icon(Icons.cloud_outlined),
+            title: const Text('Backend'),
+            subtitle: const Text('Connect to a self-hosted slskd instance'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push('/settings/soulseek'),
+          ),
+          const Divider(height: 32),
           const _SectionHeader('Library folders'),
           foldersAsync.when(
             loading: () => const Padding(

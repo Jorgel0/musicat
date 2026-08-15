@@ -33,13 +33,21 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('No folders added yet.'), findsOneWidget);
     expect(container.read(themeModeProvider), ThemeMode.system);
 
     await tester.tap(find.text('Dark'));
     await tester.pumpAndSettle();
 
     expect(container.read(themeModeProvider), ThemeMode.dark);
+
+    // "No folders added yet." sits below the Soulseek section, off the
+    // default test viewport — scroll it into view before asserting.
+    await tester.scrollUntilVisible(
+      find.text('No folders added yet.'),
+      500.0,
+      scrollable: find.byType(Scrollable),
+    );
+    expect(find.text('No folders added yet.'), findsOneWidget);
   });
 
   testWidgets('switches the accent color', (tester) async {
