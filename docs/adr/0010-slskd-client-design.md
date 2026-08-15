@@ -94,3 +94,11 @@ docs alone:
   unmodified, self-hosted instance purely over its REST API — as this
   phase does — doesn't trigger those terms. Revisit if a later phase
   (Musicat Server wrapping slskd) changes that relationship.
+- **The presentation-layer poller (`SearchController`) must not poll
+  immediately after `startSearch` returns.** Confirmed against the real
+  instance: `startSearch`'s POST is still in flight (fire-and-forget) the
+  moment it returns the client-generated id, and an immediate `getSearch`
+  call reliably 404s — not an occasional race, but the normal case, since
+  nothing has forced the server to actually process the POST yet. Firing
+  the first `getSearch` from the polling `Timer.periodic`'s first tick
+  (~1s later) instead of eagerly avoids it in practice.

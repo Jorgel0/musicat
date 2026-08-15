@@ -32,7 +32,9 @@ class FakeHttpAdapter implements HttpClientAdapter {
       jsonEncode(response.body),
       response.statusCode,
       headers: {
-        Headers.contentTypeHeader: [Headers.jsonContentType],
+        Headers.contentTypeHeader: [
+          response.contentType ?? Headers.jsonContentType,
+        ],
       },
     );
   }
@@ -42,8 +44,14 @@ class FakeHttpAdapter implements HttpClientAdapter {
 }
 
 class FakeHttpResponse {
-  const FakeHttpResponse(this.statusCode, this.body);
+  const FakeHttpResponse(this.statusCode, this.body, {this.contentType});
 
   final int statusCode;
   final Object body;
+
+  /// Defaults to `application/json` — override to reproduce a real
+  /// service that serves JSON under a different content-type (e.g.
+  /// iTunes Search's `text/javascript`), which dio's default transformer
+  /// treats differently from an explicit `application/json`.
+  final String? contentType;
 }

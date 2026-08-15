@@ -12,12 +12,13 @@ class AppShell extends StatelessWidget {
   final String location;
 
   int get _currentIndex {
-    if (location.startsWith('/playlists')) return 1;
-    if (location.startsWith('/settings')) return 2;
+    if (location.startsWith('/search')) return 1;
+    if (location.startsWith('/playlists')) return 2;
+    if (location.startsWith('/settings')) return 3;
     return 0;
   }
 
-  static const _destinations = ['/', '/playlists', '/settings'];
+  static const _destinations = ['/', '/search', '/playlists', '/settings'];
 
   @override
   Widget build(BuildContext context) {
@@ -35,6 +36,11 @@ class AppShell extends StatelessWidget {
                 icon: Icon(Icons.library_music_outlined),
                 selectedIcon: Icon(Icons.library_music),
                 label: 'Library',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.search_outlined),
+                selectedIcon: Icon(Icons.search),
+                label: 'Search',
               ),
               NavigationDestination(
                 icon: Icon(Icons.queue_music_outlined),

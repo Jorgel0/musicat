@@ -6,6 +6,7 @@ import '../../features/library/presentation/library_screen.dart';
 import '../../features/player/presentation/now_playing_screen.dart';
 import '../../features/playlists/presentation/playlist_detail_screen.dart';
 import '../../features/playlists/presentation/playlists_screen.dart';
+import '../../features/search/presentation/search_screen.dart';
 import '../../features/settings/audio/presentation/equalizer_screen.dart';
 import '../../features/settings/general/presentation/settings_screen.dart';
 import '../../features/settings/soulseek/presentation/soulseek_settings_screen.dart';
@@ -18,6 +19,10 @@ final appRouter = GoRouter(
           AppShell(location: state.uri.path, child: child),
       routes: [
         GoRoute(path: '/', builder: (context, state) => const LibraryScreen()),
+        GoRoute(
+          path: '/search',
+          builder: (context, state) => const SearchScreen(),
+        ),
         GoRoute(
           path: '/albums/detail',
           builder: (context, state) {
