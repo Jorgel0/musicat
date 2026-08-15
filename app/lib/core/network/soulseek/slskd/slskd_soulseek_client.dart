@@ -172,6 +172,18 @@ class SlskdSoulseekClient implements SoulseekClient {
     );
   }
 
+  @override
+  Future<String?> getDownloadsDirectory() async {
+    try {
+      final response = await _dio.get<Map<String, dynamic>>('/api/v0/options');
+      final directories =
+          response.data?['directories'] as Map<String, dynamic>?;
+      return directories?['downloads'] as String?;
+    } on DioException {
+      return null;
+    }
+  }
+
   Future<Response<T>> _handle<T>(Future<Response<T>> Function() request) async {
     try {
       return await request();

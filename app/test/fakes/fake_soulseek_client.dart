@@ -13,6 +13,7 @@ class FakeSoulseekClient implements SoulseekClient {
   Object? getSearchError;
   Object? enqueueError;
   List<SoulseekTransfer> downloads = const [];
+  String? downloadsDirectory;
 
   @override
   Future<bool> isConnected() async {
@@ -68,5 +69,11 @@ class FakeSoulseekClient implements SoulseekClient {
     required String transferId,
   }) async {
     calls.add('cancelDownload:$username:$transferId');
+  }
+
+  @override
+  Future<String?> getDownloadsDirectory() async {
+    calls.add('getDownloadsDirectory');
+    return downloadsDirectory;
   }
 }

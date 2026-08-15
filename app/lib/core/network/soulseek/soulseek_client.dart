@@ -148,4 +148,10 @@ abstract class SoulseekClient {
     required String username,
     required String transferId,
   });
+
+  /// The directory this backend saves completed downloads to, as it
+  /// reports it — only actually useful when the backend runs on this same
+  /// device (see ADR 0013); otherwise it's a path on a different machine.
+  /// Returns `null` if it can't be determined.
+  Future<String?> getDownloadsDirectory();
 }

@@ -321,4 +321,30 @@ void main() {
       expect(seen.path, '/api/v0/transfers/downloads/u/t1');
     });
   });
+
+  group('getDownloadsDirectory', () {
+    test('reads directories.downloads from the options endpoint', () async {
+      late RequestOptions seen;
+      final client = _clientWith((options) {
+        seen = options;
+        return const FakeHttpResponse(200, {
+          'directories': {
+            'downloads': '/home/user/Music/SoulseekDownloads',
+            'incomplete': '/home/user/.local/share/slskd/incomplete',
+          },
+        });
+      });
+
+      final directory = await client.getDownloadsDirectory();
+      expect(directory, '/home/user/Music/SoulseekDownloads');
+      expect(seen.path, '/api/v0/options');
+    });
+
+    test('returns null on a network error instead of throwing', () async {
+      final client = _clientWith((_) => const FakeHttpResponse(500, 'boom'));
+
+      final directory = await client.getDownloadsDirectory();
+      expect(directory, isNull);
+    });
+  });
 }

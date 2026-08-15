@@ -121,6 +121,12 @@ class _SoulseekSettingsScreenState
               ),
             ),
           ),
+          const SizedBox(height: 16),
+          Text(
+            'If slskd runs on this same device, finished downloads are '
+            'added to your library automatically — no extra setup needed.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
           const SizedBox(height: 24),
           Row(
             children: [
