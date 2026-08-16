@@ -16,6 +16,20 @@ class NodeIdentity {
 
   final String nodeId;
   final SimpleKeyPair keyPair;
+
+  static final _algorithm = Ed25519();
+
+  Future<String> publicKeyBase64() async {
+    final publicKey = await keyPair.extractPublicKey();
+    return base64Encode(publicKey.bytes);
+  }
+
+  /// Signs [message] with this node's private key — the basis for proving
+  /// a federation request really came from this node (Phase 4).
+  Future<List<int>> sign(List<int> message) async {
+    final signature = await _algorithm.sign(message, keyPair: keyPair);
+    return signature.bytes;
+  }
 }
 
 /// Loads a node's [NodeIdentity] from [dataDirectory], generating and

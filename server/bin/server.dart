@@ -1,6 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:musicat_server/src/federation/federation_routes.dart';
+import 'package:musicat_server/src/federation/friend_store.dart';
+import 'package:musicat_server/src/federation/request_signing.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
 import 'package:musicat_server/src/soulseek/slskd_config.dart';
 import 'package:musicat_server/src/soulseek/slskd_gateway.dart';
@@ -14,14 +17,23 @@ Response _jsonResponse(Map<String, Object?> body) => Response.ok(
   headers: {'content-type': 'application/json'},
 );
 
-Router _buildRouter(NodeIdentity identity, Router soulseekRouter) {
+Router _buildRouter(
+  NodeIdentity identity,
+  String publicKeyBase64,
+  Router soulseekRouter,
+  Router federationRouter,
+) {
   return Router()
     ..get('/', (Request req) => _jsonResponse({'status': 'ok'}))
     ..get(
       '/api/v1/node',
-      (Request req) => _jsonResponse({'nodeId': identity.nodeId}),
+      (Request req) => _jsonResponse({
+        'nodeId': identity.nodeId,
+        'publicKeyBase64': publicKeyBase64,
+      }),
     )
-    ..mount('/api/v1/soulseek/', soulseekRouter.call);
+    ..mount('/api/v1/soulseek/', soulseekRouter.call)
+    ..mount('/api/v1/federation/', federationRouter.call);
 }
 
 void main(List<String> args) async {
@@ -32,14 +44,28 @@ void main(List<String> args) async {
   );
 
   final identity = await NodeIdentityStore(dataDir).loadOrCreate();
+  final publicKeyBase64 = await identity.publicKeyBase64();
   print('Node identity: ${identity.nodeId}');
 
   final slskdConfig = SlskdConfig.fromEnvironment(Platform.environment);
   final soulseekRouter = buildSoulseekRouter(SlskdGateway(config: slskdConfig));
 
+  final friendStore = FriendStore(dataDir);
+  final federationRouter = buildFederationRouter(
+    friendStore,
+    RequestVerifier(friendStore),
+  );
+
   final handler = Pipeline()
       .addMiddleware(logRequests())
-      .addHandler(_buildRouter(identity, soulseekRouter).call);
+      .addHandler(
+        _buildRouter(
+          identity,
+          publicKeyBase64,
+          soulseekRouter,
+          federationRouter,
+        ).call,
+      );
 
   final server = await serve(handler, ip, port);
   print('Server listening on port ${server.port}');

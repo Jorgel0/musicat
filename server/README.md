@@ -10,16 +10,23 @@ for why this differs from the app's MIT license.
 
 ## Status
 
-Phase 3, nearly done: a `shelf`-based HTTP server with a persistent **node
+Phase 3 is done: a `shelf`-based HTTP server with a persistent **node
 identity** (an Ed25519 keypair; `nodeId` is the SHA-256 fingerprint of the
-public key, hex-encoded — the foundation the Phase 4 federated trust model
-will build on), and a wrapper around a self-hosted **slskd** instance
-(ADR 0016) that the app can now talk to instead of slskd directly (ADR
-0017, opt-in via Settings — direct slskd is still fully supported too).
+public key, hex-encoded), and a wrapper around a self-hosted **slskd**
+instance (ADR 0016) that the app can talk to instead of slskd directly
+(ADR 0017, opt-in via Settings — direct slskd is still fully supported
+too), with a `docker-compose.yml` to self-host the whole thing (ADR 0018).
+
+Phase 4 (federated friend-sharing), first slice: nodes can now sign and
+verify requests to each other using their node identity (ADR 0019) — the
+trust primitive future federation features sit behind. No actual shared
+data yet, and friend registration itself has **no protection yet** (see
+ADR 0019's Consequences) — a pairing-code exchange is a follow-up slice.
 
 Endpoints so far:
 - `GET /` — health check (`{"status": "ok"}`)
-- `GET /api/v1/node` — this node's identity (`{"nodeId": "..."}`)
+- `GET /api/v1/node` — this node's identity
+  (`{"nodeId": "...", "publicKeyBase64": "..."}`)
 - `GET /api/v1/soulseek/status` — `{"connected": bool}`
 - `POST /api/v1/soulseek/searches` (`{"query": "..."}`) — starts a search,
   returns `{"searchId": "..."}`
@@ -31,11 +38,15 @@ Endpoints so far:
 - `DELETE /api/v1/soulseek/downloads/<username>/<id>` — cancels a download
 - `GET /api/v1/soulseek/downloads-directory` — where slskd saves completed
   downloads (`{"directory": "..." | null}`)
+- `POST /api/v1/federation/friends` (`{"nodeId", "publicKeyBase64",
+  "address"}`) — trusts a remote node (unprotected — see above)
+- `GET /api/v1/federation/friends` — lists trusted nodes
+- `DELETE /api/v1/federation/friends/<nodeId>` — revokes trust
+- `GET /api/v1/federation/ping` — requires `X-Node-Id`/`X-Timestamp`/
+  `X-Signature` headers from a trusted friend; `{"pong": true}` if valid
 
 Configure the slskd connection with `SLSKD_HOST` (default `localhost`),
 `SLSKD_PORT` (default `5030`), and `SLSKD_API_KEY`.
-
-Not yet implemented: anything federation-related (Phase 4).
 
 ## Running with the Dart SDK
 
