@@ -23,6 +23,7 @@ void main() {
 
   test('save updates state and persists the config', () async {
     const config = SoulseekConfig(
+      backendType: SoulseekBackendType.slskd,
       host: '192.168.1.140',
       port: 5030,
       apiKey: 'k',
@@ -38,6 +39,7 @@ void main() {
     expect(state.apiKey, 'k');
 
     final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('soulseekBackendType'), 'slskd');
     expect(prefs.getString('soulseekHost'), '192.168.1.140');
     expect(prefs.getInt('soulseekPort'), 5030);
     expect(prefs.getString('soulseekApiKey'), 'k');
@@ -51,27 +53,62 @@ void main() {
 
   test('loadSoulseekConfigPreference returns the persisted config', () async {
     final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('soulseekBackendType', 'musicatServer');
     await prefs.setString('soulseekHost', '10.0.0.5');
     await prefs.setInt('soulseekPort', 5555);
     await prefs.setString('soulseekApiKey', 'abc');
 
     final config = await loadSoulseekConfigPreference();
+    expect(config.backendType, SoulseekBackendType.musicatServer);
     expect(config.host, '10.0.0.5');
     expect(config.port, 5555);
     expect(config.apiKey, 'abc');
   });
+
+  test(
+    'loadSoulseekConfigPreference defaults to slskd for an unset backend type',
+    () async {
+      final config = await loadSoulseekConfigPreference();
+      expect(config.backendType, SoulseekBackendType.slskd);
+    },
+  );
 
   group('soulseekClientProvider', () {
     test('is null when not configured', () {
       expect(container.read(soulseekClientProvider), isNull);
     });
 
-    test('is non-null once configured', () async {
+    test('is non-null once configured for direct slskd', () async {
       await container
           .read(soulseekConfigControllerProvider.notifier)
-          .save(const SoulseekConfig(host: 'h', port: 5030, apiKey: 'k'));
+          .save(
+            const SoulseekConfig(
+              backendType: SoulseekBackendType.slskd,
+              host: 'h',
+              port: 5030,
+              apiKey: 'k',
+            ),
+          );
 
       expect(container.read(soulseekClientProvider), isNotNull);
     });
+
+    test(
+      'is non-null once configured for Musicat Server, without an API key',
+      () async {
+        await container
+            .read(soulseekConfigControllerProvider.notifier)
+            .save(
+              const SoulseekConfig(
+                backendType: SoulseekBackendType.musicatServer,
+                host: 'h',
+                port: 8080,
+                apiKey: '',
+              ),
+            );
+
+        expect(container.read(soulseekClientProvider), isNotNull);
+      },
+    );
   });
 }

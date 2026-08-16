@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../../core/network/soulseek/slskd/slskd_soulseek_client.dart';
+import '../../../../core/network/soulseek/soulseek_client_factory.dart';
 import '../../../../core/network/soulseek/soulseek_config.dart';
 import 'soulseek_config_controller.dart';
+
+const _defaultPorts = {
+  SoulseekBackendType.slskd: 5030,
+  SoulseekBackendType.musicatServer: 8080,
+};
 
 class SoulseekSettingsScreen extends ConsumerStatefulWidget {
   const SoulseekSettingsScreen({super.key});
@@ -15,6 +20,7 @@ class SoulseekSettingsScreen extends ConsumerStatefulWidget {
 
 class _SoulseekSettingsScreenState
     extends ConsumerState<SoulseekSettingsScreen> {
+  late SoulseekBackendType _backendType;
   late final TextEditingController _hostController;
   late final TextEditingController _portController;
   late final TextEditingController _apiKeyController;
@@ -25,6 +31,7 @@ class _SoulseekSettingsScreenState
   void initState() {
     super.initState();
     final config = ref.read(soulseekConfigControllerProvider);
+    _backendType = config.backendType;
     _hostController = TextEditingController(text: config.host);
     _portController = TextEditingController(text: config.port.toString());
     _apiKeyController = TextEditingController(text: config.apiKey);
@@ -38,7 +45,20 @@ class _SoulseekSettingsScreenState
     super.dispose();
   }
 
+  void _selectBackendType(SoulseekBackendType type) {
+    setState(() {
+      // Only nudge the port field if it's still at the *other* backend's
+      // default — leave an already-customized value alone.
+      if (int.tryParse(_portController.text.trim()) ==
+          _defaultPorts[_backendType]) {
+        _portController.text = _defaultPorts[type].toString();
+      }
+      _backendType = type;
+    });
+  }
+
   SoulseekConfig get _formConfig => SoulseekConfig(
+    backendType: _backendType,
     host: _hostController.text.trim(),
     port: int.tryParse(_portController.text.trim()) ?? 5030,
     apiKey: _apiKeyController.text.trim(),
@@ -56,16 +76,13 @@ class _SoulseekSettingsScreenState
     final config = _formConfig;
     if (!config.isConfigured) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter a host and API key first.')),
+        const SnackBar(content: Text('Enter a host (and API key) first.')),
       );
       return;
     }
 
     setState(() => _testingConnection = true);
-    final client = SlskdSoulseekClient(
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey,
-    );
+    final client = buildSoulseekClient(config);
     String message;
     try {
       message = await client.isConnected()
@@ -83,14 +100,36 @@ class _SoulseekSettingsScreenState
 
   @override
   Widget build(BuildContext context) {
+    final isMusicatServer = _backendType == SoulseekBackendType.musicatServer;
+
     return Scaffold(
       appBar: AppBar(title: const Text('Soulseek backend')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          const Text(
-            'Musicat searches and downloads via a self-hosted slskd '
-            'instance. Point it at one on your network below.',
+          SegmentedButton<SoulseekBackendType>(
+            segments: const [
+              ButtonSegment(
+                value: SoulseekBackendType.slskd,
+                label: Text('Direct slskd'),
+              ),
+              ButtonSegment(
+                value: SoulseekBackendType.musicatServer,
+                label: Text('Musicat Server'),
+              ),
+            ],
+            selected: {_backendType},
+            onSelectionChanged: (selection) =>
+                _selectBackendType(selection.first),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            isMusicatServer
+                ? 'Musicat searches and downloads via a self-hosted Musicat '
+                      'Server instance, which wraps slskd for you — no API '
+                      'key needed here.'
+                : 'Musicat searches and downloads via a self-hosted slskd '
+                      'instance. Point it at one on your network below.',
           ),
           const SizedBox(height: 16),
           TextField(
@@ -106,25 +145,28 @@ class _SoulseekSettingsScreenState
             decoration: const InputDecoration(labelText: 'Port'),
             keyboardType: TextInputType.number,
           ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _apiKeyController,
-            obscureText: _obscureApiKey,
-            decoration: InputDecoration(
-              labelText: 'API key',
-              suffixIcon: IconButton(
-                icon: Icon(
-                  _obscureApiKey ? Icons.visibility : Icons.visibility_off,
+          if (!isMusicatServer) ...[
+            const SizedBox(height: 12),
+            TextField(
+              controller: _apiKeyController,
+              obscureText: _obscureApiKey,
+              decoration: InputDecoration(
+                labelText: 'API key',
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    _obscureApiKey ? Icons.visibility : Icons.visibility_off,
+                  ),
+                  onPressed: () =>
+                      setState(() => _obscureApiKey = !_obscureApiKey),
                 ),
-                onPressed: () =>
-                    setState(() => _obscureApiKey = !_obscureApiKey),
               ),
             ),
-          ),
+          ],
           const SizedBox(height: 16),
           Text(
-            'If slskd runs on this same device, finished downloads are '
-            'added to your library automatically — no extra setup needed.',
+            'If the reported downloads directory exists on this device, '
+            'finished downloads are added to your library automatically — '
+            'no extra setup needed.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 24),

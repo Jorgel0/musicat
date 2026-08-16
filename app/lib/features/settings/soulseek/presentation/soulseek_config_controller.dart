@@ -1,13 +1,20 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../../../../core/network/soulseek/slskd/slskd_soulseek_client.dart';
 import '../../../../core/network/soulseek/soulseek_client.dart';
+import '../../../../core/network/soulseek/soulseek_client_factory.dart';
 import '../../../../core/network/soulseek/soulseek_config.dart';
 
+const _backendTypeKey = 'soulseekBackendType';
 const _hostKey = 'soulseekHost';
 const _portKey = 'soulseekPort';
 const _apiKeyKey = 'soulseekApiKey';
+
+SoulseekBackendType _backendTypeFromPrefsValue(String? value) =>
+    SoulseekBackendType.values.firstWhere(
+      (type) => type.name == value,
+      orElse: () => SoulseekBackendType.slskd,
+    );
 
 class SoulseekConfigController extends Notifier<SoulseekConfig> {
   SoulseekConfigController([this._initial]);
@@ -20,6 +27,7 @@ class SoulseekConfigController extends Notifier<SoulseekConfig> {
   Future<void> save(SoulseekConfig config) async {
     state = config;
     final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_backendTypeKey, config.backendType.name);
     await prefs.setString(_hostKey, config.host);
     await prefs.setInt(_portKey, config.port);
     await prefs.setString(_apiKeyKey, config.apiKey);
@@ -37,7 +45,7 @@ final soulseekConfigControllerProvider =
 final soulseekClientProvider = Provider<SoulseekClient?>((ref) {
   final config = ref.watch(soulseekConfigControllerProvider);
   if (!config.isConfigured) return null;
-  return SlskdSoulseekClient(baseUrl: config.baseUrl, apiKey: config.apiKey);
+  return buildSoulseekClient(config);
 });
 
 /// Loads the persisted config, for overriding
@@ -46,6 +54,7 @@ final soulseekClientProvider = Provider<SoulseekClient?>((ref) {
 Future<SoulseekConfig> loadSoulseekConfigPreference() async {
   final prefs = await SharedPreferences.getInstance();
   return SoulseekConfig(
+    backendType: _backendTypeFromPrefsValue(prefs.getString(_backendTypeKey)),
     host: prefs.getString(_hostKey) ?? '',
     port: prefs.getInt(_portKey) ?? 5030,
     apiKey: prefs.getString(_apiKeyKey) ?? '',
