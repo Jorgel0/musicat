@@ -24,8 +24,8 @@ docs/    Architecture notes and Architecture Decision Records (ADRs)
 ## License
 
 The app (`app/`) is licensed under the [MIT License](LICENSE).
-The server (`server/`), once introduced, will be licensed under AGPL-3.0 to
-keep the federated backend open if it is ever offered as a hosted service.
+The server (`server/`) is licensed under [AGPL-3.0](server/LICENSE) to keep
+the federated backend open if it is ever offered as a hosted service.
 
 ## Contributing
 
