@@ -12,6 +12,11 @@ codebase.
 Early development. See [`docs/architecture.md`](docs/architecture.md) for the
 architecture overview and phased roadmap.
 
+## Self-hosting the backend
+
+`docker-compose up` runs the whole Soulseek backend (slskd + Musicat Server)
+in one step — see [`docs/self-hosting.md`](docs/self-hosting.md).
+
 ## Project layout
 
 ```

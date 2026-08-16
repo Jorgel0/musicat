@@ -10,12 +10,12 @@ for why this differs from the app's MIT license.
 
 ## Status
 
-Phase 3, in progress: a `shelf`-based HTTP server with a persistent **node
+Phase 3, nearly done: a `shelf`-based HTTP server with a persistent **node
 identity** (an Ed25519 keypair; `nodeId` is the SHA-256 fingerprint of the
 public key, hex-encoded — the foundation the Phase 4 federated trust model
 will build on), and a wrapper around a self-hosted **slskd** instance
-(ADR 0016) so the app can eventually search/download through this server
-instead of talking to slskd directly.
+(ADR 0016) that the app can now talk to instead of slskd directly (ADR
+0017, opt-in via Settings — direct slskd is still fully supported too).
 
 Endpoints so far:
 - `GET /` — health check (`{"status": "ok"}`)
@@ -35,8 +35,7 @@ Endpoints so far:
 Configure the slskd connection with `SLSKD_HOST` (default `localhost`),
 `SLSKD_PORT` (default `5030`), and `SLSKD_API_KEY`.
 
-Not yet implemented: the app actually talking to this server (it still
-talks to slskd directly), or anything federation-related.
+Not yet implemented: anything federation-related (Phase 4).
 
 ## Running with the Dart SDK
 
@@ -65,6 +64,10 @@ Configuration is via environment variables:
 $ docker build . -t musicat-server
 $ docker run -it -p 8080:8080 -v musicat-data:/app/data musicat-server
 ```
+
+To run this alongside slskd in one step, see
+[`docs/self-hosting.md`](../docs/self-hosting.md) (`docker-compose up` at
+the repo root).
 
 ## Development
 
