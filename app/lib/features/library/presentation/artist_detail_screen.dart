@@ -13,12 +13,18 @@ class ArtistDetailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final allTracks = ref.watch(tracksProvider).value ?? const [];
-    final tracks = allTracks.where((t) => t.artist == artistName).toList()
-      ..sort((a, b) {
-        final albumCompare = a.album.compareTo(b.album);
-        if (albumCompare != 0) return albumCompare;
-        return (a.trackNumber ?? 0).compareTo(b.trackNumber ?? 0);
-      });
+    // Case-insensitive to match groupTracksByArtist's grouping (Soulseek
+    // downloads often have inconsistent artist-name tag casing).
+    final lowerArtistName = artistName.toLowerCase();
+    final tracks =
+        allTracks
+            .where((t) => t.artist.toLowerCase() == lowerArtistName)
+            .toList()
+          ..sort((a, b) {
+            final albumCompare = a.album.compareTo(b.album);
+            if (albumCompare != 0) return albumCompare;
+            return (a.trackNumber ?? 0).compareTo(b.trackNumber ?? 0);
+          });
 
     return Scaffold(
       appBar: AppBar(

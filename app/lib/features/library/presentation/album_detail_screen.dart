@@ -20,9 +20,17 @@ class AlbumDetailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final allTracks = ref.watch(tracksProvider).value ?? const [];
+    // Case-insensitive to match groupTracksByAlbum's grouping (Soulseek
+    // downloads often have inconsistent artist/album tag casing).
+    final lowerAlbumName = albumName.toLowerCase();
+    final lowerArtistName = artistName.toLowerCase();
     final tracks =
         allTracks
-            .where((t) => t.album == albumName && t.artist == artistName)
+            .where(
+              (t) =>
+                  t.album.toLowerCase() == lowerAlbumName &&
+                  t.artist.toLowerCase() == lowerArtistName,
+            )
             .toList()
           ..sort((a, b) => (a.trackNumber ?? 0).compareTo(b.trackNumber ?? 0));
 

@@ -62,6 +62,31 @@ void main() {
       },
     );
 
+    test('treats different casings of the same album+artist as one album', () {
+      final tracks = [
+        _track(
+          id: 1,
+          title: 'Song A',
+          artist: 'Twenty One Pilots',
+          album: 'Blurryface',
+        ),
+        _track(
+          id: 2,
+          title: 'Song B',
+          artist: 'twenty one pilots',
+          album: 'blurryface',
+        ),
+      ];
+
+      final albums = groupTracksByAlbum(tracks);
+
+      expect(albums, hasLength(1));
+      expect(albums.single.trackCount, 2);
+      // Keeps the first-seen track's original casing for display.
+      expect(albums.single.name, 'Blurryface');
+      expect(albums.single.artist, 'Twenty One Pilots');
+    });
+
     test('picks a cover art path from any track that has one', () {
       final tracks = [
         _track(
@@ -104,6 +129,31 @@ void main() {
       final artistY = artists.firstWhere((a) => a.name == 'Artist Y');
       expect(artistY.trackCount, 1);
       expect(artistY.albumCount, 1);
+    });
+
+    test('treats different casings of the same artist as one artist', () {
+      final tracks = [
+        _track(
+          id: 1,
+          title: 'Song A',
+          artist: 'Twenty One Pilots',
+          album: 'Blurryface',
+        ),
+        _track(
+          id: 2,
+          title: 'Song B',
+          artist: 'twenty one pilots',
+          album: 'Trench',
+        ),
+      ];
+
+      final artists = groupTracksByArtist(tracks);
+
+      expect(artists, hasLength(1));
+      expect(artists.single.trackCount, 2);
+      expect(artists.single.albumCount, 2);
+      // Keeps the first-seen track's original casing for display.
+      expect(artists.single.name, 'Twenty One Pilots');
     });
   });
 }
