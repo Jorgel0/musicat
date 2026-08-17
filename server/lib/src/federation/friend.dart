@@ -9,6 +9,7 @@ class Friend {
     required this.publicKeyBase64,
     required this.address,
     this.displayName,
+    this.udpCandidate,
   });
 
   final String nodeId;
@@ -18,11 +19,18 @@ class Friend {
   final String address;
   final String? displayName;
 
+  /// `host:port` this friend's own external UDP mapping was last seen as
+  /// (via STUN, ADR 0022), if known — the target for a NAT hole-punch
+  /// attempt (ADR 0023). Not necessarily still valid: NAT mappings expire,
+  /// and this is only ever as fresh as the last pairing/reconnect attempt.
+  final String? udpCandidate;
+
   Map<String, Object?> toJson() => {
     'nodeId': nodeId,
     'publicKeyBase64': publicKeyBase64,
     'address': address,
     'displayName': displayName,
+    'udpCandidate': udpCandidate,
   };
 
   factory Friend.fromJson(Map<String, dynamic> json) => Friend(
@@ -30,5 +38,6 @@ class Friend {
     publicKeyBase64: json['publicKeyBase64'] as String,
     address: json['address'] as String,
     displayName: json['displayName'] as String?,
+    udpCandidate: json['udpCandidate'] as String?,
   );
 }

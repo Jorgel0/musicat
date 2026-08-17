@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
+import '../nat/udp_puncher.dart';
 import 'friend.dart';
 import 'friend_store.dart';
 import 'pairing_code_store.dart';
@@ -46,10 +48,16 @@ Response _verificationErrorResponse(
 /// `GET /ping` **is** behind [RequestVerifier.verify]: it's the proof that
 /// the signing/verification trust model actually works end to end before
 /// any real federation feature is built on top of it.
+///
+/// `POST /friends` also accepts an optional `udpCandidate` (the caller's
+/// own STUN-discovered address, ADR 0022) and returns this node's current
+/// one in the response — and, when a candidate was provided, immediately
+/// attempts a NAT hole-punch toward it in the background (ADR 0023).
 Router buildFederationRouter(
   FriendStore friendStore,
   RequestVerifier verifier,
   PairingCodeStore pairingCodes,
+  UdpPuncher puncher,
 ) {
   final router = Router();
 
@@ -69,6 +77,7 @@ Router buildFederationRouter(
     final nodeId = body['nodeId'];
     final publicKeyBase64 = body['publicKeyBase64'];
     final address = body['address'];
+    final udpCandidate = body['udpCandidate'];
     if (code is! String || code.isEmpty) {
       return _error('"code" is required');
     }
@@ -80,6 +89,9 @@ Router buildFederationRouter(
     }
     if (address is! String || address.isEmpty) {
       return _error('"address" is required');
+    }
+    if (udpCandidate != null && udpCandidate is! String) {
+      return _error('"udpCandidate" must be a string if present');
     }
 
     if (!pairingCodes.redeem(code)) {
@@ -95,9 +107,24 @@ Router buildFederationRouter(
         publicKeyBase64: publicKeyBase64,
         address: address,
         displayName: body['displayName'] as String?,
+        udpCandidate: udpCandidate as String?,
       ),
     );
-    return _json({'status': 'ok'}, status: 201);
+
+    if (udpCandidate != null) {
+      final parts = udpCandidate.split(':');
+      if (parts.length == 2) {
+        final targetPort = int.tryParse(parts[1]);
+        if (targetPort != null) {
+          unawaited(puncher.punch(host: parts[0], port: targetPort));
+        }
+      }
+    }
+
+    return _json({
+      'status': 'ok',
+      'udpCandidate': puncher.cachedCandidate?.toString(),
+    }, status: 201);
   });
 
   router.get('/friends', (Request request) async {

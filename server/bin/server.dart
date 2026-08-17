@@ -6,6 +6,7 @@ import 'package:musicat_server/src/federation/friend_store.dart';
 import 'package:musicat_server/src/federation/pairing_code_store.dart';
 import 'package:musicat_server/src/federation/request_signing.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
+import 'package:musicat_server/src/nat/udp_puncher.dart';
 import 'package:musicat_server/src/soulseek/slskd_config.dart';
 import 'package:musicat_server/src/soulseek/slskd_gateway.dart';
 import 'package:musicat_server/src/soulseek/soulseek_routes.dart';
@@ -52,10 +53,21 @@ void main(List<String> args) async {
   final soulseekRouter = buildSoulseekRouter(SlskdGateway(config: slskdConfig));
 
   final friendStore = FriendStore(dataDir);
+  final puncher = UdpPuncher(identity: identity, friendStore: friendStore);
+  final udpPort = await puncher.bind(
+    port: int.tryParse(Platform.environment['MUSICAT_UDP_PORT'] ?? '') ?? 0,
+  );
+  final candidate = await puncher.refreshCandidate();
+  print(
+    'NAT traversal: listening for UDP punches on port $udpPort '
+    '(external candidate: ${candidate ?? "unknown — STUN unreachable"})',
+  );
+
   final federationRouter = buildFederationRouter(
     friendStore,
     RequestVerifier(friendStore),
     PairingCodeStore(),
+    puncher,
   );
 
   final handler = Pipeline()

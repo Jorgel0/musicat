@@ -6,6 +6,7 @@ import 'package:musicat_server/src/federation/friend_store.dart';
 import 'package:musicat_server/src/federation/pairing_code_store.dart';
 import 'package:musicat_server/src/federation/request_signing.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
+import 'package:musicat_server/src/nat/udp_puncher.dart';
 import 'package:shelf/shelf.dart';
 import 'package:test/test.dart';
 
@@ -14,6 +15,7 @@ void main() {
   late Directory friendDir;
   late FriendStore friendStore;
   late NodeIdentity friendIdentity;
+  late UdpPuncher puncher;
   late Handler handler;
 
   setUp(() async {
@@ -21,14 +23,19 @@ void main() {
     friendDir = Directory.systemTemp.createTempSync('musicat_fed_friend_');
     friendStore = FriendStore(serverDir);
     friendIdentity = await NodeIdentityStore(friendDir).loadOrCreate();
+    final serverIdentity = await NodeIdentityStore(serverDir).loadOrCreate();
+    puncher = UdpPuncher(identity: serverIdentity, friendStore: friendStore);
+    await puncher.bind();
     handler = buildFederationRouter(
       friendStore,
       RequestVerifier(friendStore),
       PairingCodeStore(),
+      puncher,
     ).call;
   });
 
-  tearDown(() {
+  tearDown(() async {
+    await puncher.close();
     serverDir.deleteSync(recursive: true);
     friendDir.deleteSync(recursive: true);
   });
@@ -57,11 +64,13 @@ void main() {
     required String publicKeyBase64,
     required String address,
     String? code,
+    String? udpCandidate,
   }) => post('/friends', {
     'code': code ?? '', // caller overrides for the invalid-code cases
     'nodeId': nodeId,
     'publicKeyBase64': publicKeyBase64,
     'address': address,
+    'udpCandidate': ?udpCandidate,
   });
 
   group('POST /pairing-codes', () {
@@ -134,6 +143,41 @@ void main() {
         'code': await newPairingCode(),
         'nodeId': 'friend-1',
         'publicKeyBase64': 'key',
+      });
+      expect(response.statusCode, 400);
+    });
+
+    test(
+      'stores an optional udpCandidate and echoes this node\'s own',
+      () async {
+        final response = await pairAsFriend(
+          nodeId: 'friend-1',
+          publicKeyBase64: 'key',
+          address: 'host:8080',
+          code: await newPairingCode(),
+          udpCandidate: '203.0.113.5:41234',
+        );
+
+        expect(response.statusCode, 201);
+        final body = jsonDecode(await response.readAsString());
+        // This node hasn't called refreshCandidate() in the test setup, so
+        // its own reported candidate is null -- just checking the key exists
+        // with the right shape, not exercising real STUN here (see
+        // stun_client_test.dart / ADR 0022 for that).
+        expect(body.containsKey('udpCandidate'), isTrue);
+
+        final friend = await friendStore.findByNodeId('friend-1');
+        expect(friend?.udpCandidate, '203.0.113.5:41234');
+      },
+    );
+
+    test('rejects a non-string udpCandidate', () async {
+      final response = await post('/friends', {
+        'code': await newPairingCode(),
+        'nodeId': 'friend-1',
+        'publicKeyBase64': 'key',
+        'address': 'host:8080',
+        'udpCandidate': 12345,
       });
       expect(response.statusCode, 400);
     });

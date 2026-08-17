@@ -22,9 +22,11 @@ requests to each other using their node identity (ADR 0019), and joining
 as a friend requires a short-lived, single-use pairing code (ADR 0020) —
 the trust primitive future federation features sit behind. NAT traversal
 (so two friends on different home networks can actually reach each other)
-is being built directly into the server rather than requiring a separate
-tool like Tailscale — a `StunClient` (ADR 0022) is the first piece, not
-yet wired into pairing/connection attempts. No actual shared data (library,
+is built directly into the server rather than requiring a separate tool
+like Tailscale: pairing now also exchanges each side's STUN-discovered UDP
+address and automatically attempts a hole-punch in the background (ADR
+0022/0023) — verified working between two real server processes, though
+not yet across a real NAT boundary. No actual shared data (library,
 playlists) yet, and nothing in `app/` talks to these endpoints yet either —
 today they're server-to-server HTTP only.
 
@@ -46,8 +48,10 @@ Endpoints so far:
 - `POST /api/v1/federation/pairing-codes` — generates a 10-minute,
   single-use code (`{"code": "..."}`) to hand a friend out-of-band
 - `POST /api/v1/federation/friends` (`{"code", "nodeId",
-  "publicKeyBase64", "address"}`) — trusts a remote node, given a valid
-  pairing code
+  "publicKeyBase64", "address", "udpCandidate"?}`) — trusts a remote node,
+  given a valid pairing code; returns this node's own current
+  `udpCandidate`, and triggers a background NAT hole-punch attempt toward
+  the caller's if one was provided
 - `GET /api/v1/federation/friends` — lists trusted nodes
 - `DELETE /api/v1/federation/friends/<nodeId>` — revokes trust
 - `GET /api/v1/federation/ping` — requires `X-Node-Id`/`X-Timestamp`/
@@ -76,6 +80,9 @@ Configuration is via environment variables:
 - `MUSICAT_DATA_DIR` — where the node identity (and future persistent state)
   is stored (default `./data`). Back this with a volume in production —
   losing it changes the node's identity.
+- `MUSICAT_UDP_PORT` — local UDP port for NAT hole-punching (default:
+  random, OS-assigned). Set this and forward it on your router if you
+  want a stable, predictable port for federation traversal.
 
 ## Running with Docker
 
