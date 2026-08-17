@@ -27,9 +27,13 @@ like Tailscale: pairing exchanges each side's STUN-discovered UDP address,
 attempts a hole-punch, and then keeps it alive with periodic signed
 packets (ADR 0022/0023/0024) — verified working (including staying
 connected over an extended real test) between two real server processes,
-though not yet across a real NAT boundary. No actual shared data (library,
-playlists) yet, and nothing in `app/` talks to these endpoints yet either —
-today they're server-to-server HTTP only.
+though not yet across a real NAT boundary. The actual sharing mechanism
+(ADR 0025): a node exposes chosen tracks' *metadata* (title/artist/cover)
+— never a whole library — to either one specific friend or all of them,
+and the recipient downloads the real file directly, peer-to-peer, only if
+they're actually authorized for that track. Nothing in `app/` talks to any
+of this yet — no share button, no profile/playlist UI — today it's all
+server-to-server/local-API only.
 
 Endpoints so far:
 - `GET /` — health check (`{"status": "ok"}`)
@@ -60,6 +64,16 @@ Endpoints so far:
   `{"connected": bool, "lastSeen": "...ISO..." | null}`
 - `GET /api/v1/federation/ping` — requires `X-Node-Id`/`X-Timestamp`/
   `X-Signature` headers from a trusted friend; `{"pong": true}` if valid
+- `POST /api/v1/library/shared-tracks` (`{"filePath", "title", "artist",
+  "album"?, "coverArtPath"?, "visibility": {"type": "friend", "nodeId"} |
+  {"type": "allFriends"}}`) — shares a local file's metadata
+- `GET /api/v1/library/shared-tracks` — lists what this node shares
+- `DELETE /api/v1/library/shared-tracks/<id>` — stops sharing it
+- `GET /api/v1/sharing/shared-tracks` — (friend-signed) what's shared with
+  the caller
+- `GET /api/v1/sharing/shared-tracks/<id>/file` /
+  `.../cover` — (friend-signed) downloads the real file/cover bytes, only
+  if shared with that specific caller
 
 Configure the slskd connection with `SLSKD_HOST` (default `localhost`),
 `SLSKD_PORT` (default `5030`), and `SLSKD_API_KEY`.

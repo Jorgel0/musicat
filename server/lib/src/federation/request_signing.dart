@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:shelf/shelf.dart';
 
 import '../identity/node_identity.dart';
 import 'friend_store.dart';
@@ -108,4 +109,26 @@ class RequestVerifier {
         ? RequestVerificationResult.valid
         : RequestVerificationResult.invalidSignature;
   }
+}
+
+/// Verifies [request]'s `X-Node-Id`/`X-Timestamp`/`X-Signature` headers
+/// against [verifier], returning the caller's `nodeId` if valid or `null`
+/// otherwise. Every federation route that requires a known, signed caller
+/// (not just `/ping` — see `sharing_routes.dart`) goes through this same
+/// check, so "is this a real, trusted friend" is answered identically
+/// everywhere rather than re-implemented per route.
+Future<String?> verifiedNodeId(
+  Request request,
+  RequestVerifier verifier,
+) async {
+  final nodeId = request.headers['x-node-id'];
+  final result = await verifier.verify(
+    method: request.method,
+    path: request.requestedUri.path,
+    body: '',
+    nodeId: nodeId,
+    timestamp: request.headers['x-timestamp'],
+    signatureBase64: request.headers['x-signature'],
+  );
+  return result == RequestVerificationResult.valid ? nodeId : null;
 }
