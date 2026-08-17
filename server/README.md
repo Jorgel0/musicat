@@ -20,9 +20,13 @@ too), with a `docker-compose.yml` to self-host the whole thing (ADR 0018).
 Phase 4 (federated friend-sharing), in progress: nodes sign and verify
 requests to each other using their node identity (ADR 0019), and joining
 as a friend requires a short-lived, single-use pairing code (ADR 0020) —
-the trust primitive future federation features sit behind. No actual
-shared data (library, playlists) yet, and nothing in `app/` talks to these
-endpoints yet either — today they're server-to-server HTTP only.
+the trust primitive future federation features sit behind. NAT traversal
+(so two friends on different home networks can actually reach each other)
+is being built directly into the server rather than requiring a separate
+tool like Tailscale — a `StunClient` (ADR 0022) is the first piece, not
+yet wired into pairing/connection attempts. No actual shared data (library,
+playlists) yet, and nothing in `app/` talks to these endpoints yet either —
+today they're server-to-server HTTP only.
 
 Endpoints so far:
 - `GET /` — health check (`{"status": "ok"}`)
