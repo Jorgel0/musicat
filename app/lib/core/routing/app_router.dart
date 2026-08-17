@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import '../../features/downloads/presentation/downloads_screen.dart';
 import '../../features/friends/presentation/friend_detail_screen.dart';
 import '../../features/friends/presentation/friends_screen.dart';
+import '../../features/friends/presentation/my_profile_screen.dart';
 import '../../features/library/presentation/album_detail_screen.dart';
 import '../../features/library/presentation/artist_detail_screen.dart';
 import '../../features/library/presentation/library_screen.dart';
@@ -64,6 +65,10 @@ final appRouter = GoRouter(
           builder: (context, state) => JointPlaylistDetailScreen(
             playlistId: state.pathParameters['id']!,
           ),
+        ),
+        GoRoute(
+          path: '/my-profile',
+          builder: (context, state) => const MyProfileScreen(),
         ),
         GoRoute(
           path: '/friends',

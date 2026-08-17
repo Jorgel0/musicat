@@ -6,21 +6,34 @@ import 'package:dio/dio.dart';
 class MySharedTrack {
   const MySharedTrack({
     required this.id,
+    required this.filePath,
     required this.title,
     required this.artist,
+    required this.isAllFriends,
     this.album,
   });
 
   final String id;
+
+  /// This node's own local path — used to tell whether a given library
+  /// [Track] is already shared (see the "My Profile" screen).
+  final String filePath;
   final String title;
   final String artist;
   final String? album;
 
+  /// Whether this is a "profile" share (visible to every current friend)
+  /// as opposed to one sent to one or more specific friends.
+  final bool isAllFriends;
+
   factory MySharedTrack.fromJson(Map<String, dynamic> json) => MySharedTrack(
     id: json['id'] as String,
+    filePath: json['filePath'] as String,
     title: json['title'] as String,
     artist: json['artist'] as String,
     album: json['album'] as String?,
+    isAllFriends:
+        (json['visibility'] as Map<String, dynamic>?)?['type'] == 'allFriends',
   );
 }
 

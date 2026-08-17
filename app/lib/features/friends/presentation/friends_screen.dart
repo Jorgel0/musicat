@@ -18,6 +18,12 @@ class FriendsScreen extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('Friends'),
         actions: [
+          if (config.isConfigured)
+            IconButton(
+              tooltip: 'My profile',
+              icon: const Icon(Icons.badge_outlined),
+              onPressed: () => context.push('/my-profile'),
+            ),
           IconButton(
             tooltip: 'Musicat Server settings',
             icon: const Icon(Icons.dns_outlined),
