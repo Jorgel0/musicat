@@ -7,6 +7,8 @@ import 'package:musicat_server/src/federation/pairing_code_store.dart';
 import 'package:musicat_server/src/federation/request_signing.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
 import 'package:musicat_server/src/nat/udp_puncher.dart';
+import 'package:musicat_server/src/sharing/joint_playlist_store.dart';
+import 'package:musicat_server/src/sharing/playlist_routes.dart';
 import 'package:musicat_server/src/sharing/shared_track_store.dart';
 import 'package:musicat_server/src/sharing/sharing_routes.dart';
 import 'package:musicat_server/src/soulseek/slskd_config.dart';
@@ -27,6 +29,7 @@ Router _buildRouter(
   Router soulseekRouter,
   Router federationRouter,
   Router libraryRouter,
+  Router playlistRouter,
   Router sharingFederationRouter,
 ) {
   return Router()
@@ -40,13 +43,14 @@ Router _buildRouter(
     )
     ..mount('/api/v1/soulseek/', soulseekRouter.call)
     ..mount('/api/v1/federation/', federationRouter.call)
-    // A sibling of /api/v1/federation/, not nested under it: shelf_router's
-    // mount() matches on prefix in registration order with no
-    // most-specific-first resolution, so a route actually nested under
-    // /api/v1/federation/ would silently never be reached — the parent
-    // mount's wildcard would swallow it first.
+    // Each of these is a sibling of /api/v1/federation/, not nested under
+    // it: shelf_router's mount() matches on prefix in registration order
+    // with no most-specific-first resolution, so a route actually nested
+    // under an already-mounted prefix would silently never be reached —
+    // the parent mount's wildcard would swallow it first.
     ..mount('/api/v1/sharing/', sharingFederationRouter.call)
-    ..mount('/api/v1/library/', libraryRouter.call);
+    ..mount('/api/v1/library/', libraryRouter.call)
+    ..mount('/api/v1/playlists/', playlistRouter.call);
 }
 
 void main(List<String> args) async {
@@ -82,9 +86,17 @@ void main(List<String> args) async {
   );
 
   final sharedTrackStore = SharedTrackStore(dataDir);
+  final playlistStore = JointPlaylistStore(dataDir);
   final libraryRouter = buildLibraryRouter(sharedTrackStore);
+  final playlistRouter = buildPlaylistRouter(
+    playlistStore,
+    sharedTrackStore,
+    friendStore,
+    identity,
+  );
   final sharingFederationRouter = buildSharingFederationRouter(
     sharedTrackStore,
+    playlistStore,
     RequestVerifier(friendStore),
   );
 
@@ -97,6 +109,7 @@ void main(List<String> args) async {
           soulseekRouter,
           federationRouter,
           libraryRouter,
+          playlistRouter,
           sharingFederationRouter,
         ).call,
       );

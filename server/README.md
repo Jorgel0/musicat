@@ -31,8 +31,13 @@ though not yet across a real NAT boundary. The actual sharing mechanism
 (ADR 0025): a node exposes chosen tracks' *metadata* (title/artist/cover)
 — never a whole library — to either one specific friend or all of them,
 and the recipient downloads the real file directly, peer-to-peer, only if
-they're actually authorized for that track. Nothing in `app/` talks to any
-of this yet — no share button, no profile/playlist UI — today it's all
+they're actually authorized for that track. Joint playlists (ADR 0026)
+build on the same mechanism: each participant adds their own tracks, and
+`/sync` pulls the others' contributions in via a per-item union (not
+whole-object last-write-wins, so concurrent additions from both sides
+never get lost) — verified with two real servers syncing back and forth.
+Nothing in `app/` talks to any of this yet — no share button, no
+profile/playlist UI, no invite flow — today it's all
 server-to-server/local-API only.
 
 Endpoints so far:
@@ -74,6 +79,19 @@ Endpoints so far:
 - `GET /api/v1/sharing/shared-tracks/<id>/file` /
   `.../cover` — (friend-signed) downloads the real file/cover bytes, only
   if shared with that specific caller
+- `POST /api/v1/library/playlists` (`{"id"?, "name",
+  "participantNodeIds"}`) — creates a joint playlist, or joins an
+  existing one if `id` is supplied
+- `GET /api/v1/library/playlists` / `GET .../<id>` — this node's own
+  local view
+- `POST /api/v1/library/playlists/<id>/items` (`{"filePath", "title",
+  "artist", "album"?, "coverArtPath"?}`) — adds one of this node's own
+  tracks (auto-shares it with the other participants)
+- `DELETE /api/v1/library/playlists/<id>` — deletes this node's local copy
+- `POST /api/v1/library/playlists/<id>/sync` — pulls every participant's
+  current view and merges it in
+- `GET /api/v1/sharing/playlists/<id>` — (friend-signed) this node's
+  current view, for a participant's server to sync
 
 Configure the slskd connection with `SLSKD_HOST` (default `localhost`),
 `SLSKD_PORT` (default `5030`), and `SLSKD_API_KEY`.

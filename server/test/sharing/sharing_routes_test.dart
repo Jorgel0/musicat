@@ -5,6 +5,7 @@ import 'package:musicat_server/src/federation/friend.dart';
 import 'package:musicat_server/src/federation/friend_store.dart';
 import 'package:musicat_server/src/federation/request_signing.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
+import 'package:musicat_server/src/sharing/joint_playlist_store.dart';
 import 'package:musicat_server/src/sharing/shared_track.dart';
 import 'package:musicat_server/src/sharing/shared_track_store.dart';
 import 'package:musicat_server/src/sharing/sharing_routes.dart';
@@ -57,6 +58,7 @@ void main() {
     libraryHandler = buildLibraryRouter(store).call;
     sharingHandler = buildSharingFederationRouter(
       store,
+      JointPlaylistStore(serverDir),
       RequestVerifier(friendStore),
     ).call;
   });

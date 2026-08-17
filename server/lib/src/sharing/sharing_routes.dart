@@ -6,6 +6,7 @@ import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
 import '../federation/request_signing.dart';
+import 'joint_playlist_store.dart';
 import 'shared_track.dart';
 import 'shared_track_store.dart';
 
@@ -98,14 +99,39 @@ Router buildLibraryRouter(SharedTrackStore store) {
 }
 
 /// Federation-facing routes — what a *friend's* server calls to browse and
-/// download what's been shared with them. Every route checks
-/// [SharedTrackVisibility.allows] on top of [verifiedNodeId]'s "is this
-/// even a known, signed-in friend" check.
+/// download what's been shared with them, and (for joint playlists, ADR
+/// 0026) to fetch this node's current view for merging into their own.
+/// Every route checks an object-level authz rule on top of
+/// [verifiedNodeId]'s "is this even a known, signed-in friend" check —
+/// [SharedTrackVisibility.allows] for tracks, playlist membership for
+/// playlists.
+///
+/// Both live under the same `/api/v1/sharing/` prefix and the same
+/// `Router` instance deliberately: mounting two separately-built routers
+/// at the *same* prefix would have the first one's wildcard swallow every
+/// request before the second ever got a chance (see ADR 0025's note on
+/// `/api/v1/federation/` vs `/api/v1/sharing/` for the same reasoning).
 Router buildSharingFederationRouter(
   SharedTrackStore store,
+  JointPlaylistStore playlistStore,
   RequestVerifier verifier,
 ) {
   final router = Router();
+
+  router.get('/playlists/<id>', (Request request, String id) async {
+    final nodeId = await verifiedNodeId(request, verifier);
+    if (nodeId == null) {
+      return _error('Invalid or missing signature', status: 401);
+    }
+
+    final playlist = await playlistStore.findById(id);
+    if (playlist == null) return _error('Not found', status: 404);
+    if (!playlist.participantNodeIds.contains(nodeId)) {
+      return _error('Not a participant in this playlist', status: 403);
+    }
+
+    return _json(playlist.toJson());
+  });
 
   router.get('/shared-tracks', (Request request) async {
     final nodeId = await verifiedNodeId(request, verifier);
