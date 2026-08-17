@@ -68,6 +68,7 @@ traversal is explicitly deferred (see Consequences).
   shared-data endpoint is built** — likely via a short-lived pairing code
   exchanged out-of-band (QR/manual code), which is also where the actual
   pairing UX belongs. Left for a following slice, not decided here.
+  **Closed the same day — see ADR 0020.**
 - **NAT traversal is entirely out of scope for this slice.** Everything
   above was verified between processes that can already reach each other
   directly (localhost, or the same LAN) — nothing here helps two nodes on

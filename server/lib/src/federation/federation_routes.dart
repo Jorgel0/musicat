@@ -5,6 +5,7 @@ import 'package:shelf_router/shelf_router.dart';
 
 import 'friend.dart';
 import 'friend_store.dart';
+import 'pairing_code_store.dart';
 import 'request_signing.dart';
 
 Response _json(Object? body, {int status = 200}) => Response(
@@ -33,11 +34,14 @@ Response _verificationErrorResponse(
 
 /// Builds the `/api/v1/federation/*` routes.
 ///
-/// `POST /friends` (register a friend by nodeId/public key/address) is
-/// deliberately **not** behind signature verification yet — there's no
-/// existing trust relationship to check it against. It's also not yet
-/// gated by anything else (no pairing code, no local-only restriction),
-/// which is a known, explicit gap — see ADR 0019's Consequences.
+/// `POST /friends` (register a friend by nodeId/public key/address) requires
+/// a currently-valid, single-use code from `POST /pairing-codes` — this is
+/// the out-of-band trust bootstrap (a code shared via QR/link) that closes
+/// the gap ADR 0019 flagged (friend registration previously had no
+/// protection at all). Neither of these two routes sits behind
+/// [RequestVerifier]: there's no existing trust relationship yet for
+/// `/friends` to check against, and `/pairing-codes` is what a node offers
+/// to someone *becoming* a friend, so it can't require already being one.
 ///
 /// `GET /ping` **is** behind [RequestVerifier.verify]: it's the proof that
 /// the signing/verification trust model actually works end to end before
@@ -45,8 +49,13 @@ Response _verificationErrorResponse(
 Router buildFederationRouter(
   FriendStore friendStore,
   RequestVerifier verifier,
+  PairingCodeStore pairingCodes,
 ) {
   final router = Router();
+
+  router.post('/pairing-codes', (Request request) async {
+    return _json({'code': pairingCodes.generate()}, status: 201);
+  });
 
   router.post('/friends', (Request request) async {
     final Map<String, dynamic> body;
@@ -56,9 +65,13 @@ Router buildFederationRouter(
       return _error('Request body must be JSON');
     }
 
+    final code = body['code'];
     final nodeId = body['nodeId'];
     final publicKeyBase64 = body['publicKeyBase64'];
     final address = body['address'];
+    if (code is! String || code.isEmpty) {
+      return _error('"code" is required');
+    }
     if (nodeId is! String || nodeId.isEmpty) {
       return _error('"nodeId" is required');
     }
@@ -67,6 +80,13 @@ Router buildFederationRouter(
     }
     if (address is! String || address.isEmpty) {
       return _error('"address" is required');
+    }
+
+    if (!pairingCodes.redeem(code)) {
+      return _error(
+        'Invalid, expired, or already-used pairing code',
+        status: 403,
+      );
     }
 
     await friendStore.add(

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:musicat_server/src/federation/federation_routes.dart';
 import 'package:musicat_server/src/federation/friend_store.dart';
+import 'package:musicat_server/src/federation/pairing_code_store.dart';
 import 'package:musicat_server/src/federation/request_signing.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
 import 'package:musicat_server/src/soulseek/slskd_config.dart';
@@ -54,6 +55,7 @@ void main(List<String> args) async {
   final federationRouter = buildFederationRouter(
     friendStore,
     RequestVerifier(friendStore),
+    PairingCodeStore(),
   );
 
   final handler = Pipeline()

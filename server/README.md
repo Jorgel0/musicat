@@ -17,11 +17,12 @@ instance (ADR 0016) that the app can talk to instead of slskd directly
 (ADR 0017, opt-in via Settings — direct slskd is still fully supported
 too), with a `docker-compose.yml` to self-host the whole thing (ADR 0018).
 
-Phase 4 (federated friend-sharing), first slice: nodes can now sign and
-verify requests to each other using their node identity (ADR 0019) — the
-trust primitive future federation features sit behind. No actual shared
-data yet, and friend registration itself has **no protection yet** (see
-ADR 0019's Consequences) — a pairing-code exchange is a follow-up slice.
+Phase 4 (federated friend-sharing), in progress: nodes sign and verify
+requests to each other using their node identity (ADR 0019), and joining
+as a friend requires a short-lived, single-use pairing code (ADR 0020) —
+the trust primitive future federation features sit behind. No actual
+shared data (library, playlists) yet, and nothing in `app/` talks to these
+endpoints yet either — today they're server-to-server HTTP only.
 
 Endpoints so far:
 - `GET /` — health check (`{"status": "ok"}`)
@@ -38,8 +39,11 @@ Endpoints so far:
 - `DELETE /api/v1/soulseek/downloads/<username>/<id>` — cancels a download
 - `GET /api/v1/soulseek/downloads-directory` — where slskd saves completed
   downloads (`{"directory": "..." | null}`)
-- `POST /api/v1/federation/friends` (`{"nodeId", "publicKeyBase64",
-  "address"}`) — trusts a remote node (unprotected — see above)
+- `POST /api/v1/federation/pairing-codes` — generates a 10-minute,
+  single-use code (`{"code": "..."}`) to hand a friend out-of-band
+- `POST /api/v1/federation/friends` (`{"code", "nodeId",
+  "publicKeyBase64", "address"}`) — trusts a remote node, given a valid
+  pairing code
 - `GET /api/v1/federation/friends` — lists trusted nodes
 - `DELETE /api/v1/federation/friends/<nodeId>` — revokes trust
 - `GET /api/v1/federation/ping` — requires `X-Node-Id`/`X-Timestamp`/
