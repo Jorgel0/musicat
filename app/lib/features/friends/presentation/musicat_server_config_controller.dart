@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/network/federation/federation_client.dart';
+import '../../../core/network/social/sharing_client.dart';
 import '../domain/musicat_server_config.dart';
 
 const _hostKey = 'musicatServerHost';
@@ -36,6 +37,14 @@ final federationClientProvider = Provider<FederationClient?>((ref) {
   final config = ref.watch(musicatServerConfigControllerProvider);
   if (!config.isConfigured) return null;
   return FederationClient(baseUrl: config.baseUrl);
+});
+
+/// `null` when no Musicat Server is configured yet, same as
+/// [federationClientProvider] — both talk to this device's own server.
+final sharingClientProvider = Provider<SharingClient?>((ref) {
+  final config = ref.watch(musicatServerConfigControllerProvider);
+  if (!config.isConfigured) return null;
+  return SharingClient(baseUrl: config.baseUrl);
 });
 
 /// Loads the persisted config, for overriding

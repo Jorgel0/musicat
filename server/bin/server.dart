@@ -87,7 +87,11 @@ void main(List<String> args) async {
 
   final sharedTrackStore = SharedTrackStore(dataDir);
   final playlistStore = JointPlaylistStore(dataDir);
-  final libraryRouter = buildLibraryRouter(sharedTrackStore);
+  final libraryRouter = buildLibraryRouter(
+    sharedTrackStore,
+    friendStore,
+    identity,
+  );
   final playlistRouter = buildPlaylistRouter(
     playlistStore,
     sharedTrackStore,

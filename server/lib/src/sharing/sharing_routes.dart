@@ -2,10 +2,13 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:http/http.dart' as http;
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
+import '../federation/friend_store.dart';
 import '../federation/request_signing.dart';
+import '../identity/node_identity.dart';
 import 'joint_playlist_store.dart';
 import 'shared_track.dart';
 import 'shared_track_store.dart';
@@ -27,15 +30,25 @@ String _generateId() {
   ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }
 
-/// App-facing routes for managing what *this* node shares.
+/// App-facing routes for managing what *this* node shares, and for
+/// browsing/downloading what a friend has shared back (ADR 0029) — the app
+/// itself never holds this node's signing key, so any call to a friend's
+/// `/api/v1/sharing/*` has to be proxied through this server, which does
+/// the actual signing.
 ///
 /// Not yet protected beyond "whoever can reach this server can call it" —
 /// the same known, deliberate gap ADR 0019/0020 already flagged for early
 /// endpoints, growing here to a second one; a general local-API auth
 /// mechanism (rather than a one-off fix per endpoint) is worth addressing
 /// holistically at some point, not decided in this slice.
-Router buildLibraryRouter(SharedTrackStore store) {
+Router buildLibraryRouter(
+  SharedTrackStore store,
+  FriendStore friendStore,
+  NodeIdentity identity, {
+  http.Client? httpClient,
+}) {
   final router = Router();
+  final client = httpClient ?? http.Client();
 
   router.post('/shared-tracks', (Request request) async {
     final Map<String, dynamic> body;
@@ -94,6 +107,86 @@ Router buildLibraryRouter(SharedTrackStore store) {
     await store.remove(id);
     return Response(204);
   });
+
+  router.get('/friends/<nodeId>/shared-tracks', (
+    Request request,
+    String nodeId,
+  ) async {
+    final friend = await friendStore.findByNodeId(nodeId);
+    if (friend == null) return _error('Unknown friend', status: 404);
+
+    const path = '/api/v1/sharing/shared-tracks';
+    final headers = await RequestSigner(
+      identity,
+    ).sign(method: 'GET', path: path);
+    try {
+      final response = await client.get(
+        Uri.parse('http://${friend.address}$path'),
+        headers: headers,
+      );
+      // Forward the friend's own status/body as-is (already a JSON
+      // {"error": ...} shape on failure) rather than re-wrapping it inside
+      // another {"error": ...} envelope.
+      return Response(
+        response.statusCode,
+        body: response.body,
+        headers: {'content-type': 'application/json'},
+      );
+    } catch (e) {
+      return _error('Friend unreachable: $e', status: 502);
+    }
+  });
+
+  Future<Response> proxyFriendFile(
+    String nodeId,
+    String trackId,
+    String suffix,
+    String defaultContentType,
+  ) async {
+    final friend = await friendStore.findByNodeId(nodeId);
+    if (friend == null) return _error('Unknown friend', status: 404);
+
+    final path = '/api/v1/sharing/shared-tracks/$trackId/$suffix';
+    final headers = await RequestSigner(
+      identity,
+    ).sign(method: 'GET', path: path);
+    try {
+      final friendRequest = http.Request(
+        'GET',
+        Uri.parse('http://${friend.address}$path'),
+      )..headers.addAll(headers);
+      final friendResponse = await client.send(friendRequest);
+      if (friendResponse.statusCode != 200) {
+        final body = await friendResponse.stream.bytesToString();
+        return Response(
+          friendResponse.statusCode,
+          body: body,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return Response.ok(
+        friendResponse.stream,
+        headers: {
+          'content-type':
+              friendResponse.headers['content-type'] ?? defaultContentType,
+        },
+      );
+    } catch (e) {
+      return _error('Friend unreachable: $e', status: 502);
+    }
+  }
+
+  router.get(
+    '/friends/<nodeId>/shared-tracks/<id>/file',
+    (Request request, String nodeId, String id) =>
+        proxyFriendFile(nodeId, id, 'file', 'application/octet-stream'),
+  );
+
+  router.get(
+    '/friends/<nodeId>/shared-tracks/<id>/cover',
+    (Request request, String nodeId, String id) =>
+        proxyFriendFile(nodeId, id, 'cover', 'image/jpeg'),
+  );
 
   return router;
 }

@@ -9,6 +9,7 @@ import 'albums_tab.dart';
 import 'artists_tab.dart';
 import 'library_providers.dart';
 import 'pick_and_scan_folder.dart';
+import 'share_with_friend_sheet.dart';
 
 class LibraryScreen extends ConsumerWidget {
   const LibraryScreen({super.key});
@@ -72,10 +73,20 @@ class _SongsTab extends ConsumerWidget {
                   : const Icon(Icons.music_note, size: 48),
               title: Text(track.title),
               subtitle: Text('${track.artist} — ${track.album}'),
-              trailing: IconButton(
-                icon: const Icon(Icons.playlist_add),
-                tooltip: 'Add to playlist',
-                onPressed: () => showAddToPlaylistSheet(context, track),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.person_add_alt_outlined),
+                    tooltip: 'Share with a friend',
+                    onPressed: () => showShareWithFriendSheet(context, track),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.playlist_add),
+                    tooltip: 'Add to playlist',
+                    onPressed: () => showAddToPlaylistSheet(context, track),
+                  ),
+                ],
               ),
               onTap: () async {
                 final controller = ref.read(audioPlayerControllerProvider);

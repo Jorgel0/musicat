@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../domain/musicat_server_config.dart';
 import 'friends_controller.dart';
@@ -122,6 +123,7 @@ class _FriendsList extends ConsumerWidget {
                   .read(friendsControllerProvider.notifier)
                   .removeFriend(entry.friend.nodeId),
             ),
+            onTap: () => context.push('/friends/${entry.friend.nodeId}'),
           );
         },
       ),

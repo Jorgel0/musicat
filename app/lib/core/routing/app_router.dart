@@ -1,6 +1,7 @@
 import 'package:go_router/go_router.dart';
 
 import '../../features/downloads/presentation/downloads_screen.dart';
+import '../../features/friends/presentation/friend_detail_screen.dart';
 import '../../features/friends/presentation/friends_screen.dart';
 import '../../features/library/presentation/album_detail_screen.dart';
 import '../../features/library/presentation/artist_detail_screen.dart';
@@ -60,6 +61,13 @@ final appRouter = GoRouter(
         GoRoute(
           path: '/friends',
           builder: (context, state) => const FriendsScreen(),
+          routes: [
+            GoRoute(
+              path: ':nodeId',
+              builder: (context, state) =>
+                  FriendDetailScreen(nodeId: state.pathParameters['nodeId']!),
+            ),
+          ],
         ),
         GoRoute(
           path: '/settings',

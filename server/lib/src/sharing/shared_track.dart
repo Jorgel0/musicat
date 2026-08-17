@@ -66,6 +66,11 @@ class AllFriendsVisibility extends SharedTrackVisibility {
   Map<String, Object?> toJson() => {'type': 'allFriends'};
 }
 
+String _extensionOf(String filePath) {
+  final dot = filePath.lastIndexOf('.');
+  return dot == -1 ? '' : filePath.substring(dot);
+}
+
 /// A local file this node has offered to share — never the file itself,
 /// just its metadata, until a friend specifically asks to download it
 /// (see `sharing_routes.dart`).
@@ -96,12 +101,16 @@ class SharedTrack {
   /// deliberately omits [filePath]/[coverArtPath] (local disk paths,
   /// meaningless — and a path-disclosure risk — to a remote peer) and
   /// [visibility] (irrelevant to the friend it's already been resolved for).
+  /// [extension] (e.g. `.flac`) is included despite coming from [filePath]
+  /// — it's needed for the friend to name/import the file it downloads,
+  /// and reveals nothing about the sharer's actual directory layout.
   Map<String, Object?> toPublicJson() => {
     'id': id,
     'title': title,
     'artist': artist,
     'album': album,
     'hasCoverArt': coverArtPath != null,
+    'extension': _extensionOf(filePath),
   };
 
   Map<String, Object?> toStorageJson() => {

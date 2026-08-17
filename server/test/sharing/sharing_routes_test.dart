@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:musicat_server/src/federation/friend.dart';
 import 'package:musicat_server/src/federation/friend_store.dart';
 import 'package:musicat_server/src/federation/request_signing.dart';
@@ -20,6 +22,7 @@ void main() {
   late File coverFile;
   late SharedTrackStore store;
   late FriendStore friendStore;
+  late NodeIdentity serverIdentity;
   late NodeIdentity friend1;
   late NodeIdentity friend2;
   late Handler libraryHandler;
@@ -37,6 +40,7 @@ void main() {
 
     store = SharedTrackStore(serverDir);
     friendStore = FriendStore(serverDir);
+    serverIdentity = await NodeIdentityStore(serverDir).loadOrCreate();
     friend1 = await NodeIdentityStore(friend1Dir).loadOrCreate();
     friend2 = await NodeIdentityStore(friend2Dir).loadOrCreate();
 
@@ -55,7 +59,11 @@ void main() {
       ),
     );
 
-    libraryHandler = buildLibraryRouter(store).call;
+    libraryHandler = buildLibraryRouter(
+      store,
+      friendStore,
+      serverIdentity,
+    ).call;
     sharingHandler = buildSharingFederationRouter(
       store,
       JointPlaylistStore(serverDir),
@@ -156,6 +164,155 @@ void main() {
     });
   });
 
+  group('buildLibraryRouter friend proxy', () {
+    Future<Response> getViaHandler(Handler handler, String path) async =>
+        handler(Request('GET', Uri.parse('http://localhost$path')));
+
+    test('404s for an unknown friend nodeId', () async {
+      final handler = buildLibraryRouter(
+        store,
+        friendStore,
+        serverIdentity,
+      ).call;
+      final response = await getViaHandler(
+        handler,
+        '/friends/not-a-real-node/shared-tracks',
+      );
+      expect(response.statusCode, 404);
+    });
+
+    test(
+      'signs a GET to the friend and returns their shared-tracks list',
+      () async {
+        http.BaseRequest? captured;
+        final handler = buildLibraryRouter(
+          store,
+          friendStore,
+          serverIdentity,
+          httpClient: MockClient((request) async {
+            captured = request;
+            return http.Response(
+              jsonEncode([
+                {'id': 't1', 'title': 'Around the World'},
+              ]),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
+          }),
+        ).call;
+
+        final response = await getViaHandler(
+          handler,
+          '/friends/${friend1.nodeId}/shared-tracks',
+        );
+
+        expect(response.statusCode, 200);
+        final body = jsonDecode(await response.readAsString()) as List<dynamic>;
+        expect((body.single as Map)['title'], 'Around the World');
+
+        expect(captured, isNotNull);
+        expect(
+          captured!.url,
+          Uri.parse('http://friend1.example:8080/api/v1/sharing/shared-tracks'),
+        );
+        expect(captured!.headers['x-node-id'], serverIdentity.nodeId);
+        expect(captured!.headers.containsKey('x-signature'), isTrue);
+      },
+    );
+
+    test("forwards the friend's error status instead of masking it", () async {
+      final handler = buildLibraryRouter(
+        store,
+        friendStore,
+        serverIdentity,
+        httpClient: MockClient(
+          (_) async => http.Response(jsonEncode({'error': 'nope'}), 403),
+        ),
+      ).call;
+
+      final response = await getViaHandler(
+        handler,
+        '/friends/${friend1.nodeId}/shared-tracks',
+      );
+      expect(response.statusCode, 403);
+    });
+
+    test('returns 502 when the friend is unreachable', () async {
+      final handler = buildLibraryRouter(
+        store,
+        friendStore,
+        serverIdentity,
+        httpClient: MockClient((_) async => throw const SocketException('x')),
+      ).call;
+
+      final response = await getViaHandler(
+        handler,
+        '/friends/${friend1.nodeId}/shared-tracks',
+      );
+      expect(response.statusCode, 502);
+    });
+
+    test('streams a shared track file through from the friend', () async {
+      final handler = buildLibraryRouter(
+        store,
+        friendStore,
+        serverIdentity,
+        httpClient: MockClient((request) async {
+          expect(request.url.path, '/api/v1/sharing/shared-tracks/t1/file');
+          return http.Response.bytes([10, 20, 30], 200);
+        }),
+      ).call;
+
+      final response = await getViaHandler(
+        handler,
+        '/friends/${friend1.nodeId}/shared-tracks/t1/file',
+      );
+
+      expect(response.statusCode, 200);
+      final bytes = await response.read().expand((chunk) => chunk).toList();
+      expect(bytes, [10, 20, 30]);
+    });
+
+    test('forwards a 403 from the friend on the file proxy too', () async {
+      final handler = buildLibraryRouter(
+        store,
+        friendStore,
+        serverIdentity,
+        httpClient: MockClient(
+          (_) async =>
+              http.Response(jsonEncode({'error': 'Not shared with you'}), 403),
+        ),
+      ).call;
+
+      final response = await getViaHandler(
+        handler,
+        '/friends/${friend1.nodeId}/shared-tracks/t1/file',
+      );
+      expect(response.statusCode, 403);
+    });
+
+    test('streams cover art through from the friend', () async {
+      final handler = buildLibraryRouter(
+        store,
+        friendStore,
+        serverIdentity,
+        httpClient: MockClient((request) async {
+          expect(request.url.path, '/api/v1/sharing/shared-tracks/t1/cover');
+          return http.Response.bytes([9, 9, 9], 200);
+        }),
+      ).call;
+
+      final response = await getViaHandler(
+        handler,
+        '/friends/${friend1.nodeId}/shared-tracks/t1/cover',
+      );
+
+      expect(response.statusCode, 200);
+      final bytes = await response.read().expand((chunk) => chunk).toList();
+      expect(bytes, [9, 9, 9]);
+    });
+  });
+
   group('buildSharingFederationRouter', () {
     Future<Map<String, String>> signHeaders(
       NodeIdentity identity,
@@ -202,6 +359,10 @@ void main() {
         expect(body, hasLength(2));
         // Only public fields -- never the local filePath.
         expect(body.every((t) => !(t as Map).containsKey('filePath')), isTrue);
+        // The extension is still exposed -- the friend needs it to name/
+        // import whatever it downloads, and it reveals nothing about the
+        // sharer's actual directory layout.
+        expect(body.every((t) => (t as Map)['extension'] == '.flac'), isTrue);
 
         final headers2 = await signHeaders(friend2, '/shared-tracks');
         final response2 = await get('/shared-tracks', headers2);
