@@ -70,7 +70,7 @@ Endpoints so far:
 - `GET /api/v1/federation/ping` — requires `X-Node-Id`/`X-Timestamp`/
   `X-Signature` headers from a trusted friend; `{"pong": true}` if valid
 - `POST /api/v1/library/shared-tracks` (`{"filePath", "title", "artist",
-  "album"?, "coverArtPath"?, "visibility": {"type": "friend", "nodeId"} |
+  "album"?, "coverArtPath"?, "visibility": {"type": "friends", "nodeIds"} |
   {"type": "allFriends"}}`) — shares a local file's metadata
 - `GET /api/v1/library/shared-tracks` — lists what this node shares
 - `DELETE /api/v1/library/shared-tracks/<id>` — stops sharing it

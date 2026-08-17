@@ -21,6 +21,10 @@ audience, not decided or built here.
   sharing route runs *in addition to* [[project_musicat_overview]]'s
   existing "is this even a known friend" check (ADR 0019) — being a
   friend at all is necessary but never sufficient.
+  **Generalized the same day — see ADR 0027**: `FriendVisibility` (one
+  node) was replaced by `FriendsVisibility` (a set), once a 3+-person
+  joint playlist (ADR 0026) revealed a real gap in the original two-case
+  design.
 - **`SharedTrack`** — `id`, local `filePath` (never sent to a peer
   directly), `title`/`artist`/`album`/`coverArtPath`, `visibility`.
   `toPublicJson()` deliberately omits `filePath`/`coverArtPath` (local

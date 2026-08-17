@@ -19,16 +19,26 @@ import 'package:test/test.dart';
 void main() {
   late Directory serverDir;
   late Directory friendDir;
+  late Directory friend2Dir;
+  late Directory outsiderDir;
   late File musicFile;
   late JointPlaylistStore playlistStore;
   late SharedTrackStore sharedTrackStore;
   late FriendStore friendStore;
   late NodeIdentity identity;
   late NodeIdentity friend;
+  late NodeIdentity friend2;
+  late NodeIdentity outsider;
 
   setUp(() async {
     serverDir = Directory.systemTemp.createTempSync('musicat_playlist_routes_');
     friendDir = Directory.systemTemp.createTempSync('musicat_playlist_friend_');
+    friend2Dir = Directory.systemTemp.createTempSync(
+      'musicat_playlist_friend2_',
+    );
+    outsiderDir = Directory.systemTemp.createTempSync(
+      'musicat_playlist_outsider_',
+    );
     musicFile = File('${serverDir.path}/track.flac')
       ..writeAsBytesSync([1, 2, 3]);
 
@@ -37,19 +47,28 @@ void main() {
     friendStore = FriendStore(serverDir);
     identity = await NodeIdentityStore(serverDir).loadOrCreate();
     friend = await NodeIdentityStore(friendDir).loadOrCreate();
+    friend2 = await NodeIdentityStore(friend2Dir).loadOrCreate();
+    // A real, trusted friend of this node's -- just not a member of the
+    // playlists these tests create. Used to prove tracks added to an
+    // N-participant playlist aren't leaked beyond its actual members.
+    outsider = await NodeIdentityStore(outsiderDir).loadOrCreate();
 
-    await friendStore.add(
-      Friend(
-        nodeId: friend.nodeId,
-        publicKeyBase64: await friend.publicKeyBase64(),
-        address: 'friend.example:8080',
-      ),
-    );
+    for (final f in [friend, friend2, outsider]) {
+      await friendStore.add(
+        Friend(
+          nodeId: f.nodeId,
+          publicKeyBase64: await f.publicKeyBase64(),
+          address: '${f.nodeId}.example:8080',
+        ),
+      );
+    }
   });
 
   tearDown(() {
     serverDir.deleteSync(recursive: true);
     friendDir.deleteSync(recursive: true);
+    friend2Dir.deleteSync(recursive: true);
+    outsiderDir.deleteSync(recursive: true);
   });
 
   group('buildPlaylistRouter', () {
@@ -150,6 +169,41 @@ void main() {
         expect(sharedTrack, isNotNull);
         expect(sharedTrack!.visibility.allows(friend.nodeId), isTrue);
         expect(sharedTrack.visibility.allows('some-other-node'), isFalse);
+      },
+    );
+
+    test(
+      'with more than one other participant, a shared item stays scoped to '
+      'exactly those participants -- never widened to every friend',
+      () async {
+        // Regression test: an earlier version fell back to
+        // AllFriendsVisibility whenever a playlist had more than one other
+        // participant, which would have leaked the track to `outsider`
+        // here even though they're not in this playlist at all.
+        final handler = handlerWith(
+          MockClient((_) async => http.Response('', 500)),
+        );
+        final createResponse = await post(handler, '/playlists', {
+          'name': 'Group trip',
+          'participantNodeIds': [friend.nodeId, friend2.nodeId],
+        });
+        final id =
+            jsonDecode(await createResponse.readAsString())['id'] as String;
+
+        await post(handler, '/playlists/$id/items', {
+          'filePath': musicFile.path,
+          'title': 'One More Time',
+          'artist': 'Daft Punk',
+        });
+
+        final playlist = await playlistStore.findById(id);
+        final sharedTrack = await sharedTrackStore.findById(
+          playlist!.items.single.sharedTrackId,
+        );
+
+        expect(sharedTrack!.visibility.allows(friend.nodeId), isTrue);
+        expect(sharedTrack.visibility.allows(friend2.nodeId), isTrue);
+        expect(sharedTrack.visibility.allows(outsider.nodeId), isFalse);
       },
     );
 

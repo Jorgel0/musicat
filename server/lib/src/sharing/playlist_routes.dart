@@ -127,9 +127,10 @@ Router buildPlaylistRouter(
       return _error('File not found: $filePath', status: 404);
     }
 
-    // The track is offered to every other participant, so it can be
-    // downloaded from *this* node's own shared-tracks endpoint — reusing
-    // ADR 0025's mechanism rather than a second, parallel one.
+    // The track is offered to *exactly* this playlist's other
+    // participants, whether there's one or several -- never widened to
+    // "all friends", which would leak it to friends outside this
+    // playlist entirely (see ADR 0027).
     final sharedTrack = SharedTrack(
       id: _generateId(),
       filePath: filePath,
@@ -137,9 +138,7 @@ Router buildPlaylistRouter(
       artist: artist,
       album: body['album'] as String?,
       coverArtPath: body['coverArtPath'] as String?,
-      visibility: playlist.participantNodeIds.length == 1
-          ? FriendVisibility(playlist.participantNodeIds.single)
-          : const AllFriendsVisibility(),
+      visibility: FriendsVisibility(playlist.participantNodeIds.toSet()),
     );
     await sharedTrackStore.add(sharedTrack);
 

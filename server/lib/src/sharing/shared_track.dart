@@ -4,11 +4,14 @@
 /// go through in addition to [RequestVerifier]'s "is this even a known
 /// friend" check (see `sharing_routes.dart`) — being *a* friend is
 /// necessary but never sufficient; a track must specifically have been
-/// shared with *this* friend, or with all of them.
+/// shared with *this* friend (or set of friends), or with all of them.
 abstract class SharedTrackVisibility {
   const SharedTrackVisibility();
 
-  factory SharedTrackVisibility.friend(String nodeId) = FriendVisibility;
+  /// Shared with exactly this one friend (e.g. a direct "send to a
+  /// friend") — equivalent to `FriendsVisibility({nodeId})`.
+  factory SharedTrackVisibility.friend(String nodeId) =>
+      FriendsVisibility({nodeId});
 
   const factory SharedTrackVisibility.allFriends() = AllFriendsVisibility;
 
@@ -20,24 +23,36 @@ abstract class SharedTrackVisibility {
 
   factory SharedTrackVisibility.fromJson(Map<String, dynamic> json) {
     return switch (json['type']) {
-      'friend' => FriendVisibility(json['nodeId'] as String),
+      // 'friend' (a single nodeId) is still accepted for backward
+      // compatibility with anything already persisted before
+      // FriendsVisibility replaced it.
+      'friend' => FriendsVisibility({json['nodeId'] as String}),
+      'friends' => FriendsVisibility({
+        for (final id in json['nodeIds'] as List<dynamic>) id as String,
+      }),
       'allFriends' => const AllFriendsVisibility(),
       _ => throw FormatException('Unknown visibility type: ${json['type']}'),
     };
   }
 }
 
-/// Shared with one specific friend only (e.g. a direct "send to a friend").
-class FriendVisibility extends SharedTrackVisibility {
-  const FriendVisibility(this.nodeId);
+/// Shared with exactly this set of friends — a direct send is just the
+/// one-element case of this, and a joint playlist with N participants
+/// (ADR 0027) is the general case: never widened to "all friends" just
+/// because there's more than one other participant.
+class FriendsVisibility extends SharedTrackVisibility {
+  const FriendsVisibility(this.nodeIds);
 
-  final String nodeId;
+  final Set<String> nodeIds;
 
   @override
-  bool allows(String requestingNodeId) => requestingNodeId == nodeId;
+  bool allows(String requestingNodeId) => nodeIds.contains(requestingNodeId);
 
   @override
-  Map<String, Object?> toJson() => {'type': 'friend', 'nodeId': nodeId};
+  Map<String, Object?> toJson() => {
+    'type': 'friends',
+    'nodeIds': nodeIds.toList(),
+  };
 }
 
 /// Shared with every current friend (e.g. a curated "profile" of tracks).

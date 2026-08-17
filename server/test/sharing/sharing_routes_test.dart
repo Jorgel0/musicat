@@ -97,7 +97,7 @@ void main() {
       final body = jsonDecode(await response.readAsString());
       final track = await store.findById(body['id'] as String);
       expect(track?.title, 'One More Time');
-      expect(track?.visibility, isA<FriendVisibility>());
+      expect(track?.visibility, isA<FriendsVisibility>());
     });
 
     test('shares a track with all friends', () async {
@@ -181,7 +181,7 @@ void main() {
             filePath: musicFile.path,
             title: 'Just for friend 1',
             artist: 'Daft Punk',
-            visibility: FriendVisibility(friend1.nodeId),
+            visibility: FriendsVisibility({friend1.nodeId}),
           ),
         );
         await store.add(
@@ -221,7 +221,7 @@ void main() {
             filePath: musicFile.path,
             title: 'x',
             artist: 'y',
-            visibility: FriendVisibility(friend1.nodeId),
+            visibility: FriendsVisibility({friend1.nodeId}),
           ),
         );
 
@@ -243,7 +243,7 @@ void main() {
             filePath: musicFile.path,
             title: 'x',
             artist: 'y',
-            visibility: FriendVisibility(friend1.nodeId),
+            visibility: FriendsVisibility({friend1.nodeId}),
           ),
         );
 

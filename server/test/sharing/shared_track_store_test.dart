@@ -24,7 +24,7 @@ void main() {
     filePath: '/music/a.flac',
     title: 'One More Time',
     artist: 'Daft Punk',
-    visibility: FriendVisibility('friend-1'),
+    visibility: FriendsVisibility({'friend-1'}),
   );
 
   const trackSharedWithAllFriends = SharedTrack(
@@ -48,8 +48,8 @@ void main() {
 
     expect(track, isNotNull);
     expect(track!.title, 'One More Time');
-    expect(track.visibility, isA<FriendVisibility>());
-    expect((track.visibility as FriendVisibility).nodeId, 'friend-1');
+    expect(track.visibility, isA<FriendsVisibility>());
+    expect((track.visibility as FriendsVisibility).nodeIds, {'friend-1'});
   });
 
   test('adding a track with the same id replaces the old entry', () async {
