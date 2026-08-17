@@ -7,23 +7,30 @@ import '../federation/request_signing.dart';
 import '../identity/node_identity.dart';
 import 'stun_client.dart';
 
-/// UDP hole-punching for Fase 4 federation (ADR 0023).
+/// UDP hole-punching and keepalive for Fase 4 federation (ADR 0023/0024).
 ///
 /// Reuses [RequestSigner]/[RequestVerifier]'s exact signing scheme (ADR
-/// 0019) for punch packets — a fixed pseudo method/path stands in for the
-/// method/path an HTTP request would have, so accepting a signed punch
-/// packet on this socket is exactly as trustworthy as accepting a signed
-/// HTTP request from the same friend, not a separate, weaker trust check.
+/// 0019) for every packet sent on this socket — a fixed pseudo method/path
+/// stands in for the method/path an HTTP request would have. The same
+/// signed payload shape is used for the initial punch burst and for
+/// ongoing keepalives: from a trust standpoint both are just "prove you're
+/// nodeId X", so there's no need for the wire protocol to distinguish them.
 class UdpPuncher {
   UdpPuncher({required this.identity, required this.friendStore});
 
   final NodeIdentity identity;
   final FriendStore friendStore;
 
-  static const _punchMethod = 'UDP-PUNCH';
-  static const _punchPath = '/nat/punch';
+  static const _method = 'UDP-PUNCH';
+  static const _path = '/nat/punch';
 
   RawDatagramSocket? _socket;
+  StreamSubscription<RawSocketEvent>? _listenerSubscription;
+  final StreamController<String> _validPacketController =
+      StreamController<String>.broadcast();
+  final Map<String, DateTime> _lastSeen = {};
+  final Map<String, Timer> _keepaliveTimers = {};
+
   StunAddress? _cachedCandidate;
 
   /// The local port this puncher is bound to — the same port must be used
@@ -41,10 +48,27 @@ class UdpPuncher {
   Future<int> bind({int port = 0}) async {
     final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, port);
     _socket = socket;
+    final verifier = RequestVerifier(friendStore);
+    _listenerSubscription = socket.listen((event) async {
+      if (event != RawSocketEvent.read) return;
+      final datagram = socket.receive();
+      if (datagram == null) return;
+      final nodeId = await _verifyIncoming(verifier, datagram.data);
+      if (nodeId != null) {
+        _lastSeen[nodeId] = DateTime.now();
+        _validPacketController.add(nodeId);
+      }
+    });
     return socket.port;
   }
 
   Future<void> close() async {
+    for (final timer in _keepaliveTimers.values) {
+      timer.cancel();
+    }
+    _keepaliveTimers.clear();
+    await _listenerSubscription?.cancel();
+    _listenerSubscription = null;
     _socket?.close();
     _socket = null;
   }
@@ -64,6 +88,21 @@ class UdpPuncher {
     );
     _cachedCandidate = result;
     return result;
+  }
+
+  /// When a validly-signed packet from [nodeId] was last received — `null`
+  /// if none ever has been.
+  DateTime? lastSeen(String nodeId) => _lastSeen[nodeId];
+
+  /// Whether a signed packet from [nodeId] arrived within [within] of now —
+  /// the practical "is this friend's hole still open" check, since a NAT
+  /// mapping that isn't actively refreshed can silently expire.
+  bool isConnected(
+    String nodeId, {
+    Duration within = const Duration(seconds: 45),
+  }) {
+    final seen = _lastSeen[nodeId];
+    return seen != null && DateTime.now().difference(seen) <= within;
   }
 
   /// Sends repeated signed punch packets toward [host]:[port] for
@@ -88,25 +127,12 @@ class UdpPuncher {
     final targetAddress = await _resolve(host);
     if (targetAddress == null) return null;
 
-    final verifier = RequestVerifier(friendStore);
-    final completer = Completer<String?>();
-    final subscription = socket.listen((event) async {
-      if (event != RawSocketEvent.read) return;
-      final datagram = socket.receive();
-      if (datagram == null) return;
-      final nodeId = await _verifyIncoming(verifier, datagram.data);
-      if (nodeId != null && !completer.isCompleted) {
-        completer.complete(nodeId);
-      }
-    });
-
-    final payload = utf8.encode(
-      jsonEncode(
-        await RequestSigner(
-          identity,
-        ).sign(method: _punchMethod, path: _punchPath),
-      ),
+    // .then<String?> actually rewraps the Future (not just a static-type
+    // widening) so .timeout()'s onTimeout can return null below.
+    final firstValid = _validPacketController.stream.first.then<String?>(
+      (value) => value,
     );
+    final payload = await _signedPayload();
 
     final timer = Timer.periodic(interval, (_) {
       socket.send(payload, targetAddress, port);
@@ -114,13 +140,85 @@ class UdpPuncher {
     // Fire one immediately rather than waiting for the first tick.
     socket.send(payload, targetAddress, port);
 
-    final result = await completer.future.timeout(
-      duration,
-      onTimeout: () => null,
-    );
+    final result = await firstValid.timeout(duration, onTimeout: () => null);
     timer.cancel();
-    await subscription.cancel();
     return result;
+  }
+
+  /// [punch]es toward [host]:[port], then starts a [startKeepalive] loop
+  /// for [nodeId] regardless of whether that initial punch heard anything
+  /// back. Returns whether it did.
+  ///
+  /// Keepalives are started unconditionally — confirmed here with two real
+  /// server processes: each side's outbound packets are what keep *its
+  /// own* NAT mapping open for the peer to reach it, independent of
+  /// whether it has itself confirmed the reverse direction yet. Gating
+  /// keepalives on `punch()`'s own success caused a real, observed bug —
+  /// one side's packets were reaching the other fine, but because that
+  /// side's own `punch()` call happened to time out waiting to hear back
+  /// within its 5-second window, it gave up and stopped sending
+  /// altogether, even though it was already working one-way and likely
+  /// would have gone both ways shortly after.
+  Future<bool> punchAndMaintain({
+    required String nodeId,
+    required String host,
+    required int port,
+    Duration punchDuration = const Duration(seconds: 5),
+    Duration keepaliveInterval = const Duration(seconds: 20),
+  }) async {
+    final result = await punch(host: host, port: port, duration: punchDuration);
+    startKeepalive(
+      nodeId: nodeId,
+      host: host,
+      port: port,
+      interval: keepaliveInterval,
+    );
+    return result != null;
+  }
+
+  /// Starts sending a signed packet toward [host]:[port] every [interval],
+  /// so the NAT mapping [punch] opened for [nodeId] doesn't expire from
+  /// inactivity. Calling this again for the same [nodeId] replaces the
+  /// previous loop (e.g. after a fresh pairing changed the candidate).
+  void startKeepalive({
+    required String nodeId,
+    required String host,
+    required int port,
+    Duration interval = const Duration(seconds: 20),
+  }) {
+    final socket = _socket;
+    if (socket == null) throw StateError('bind() must be called first');
+    stopKeepalive(nodeId);
+
+    unawaited(() async {
+      final targetAddress = await _resolve(host);
+      final currentSocket = _socket;
+      // bind()/close() or another startKeepalive(nodeId) call may have
+      // happened while resolving the address above — bail rather than
+      // arm a timer for a socket that's gone or has been superseded.
+      if (targetAddress == null ||
+          currentSocket == null ||
+          _keepaliveTimers.containsKey(nodeId)) {
+        return;
+      }
+      final payload = await _signedPayload();
+      _keepaliveTimers[nodeId] = Timer.periodic(interval, (_) {
+        currentSocket.send(payload, targetAddress, port);
+      });
+    }());
+  }
+
+  void stopKeepalive(String nodeId) {
+    _keepaliveTimers.remove(nodeId)?.cancel();
+  }
+
+  bool isMaintaining(String nodeId) => _keepaliveTimers.containsKey(nodeId);
+
+  Future<List<int>> _signedPayload() async {
+    final headers = await RequestSigner(
+      identity,
+    ).sign(method: _method, path: _path);
+    return utf8.encode(jsonEncode(headers));
   }
 
   Future<String?> _verifyIncoming(
@@ -130,8 +228,8 @@ class UdpPuncher {
     try {
       final headers = jsonDecode(utf8.decode(data)) as Map<String, dynamic>;
       final result = await verifier.verify(
-        method: _punchMethod,
-        path: _punchPath,
+        method: _method,
+        path: _path,
         body: '',
         nodeId: headers['X-Node-Id'] as String?,
         timestamp: headers['X-Timestamp'] as String?,

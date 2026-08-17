@@ -212,6 +212,30 @@ void main() {
       expect(response.statusCode, 204);
       expect(await friendStore.findByNodeId('friend-1'), isNull);
     });
+
+    test(
+      'stops maintaining any active NAT keepalive for that friend',
+      () async {
+        puncher.startKeepalive(nodeId: 'friend-1', host: '127.0.0.1', port: 1);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(puncher.isMaintaining('friend-1'), isTrue);
+
+        await delete('/friends/friend-1');
+
+        expect(puncher.isMaintaining('friend-1'), isFalse);
+      },
+    );
+  });
+
+  group('GET /friends/<nodeId>/status', () {
+    test('reports not connected for a node never seen', () async {
+      final response = await get('/friends/unknown-node/status');
+      final body = jsonDecode(await response.readAsString());
+
+      expect(response.statusCode, 200);
+      expect(body['connected'], isFalse);
+      expect(body['lastSeen'], isNull);
+    });
   });
 
   group('GET /ping', () {

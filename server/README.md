@@ -23,10 +23,11 @@ as a friend requires a short-lived, single-use pairing code (ADR 0020) —
 the trust primitive future federation features sit behind. NAT traversal
 (so two friends on different home networks can actually reach each other)
 is built directly into the server rather than requiring a separate tool
-like Tailscale: pairing now also exchanges each side's STUN-discovered UDP
-address and automatically attempts a hole-punch in the background (ADR
-0022/0023) — verified working between two real server processes, though
-not yet across a real NAT boundary. No actual shared data (library,
+like Tailscale: pairing exchanges each side's STUN-discovered UDP address,
+attempts a hole-punch, and then keeps it alive with periodic signed
+packets (ADR 0022/0023/0024) — verified working (including staying
+connected over an extended real test) between two real server processes,
+though not yet across a real NAT boundary. No actual shared data (library,
 playlists) yet, and nothing in `app/` talks to these endpoints yet either —
 today they're server-to-server HTTP only.
 
@@ -53,7 +54,10 @@ Endpoints so far:
   `udpCandidate`, and triggers a background NAT hole-punch attempt toward
   the caller's if one was provided
 - `GET /api/v1/federation/friends` — lists trusted nodes
-- `DELETE /api/v1/federation/friends/<nodeId>` — revokes trust
+- `DELETE /api/v1/federation/friends/<nodeId>` — revokes trust and stops
+  maintaining its NAT keepalive
+- `GET /api/v1/federation/friends/<nodeId>/status` —
+  `{"connected": bool, "lastSeen": "...ISO..." | null}`
 - `GET /api/v1/federation/ping` — requires `X-Node-Id`/`X-Timestamp`/
   `X-Signature` headers from a trusted friend; `{"pong": true}` if valid
 

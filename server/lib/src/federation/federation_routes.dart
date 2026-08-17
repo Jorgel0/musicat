@@ -52,7 +52,10 @@ Response _verificationErrorResponse(
 /// `POST /friends` also accepts an optional `udpCandidate` (the caller's
 /// own STUN-discovered address, ADR 0022) and returns this node's current
 /// one in the response — and, when a candidate was provided, immediately
-/// attempts a NAT hole-punch toward it in the background (ADR 0023).
+/// attempts a NAT hole-punch and starts maintaining it with keepalives in
+/// the background (ADR 0023/0024). `GET /friends/<nodeId>/status` reports
+/// whether that connection is currently alive; revoking a friend
+/// (`DELETE`) also stops maintaining it.
 Router buildFederationRouter(
   FriendStore friendStore,
   RequestVerifier verifier,
@@ -116,7 +119,13 @@ Router buildFederationRouter(
       if (parts.length == 2) {
         final targetPort = int.tryParse(parts[1]);
         if (targetPort != null) {
-          unawaited(puncher.punch(host: parts[0], port: targetPort));
+          unawaited(
+            puncher.punchAndMaintain(
+              nodeId: nodeId,
+              host: parts[0],
+              port: targetPort,
+            ),
+          );
         }
       }
     }
@@ -134,7 +143,19 @@ Router buildFederationRouter(
 
   router.delete('/friends/<nodeId>', (Request request, String nodeId) async {
     await friendStore.remove(nodeId);
+    puncher.stopKeepalive(nodeId);
     return Response(204);
+  });
+
+  router.get('/friends/<nodeId>/status', (
+    Request request,
+    String nodeId,
+  ) async {
+    final lastSeen = puncher.lastSeen(nodeId);
+    return _json({
+      'connected': puncher.isConnected(nodeId),
+      'lastSeen': lastSeen?.toIso8601String(),
+    });
   });
 
   router.get('/ping', (Request request) async {
