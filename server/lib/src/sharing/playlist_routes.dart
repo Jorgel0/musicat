@@ -45,7 +45,7 @@ Router buildPlaylistRouter(
   final client = httpClient ?? http.Client();
   final router = Router();
 
-  router.post('/playlists', (Request request) async {
+  router.post('/', (Request request) async {
     final Map<String, dynamic> body;
     try {
       body = jsonDecode(await request.readAsString()) as Map<String, dynamic>;
@@ -84,23 +84,23 @@ Router buildPlaylistRouter(
     return _json({'id': playlist.id}, status: 201);
   });
 
-  router.get('/playlists', (Request request) async {
+  router.get('/', (Request request) async {
     final playlists = await playlistStore.loadAll();
     return _json([for (final playlist in playlists) playlist.toJson()]);
   });
 
-  router.get('/playlists/<id>', (Request request, String id) async {
+  router.get('/<id>', (Request request, String id) async {
     final playlist = await playlistStore.findById(id);
     if (playlist == null) return _error('Not found', status: 404);
     return _json(playlist.toJson());
   });
 
-  router.delete('/playlists/<id>', (Request request, String id) async {
+  router.delete('/<id>', (Request request, String id) async {
     await playlistStore.remove(id);
     return Response(204);
   });
 
-  router.post('/playlists/<id>/items', (Request request, String id) async {
+  router.post('/<id>/items', (Request request, String id) async {
     final playlist = await playlistStore.findById(id);
     if (playlist == null) return _error('Not found', status: 404);
 
@@ -149,6 +149,7 @@ Router buildPlaylistRouter(
       album: body['album'] as String?,
       ownerNodeId: identity.nodeId,
       sharedTrackId: sharedTrack.id,
+      extension: extensionOf(filePath),
       addedAt: DateTime.now().toUtc(),
     );
     final updated = playlist.copyWith(
@@ -160,7 +161,7 @@ Router buildPlaylistRouter(
     return _json({'itemId': item.id}, status: 201);
   });
 
-  router.post('/playlists/<id>/sync', (Request request, String id) async {
+  router.post('/<id>/sync', (Request request, String id) async {
     final playlist = await playlistStore.findById(id);
     if (playlist == null) return _error('Not found', status: 404);
 

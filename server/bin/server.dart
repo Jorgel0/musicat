@@ -50,7 +50,13 @@ Router _buildRouter(
     // the parent mount's wildcard would swallow it first.
     ..mount('/api/v1/sharing/', sharingFederationRouter.call)
     ..mount('/api/v1/library/', libraryRouter.call)
-    ..mount('/api/v1/playlists/', playlistRouter.call);
+    // No trailing slash here, unlike the mounts above: buildPlaylistRouter
+    // has a genuine bare-collection route ('/', for create/list) and
+    // shelf_router's mount() only matches a bare `/api/v1/playlists`
+    // request (no trailing slash) when the prefix itself is given without
+    // one -- with a trailing slash, only `/api/v1/playlists/<anything>`
+    // (note the required slash) would ever match.
+    ..mount('/api/v1/playlists', playlistRouter.call);
 }
 
 void main(List<String> args) async {

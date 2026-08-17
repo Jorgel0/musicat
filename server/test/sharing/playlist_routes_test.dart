@@ -98,7 +98,7 @@ void main() {
         MockClient((_) async => http.Response('', 500)),
       );
 
-      final createResponse = await post(handler, '/playlists', {
+      final createResponse = await post(handler, '/', {
         'name': 'Road trip',
         'participantNodeIds': [friend.nodeId],
       });
@@ -106,7 +106,7 @@ void main() {
       final id =
           jsonDecode(await createResponse.readAsString())['id'] as String;
 
-      final listResponse = await get(handler, '/playlists');
+      final listResponse = await get(handler, '/');
       final list =
           jsonDecode(await listResponse.readAsString()) as List<dynamic>;
       expect(list, hasLength(1));
@@ -117,7 +117,7 @@ void main() {
       final handler = handlerWith(
         MockClient((_) async => http.Response('', 500)),
       );
-      final response = await post(handler, '/playlists', {
+      final response = await post(handler, '/', {
         'name': 'x',
         'participantNodeIds': <String>[],
       });
@@ -128,7 +128,7 @@ void main() {
       final handler = handlerWith(
         MockClient((_) async => http.Response('', 500)),
       );
-      final response = await post(handler, '/playlists', {
+      final response = await post(handler, '/', {
         'id': 'shared-id-from-a-friend',
         'name': 'Road trip',
         'participantNodeIds': [friend.nodeId],
@@ -145,14 +145,14 @@ void main() {
         final handler = handlerWith(
           MockClient((_) async => http.Response('', 500)),
         );
-        final createResponse = await post(handler, '/playlists', {
+        final createResponse = await post(handler, '/', {
           'name': 'Road trip',
           'participantNodeIds': [friend.nodeId],
         });
         final id =
             jsonDecode(await createResponse.readAsString())['id'] as String;
 
-        final addResponse = await post(handler, '/playlists/$id/items', {
+        final addResponse = await post(handler, '/$id/items', {
           'filePath': musicFile.path,
           'title': 'One More Time',
           'artist': 'Daft Punk',
@@ -164,6 +164,7 @@ void main() {
         final item = playlist!.items.single;
         expect(item.title, 'One More Time');
         expect(item.ownerNodeId, identity.nodeId);
+        expect(item.extension, '.flac');
 
         final sharedTrack = await sharedTrackStore.findById(item.sharedTrackId);
         expect(sharedTrack, isNotNull);
@@ -183,14 +184,14 @@ void main() {
         final handler = handlerWith(
           MockClient((_) async => http.Response('', 500)),
         );
-        final createResponse = await post(handler, '/playlists', {
+        final createResponse = await post(handler, '/', {
           'name': 'Group trip',
           'participantNodeIds': [friend.nodeId, friend2.nodeId],
         });
         final id =
             jsonDecode(await createResponse.readAsString())['id'] as String;
 
-        await post(handler, '/playlists/$id/items', {
+        await post(handler, '/$id/items', {
           'filePath': musicFile.path,
           'title': 'One More Time',
           'artist': 'Daft Punk',
@@ -211,14 +212,14 @@ void main() {
       final handler = handlerWith(
         MockClient((_) async => http.Response('', 500)),
       );
-      final createResponse = await post(handler, '/playlists', {
+      final createResponse = await post(handler, '/', {
         'name': 'x',
         'participantNodeIds': [friend.nodeId],
       });
       final id =
           jsonDecode(await createResponse.readAsString())['id'] as String;
 
-      final response = await post(handler, '/playlists/$id/items', {
+      final response = await post(handler, '/$id/items', {
         'filePath': '/does/not/exist.flac',
         'title': 'x',
         'artist': 'y',
@@ -230,14 +231,14 @@ void main() {
       final handler = handlerWith(
         MockClient((_) async => http.Response('', 500)),
       );
-      final createResponse = await post(handler, '/playlists', {
+      final createResponse = await post(handler, '/', {
         'name': 'x',
         'participantNodeIds': [friend.nodeId],
       });
       final id =
           jsonDecode(await createResponse.readAsString())['id'] as String;
 
-      final deleteResponse = await delete(handler, '/playlists/$id');
+      final deleteResponse = await delete(handler, '/$id');
       expect(deleteResponse.statusCode, 204);
       expect(await playlistStore.findById(id), isNull);
     });
@@ -254,6 +255,7 @@ void main() {
             artist: 'Daft Punk',
             ownerNodeId: friend.nodeId,
             sharedTrackId: 'their-shared-id',
+            extension: '.flac',
             addedAt: DateTime.utc(2026, 1, 1),
           ),
         ],
@@ -278,7 +280,7 @@ void main() {
         }),
       );
 
-      final response = await post(handler, '/playlists/shared-id/sync', {});
+      final response = await post(handler, '/shared-id/sync', {});
       expect(response.statusCode, 200);
       expect(requestedPath, '/api/v1/sharing/playlists/shared-id');
 

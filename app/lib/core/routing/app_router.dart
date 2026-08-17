@@ -7,6 +7,7 @@ import '../../features/library/presentation/album_detail_screen.dart';
 import '../../features/library/presentation/artist_detail_screen.dart';
 import '../../features/library/presentation/library_screen.dart';
 import '../../features/player/presentation/now_playing_screen.dart';
+import '../../features/playlists/presentation/joint_playlist_detail_screen.dart';
 import '../../features/playlists/presentation/playlist_detail_screen.dart';
 import '../../features/playlists/presentation/playlists_screen.dart';
 import '../../features/search/presentation/search_screen.dart';
@@ -57,6 +58,12 @@ final appRouter = GoRouter(
               ),
             ),
           ],
+        ),
+        GoRoute(
+          path: '/joint-playlists/:id',
+          builder: (context, state) => JointPlaylistDetailScreen(
+            playlistId: state.pathParameters['id']!,
+          ),
         ),
         GoRoute(
           path: '/friends',

@@ -10,6 +10,7 @@ class PlaylistItem {
     required this.artist,
     required this.ownerNodeId,
     required this.sharedTrackId,
+    required this.extension,
     required this.addedAt,
     this.album,
   });
@@ -23,6 +24,12 @@ class PlaylistItem {
   /// `/api/v1/sharing/shared-tracks/<sharedTrackId>/file`.
   final String ownerNodeId;
   final String sharedTrackId;
+
+  /// e.g. `.flac` — duplicated from the backing `SharedTrack` at creation
+  /// time (same convenience-denormalization already done for
+  /// title/artist/album) so a participant can name the file it downloads
+  /// without a separate lookup.
+  final String extension;
   final DateTime addedAt;
 
   Map<String, Object?> toJson() => {
@@ -32,6 +39,7 @@ class PlaylistItem {
     'album': album,
     'ownerNodeId': ownerNodeId,
     'sharedTrackId': sharedTrackId,
+    'extension': extension,
     'addedAt': addedAt.toIso8601String(),
   };
 
@@ -42,6 +50,7 @@ class PlaylistItem {
     album: json['album'] as String?,
     ownerNodeId: json['ownerNodeId'] as String,
     sharedTrackId: json['sharedTrackId'] as String,
+    extension: json['extension'] as String? ?? '',
     addedAt: DateTime.parse(json['addedAt'] as String),
   );
 }

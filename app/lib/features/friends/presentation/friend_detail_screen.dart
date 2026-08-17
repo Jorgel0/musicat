@@ -127,8 +127,9 @@ class _SharedTrackTileState extends ConsumerState<_SharedTrackTile> {
     try {
       await downloadAndImportSharedTrack(
         ref,
-        friendNodeId: widget.friendNodeId,
-        track: widget.track,
+        ownerNodeId: widget.friendNodeId,
+        trackId: widget.track.id,
+        extension: widget.track.extension,
       );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

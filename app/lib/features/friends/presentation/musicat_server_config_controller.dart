@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/network/federation/federation_client.dart';
+import '../../../core/network/social/joint_playlist_client.dart';
 import '../../../core/network/social/sharing_client.dart';
 import '../domain/musicat_server_config.dart';
 
@@ -45,6 +46,22 @@ final sharingClientProvider = Provider<SharingClient?>((ref) {
   final config = ref.watch(musicatServerConfigControllerProvider);
   if (!config.isConfigured) return null;
   return SharingClient(baseUrl: config.baseUrl);
+});
+
+/// `null` when no Musicat Server is configured yet, same as
+/// [federationClientProvider].
+final jointPlaylistClientProvider = Provider<JointPlaylistClient?>((ref) {
+  final config = ref.watch(musicatServerConfigControllerProvider);
+  if (!config.isConfigured) return null;
+  return JointPlaylistClient(baseUrl: config.baseUrl);
+});
+
+/// This node's own id, e.g. to tell a joint-playlist item this device
+/// added apart from ones a friend added. `null` while unconfigured.
+final myNodeIdProvider = FutureProvider<String?>((ref) async {
+  final client = ref.watch(federationClientProvider);
+  if (client == null) return null;
+  return (await client.getMyNode()).nodeId;
 });
 
 /// Loads the persisted config, for overriding

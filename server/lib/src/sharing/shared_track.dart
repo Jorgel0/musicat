@@ -66,7 +66,10 @@ class AllFriendsVisibility extends SharedTrackVisibility {
   Map<String, Object?> toJson() => {'type': 'allFriends'};
 }
 
-String _extensionOf(String filePath) {
+/// e.g. `.flac` for `/music/one-more-time.flac` — shared with `PlaylistItem`
+/// (`playlist_routes.dart`), which needs the same value when it creates the
+/// `SharedTrack` backing a newly-added playlist item.
+String extensionOf(String filePath) {
   final dot = filePath.lastIndexOf('.');
   return dot == -1 ? '' : filePath.substring(dot);
 }
@@ -110,7 +113,7 @@ class SharedTrack {
     'artist': artist,
     'album': album,
     'hasCoverArt': coverArtPath != null,
-    'extension': _extensionOf(filePath),
+    'extension': extensionOf(filePath),
   };
 
   Map<String, Object?> toStorageJson() => {

@@ -11,6 +11,7 @@ PlaylistItem _item(String id, {DateTime? addedAt}) => PlaylistItem(
   artist: 'Someone',
   ownerNodeId: 'owner',
   sharedTrackId: 'shared-$id',
+  extension: '.flac',
   addedAt: addedAt ?? DateTime.utc(2026, 1, 1),
 );
 
