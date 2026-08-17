@@ -6,6 +6,7 @@ import 'app.dart';
 import 'core/audio/audio_providers.dart';
 import 'core/audio/audio_service_bootstrap.dart';
 import 'core/design_system/theme.dart';
+import 'features/friends/presentation/musicat_server_config_controller.dart';
 import 'features/settings/audio/presentation/normalization_controller.dart';
 import 'features/settings/soulseek/presentation/soulseek_config_controller.dart';
 
@@ -23,6 +24,7 @@ Future<void> bootstrap() async {
   // persisted preference before the first track ever plays.
   await audioHandler.setNormalizationEnabled(normalizationEnabled);
   final soulseekConfig = await loadSoulseekConfigPreference();
+  final musicatServerConfig = await loadMusicatServerConfigPreference();
   runApp(
     ProviderScope(
       overrides: [
@@ -38,6 +40,9 @@ Future<void> bootstrap() async {
         ),
         soulseekConfigControllerProvider.overrideWith(
           () => SoulseekConfigController(soulseekConfig),
+        ),
+        musicatServerConfigControllerProvider.overrideWith(
+          () => MusicatServerConfigController(musicatServerConfig),
         ),
       ],
       child: const MusicatApp(),

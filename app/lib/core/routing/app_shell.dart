@@ -15,7 +15,8 @@ class AppShell extends StatelessWidget {
     if (location.startsWith('/search')) return 1;
     if (location.startsWith('/downloads')) return 2;
     if (location.startsWith('/playlists')) return 3;
-    if (location.startsWith('/settings')) return 4;
+    if (location.startsWith('/friends')) return 4;
+    if (location.startsWith('/settings')) return 5;
     return 0;
   }
 
@@ -24,6 +25,7 @@ class AppShell extends StatelessWidget {
     '/search',
     '/downloads',
     '/playlists',
+    '/friends',
     '/settings',
   ];
 
@@ -58,6 +60,11 @@ class AppShell extends StatelessWidget {
                 icon: Icon(Icons.queue_music_outlined),
                 selectedIcon: Icon(Icons.queue_music),
                 label: 'Playlists',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.people_outline),
+                selectedIcon: Icon(Icons.people),
+                label: 'Friends',
               ),
               NavigationDestination(
                 icon: Icon(Icons.settings_outlined),
