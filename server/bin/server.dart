@@ -7,6 +7,7 @@ import 'package:musicat_server/src/federation/pairing_code_store.dart';
 import 'package:musicat_server/src/federation/request_signing.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
 import 'package:musicat_server/src/nat/udp_puncher.dart';
+import 'package:musicat_server/src/relay/relay_client.dart';
 import 'package:musicat_server/src/sharing/joint_playlist_store.dart';
 import 'package:musicat_server/src/sharing/playlist_routes.dart';
 import 'package:musicat_server/src/sharing/shared_track_store.dart';
@@ -126,4 +127,21 @@ void main(List<String> args) async {
 
   final server = await serve(handler, ip, port);
   print('Server listening on port ${server.port}');
+
+  // Self-hosted relay fallback (ADR 0032/0033) for when NAT hole-punching
+  // above doesn't work for a given pair of networks -- opt-in, since it
+  // requires a separately-deployed relay instance with real public
+  // reachability. Connecting is best-effort: a friend request can still
+  // arrive directly even if this node has no relay configured, or if the
+  // configured one is unreachable right now.
+  final relayUrl = Platform.environment['MUSICAT_RELAY_URL'];
+  if (relayUrl != null && relayUrl.isNotEmpty) {
+    final relayClient = RelayClient(identity: identity, localHandler: handler);
+    final connected = await relayClient.connect(relayUrl);
+    print(
+      connected
+          ? 'Relay: connected to $relayUrl as a fallback for direct reachability'
+          : 'Relay: could not connect to $relayUrl (continuing without it)',
+    );
+  }
 }
