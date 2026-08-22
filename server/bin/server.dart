@@ -27,6 +27,7 @@ Response _jsonResponse(Map<String, Object?> body) => Response.ok(
 Router _buildRouter(
   NodeIdentity identity,
   String publicKeyBase64,
+  String? myRelayUrl,
   Router soulseekRouter,
   Router federationRouter,
   Router libraryRouter,
@@ -40,6 +41,7 @@ Router _buildRouter(
       (Request req) => _jsonResponse({
         'nodeId': identity.nodeId,
         'publicKeyBase64': publicKeyBase64,
+        'relayUrl': myRelayUrl,
       }),
     )
     ..mount('/api/v1/soulseek/', soulseekRouter.call)
@@ -85,11 +87,46 @@ void main(List<String> args) async {
     '(external candidate: ${candidate ?? "unknown — STUN unreachable"})',
   );
 
+  // Self-hosted relay fallback (ADR 0032/0033) for when NAT hole-punching
+  // above doesn't work for a given pair of networks -- opt-in, since it
+  // requires a separately-deployed relay instance with real public
+  // reachability. Connecting is best-effort: a friend request can still
+  // arrive directly even if this node has no relay configured, or if the
+  // configured one is unreachable right now. Attempted *before* the
+  // federation router is built, since a successful connection is what
+  // gets advertised to friends at pairing time (`myRelayUrl` below) --
+  // `RelayClient` itself needs the final request handler to service
+  // tunneled requests, which doesn't exist yet this early, so it's given
+  // a forwarding closure that's only ever invoked once a real request
+  // arrives, by which point `_handler` has been assigned for real.
+  Handler? realHandler;
+  Future<Response> forwardToRealHandler(Request request) async =>
+      realHandler!(request);
+
+  String? myRelayUrl;
+  final relayUrlEnv = Platform.environment['MUSICAT_RELAY_URL'];
+  if (relayUrlEnv != null && relayUrlEnv.isNotEmpty) {
+    final relayClient = RelayClient(
+      identity: identity,
+      localHandler: forwardToRealHandler,
+    );
+    final connected = await relayClient.connect(relayUrlEnv);
+    if (connected) {
+      myRelayUrl = relayUrlEnv;
+      print(
+        'Relay: connected to $relayUrlEnv as a fallback for direct reachability',
+      );
+    } else {
+      print('Relay: could not connect to $relayUrlEnv (continuing without it)');
+    }
+  }
+
   final federationRouter = buildFederationRouter(
     friendStore,
     RequestVerifier(friendStore),
     PairingCodeStore(),
     puncher,
+    myRelayUrl: myRelayUrl,
   );
 
   final sharedTrackStore = SharedTrackStore(dataDir);
@@ -117,6 +154,7 @@ void main(List<String> args) async {
         _buildRouter(
           identity,
           publicKeyBase64,
+          myRelayUrl,
           soulseekRouter,
           federationRouter,
           libraryRouter,
@@ -124,24 +162,8 @@ void main(List<String> args) async {
           sharingFederationRouter,
         ).call,
       );
+  realHandler = handler;
 
   final server = await serve(handler, ip, port);
   print('Server listening on port ${server.port}');
-
-  // Self-hosted relay fallback (ADR 0032/0033) for when NAT hole-punching
-  // above doesn't work for a given pair of networks -- opt-in, since it
-  // requires a separately-deployed relay instance with real public
-  // reachability. Connecting is best-effort: a friend request can still
-  // arrive directly even if this node has no relay configured, or if the
-  // configured one is unreachable right now.
-  final relayUrl = Platform.environment['MUSICAT_RELAY_URL'];
-  if (relayUrl != null && relayUrl.isNotEmpty) {
-    final relayClient = RelayClient(identity: identity, localHandler: handler);
-    final connected = await relayClient.connect(relayUrl);
-    print(
-      connected
-          ? 'Relay: connected to $relayUrl as a fallback for direct reachability'
-          : 'Relay: could not connect to $relayUrl (continuing without it)',
-    );
-  }
 }

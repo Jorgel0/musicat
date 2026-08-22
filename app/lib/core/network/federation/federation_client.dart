@@ -2,10 +2,19 @@ import 'package:dio/dio.dart';
 
 /// This device's own node identity, as reported by its Musicat Server.
 class MyNodeInfo {
-  const MyNodeInfo({required this.nodeId, required this.publicKeyBase64});
+  const MyNodeInfo({
+    required this.nodeId,
+    required this.publicKeyBase64,
+    this.relayUrl,
+  });
 
   final String nodeId;
   final String publicKeyBase64;
+
+  /// This node's own relay, if its server is actually connected to one
+  /// right now (ADR 0032/0033) — worth telling a friend about at pairing
+  /// time as a fallback for when [address] isn't directly reachable.
+  final String? relayUrl;
 }
 
 /// A trusted friend node, as this device's Musicat Server knows it.
@@ -15,6 +24,7 @@ class FederationFriend {
     required this.publicKeyBase64,
     required this.address,
     this.displayName,
+    this.relayUrl,
   });
 
   final String nodeId;
@@ -22,12 +32,17 @@ class FederationFriend {
   final String address;
   final String? displayName;
 
+  /// This friend's own relay, as reported when they were added (`null` if
+  /// they didn't have one connected at that time).
+  final String? relayUrl;
+
   factory FederationFriend.fromJson(Map<String, dynamic> json) =>
       FederationFriend(
         nodeId: json['nodeId'] as String,
         publicKeyBase64: json['publicKeyBase64'] as String,
         address: json['address'] as String,
         displayName: json['displayName'] as String?,
+        relayUrl: json['relayUrl'] as String?,
       );
 }
 
@@ -75,6 +90,7 @@ class FederationClient {
     return MyNodeInfo(
       nodeId: data['nodeId'] as String,
       publicKeyBase64: data['publicKeyBase64'] as String,
+      relayUrl: data['relayUrl'] as String?,
     );
   }
 
@@ -138,6 +154,7 @@ class FederationClient {
           'publicKeyBase64': myNode.publicKeyBase64,
           'address': myPublicAddress,
           'displayName': ?displayName,
+          'relayUrl': ?myNode.relayUrl,
         },
       );
     } on DioException catch (e) {

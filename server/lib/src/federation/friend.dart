@@ -10,6 +10,7 @@ class Friend {
     required this.address,
     this.displayName,
     this.udpCandidate,
+    this.relayUrl,
   });
 
   final String nodeId;
@@ -25,12 +26,21 @@ class Friend {
   /// and this is only ever as fresh as the last pairing/reconnect attempt.
   final String? udpCandidate;
 
+  /// This friend's own relay WebSocket endpoint (e.g.
+  /// `ws://relay.example.com/connect`), if they reported one at pairing
+  /// time — the fallback address for reaching them when [address] itself
+  /// isn't (ADR 0032/0033): a request to it becomes
+  /// `<relayUrl's http(s) origin>/<nodeId>/<path>` instead of
+  /// `http://$address/<path>`. `null` if they didn't configure a relay.
+  final String? relayUrl;
+
   Map<String, Object?> toJson() => {
     'nodeId': nodeId,
     'publicKeyBase64': publicKeyBase64,
     'address': address,
     'displayName': displayName,
     'udpCandidate': udpCandidate,
+    'relayUrl': relayUrl,
   };
 
   factory Friend.fromJson(Map<String, dynamic> json) => Friend(
@@ -39,5 +49,6 @@ class Friend {
     address: json['address'] as String,
     displayName: json['displayName'] as String?,
     udpCandidate: json['udpCandidate'] as String?,
+    relayUrl: json['relayUrl'] as String?,
   );
 }

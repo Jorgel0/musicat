@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
+import '../federation/friend_reachability.dart';
 import '../federation/friend_store.dart';
 import '../federation/request_signing.dart';
 import '../identity/node_identity.dart';
@@ -120,8 +121,12 @@ Router buildLibraryRouter(
       identity,
     ).sign(method: 'GET', path: path);
     try {
-      final response = await client.get(
-        Uri.parse('http://${friend.address}$path'),
+      // Direct first, falling back to the friend's own reported relay
+      // (ADR 0032/0033) if direct reachability fails outright.
+      final response = await reachFriend(
+        client,
+        friend,
+        path,
         headers: headers,
       );
       // Forward the friend's own status/body as-is (already a JSON
@@ -151,11 +156,12 @@ Router buildLibraryRouter(
       identity,
     ).sign(method: 'GET', path: path);
     try {
-      final friendRequest = http.Request(
-        'GET',
-        Uri.parse('http://${friend.address}$path'),
-      )..headers.addAll(headers);
-      final friendResponse = await client.send(friendRequest);
+      final friendResponse = await reachFriendStreamed(
+        client,
+        friend,
+        path,
+        headers: headers,
+      );
       if (friendResponse.statusCode != 200) {
         final body = await friendResponse.stream.bytesToString();
         return Response(

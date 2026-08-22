@@ -40,6 +40,31 @@ void main() {
     expect(friend.displayName, 'Friend A');
   });
 
+  test('persists relayUrl across store instances', () async {
+    await store.add(
+      const Friend(
+        nodeId: 'abc',
+        publicKeyBase64: 'key',
+        address: 'host:8080',
+        relayUrl: 'ws://relay.example.com/connect',
+      ),
+    );
+
+    final reloaded = FriendStore(tempDir);
+    final friend = await reloaded.findByNodeId('abc');
+
+    expect(friend!.relayUrl, 'ws://relay.example.com/connect');
+  });
+
+  test('relayUrl defaults to null when not provided', () async {
+    await store.add(
+      const Friend(nodeId: 'abc', publicKeyBase64: 'key', address: 'a:1'),
+    );
+
+    final friend = await store.findByNodeId('abc');
+    expect(friend!.relayUrl, isNull);
+  });
+
   test('adding a friend with the same nodeId replaces the old entry', () async {
     await store.add(
       const Friend(nodeId: 'abc', publicKeyBase64: 'old', address: 'a:1'),

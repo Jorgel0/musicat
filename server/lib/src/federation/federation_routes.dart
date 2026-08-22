@@ -56,12 +56,19 @@ Response _verificationErrorResponse(
 /// the background (ADR 0023/0024). `GET /friends/<nodeId>/status` reports
 /// whether that connection is currently alive; revoking a friend
 /// (`DELETE`) also stops maintaining it.
+///
+/// It also accepts an optional `relayUrl` (the caller's own relay, ADR
+/// 0032/0033 — only present if that caller is actually connected to one)
+/// and returns this node's own in the response the same way, so a friend
+/// unreachable via [Friend.address] can still be reached as a fallback
+/// through whichever relay they reported.
 Router buildFederationRouter(
   FriendStore friendStore,
   RequestVerifier verifier,
   PairingCodeStore pairingCodes,
-  UdpPuncher puncher,
-) {
+  UdpPuncher puncher, {
+  String? myRelayUrl,
+}) {
   final router = Router();
 
   router.post('/pairing-codes', (Request request) async {
@@ -81,6 +88,7 @@ Router buildFederationRouter(
     final publicKeyBase64 = body['publicKeyBase64'];
     final address = body['address'];
     final udpCandidate = body['udpCandidate'];
+    final relayUrl = body['relayUrl'];
     if (code is! String || code.isEmpty) {
       return _error('"code" is required');
     }
@@ -95,6 +103,9 @@ Router buildFederationRouter(
     }
     if (udpCandidate != null && udpCandidate is! String) {
       return _error('"udpCandidate" must be a string if present');
+    }
+    if (relayUrl != null && relayUrl is! String) {
+      return _error('"relayUrl" must be a string if present');
     }
 
     if (!pairingCodes.redeem(code)) {
@@ -111,6 +122,7 @@ Router buildFederationRouter(
         address: address,
         displayName: body['displayName'] as String?,
         udpCandidate: udpCandidate as String?,
+        relayUrl: relayUrl as String?,
       ),
     );
 
@@ -133,6 +145,7 @@ Router buildFederationRouter(
     return _json({
       'status': 'ok',
       'udpCandidate': puncher.cachedCandidate?.toString(),
+      'relayUrl': myRelayUrl,
     }, status: 201);
   });
 
