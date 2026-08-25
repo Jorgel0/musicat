@@ -72,6 +72,20 @@ class RelayClient {
   /// and as the URL to retry.
   String? _relayUrl;
 
+  /// Bumped by every call to [connect] and every call to [close]. This is
+  /// the only thing a scheduled/in-flight reconnect attempt can use to
+  /// recognize it has been superseded: [_relayUrl] alone can't tell "no
+  /// one wants a connection anymore" (close()) apart from "someone
+  /// already established a *newer* one" (a fresh connect()) -- both leave
+  /// [_relayUrl] looking perfectly valid to a stale attempt that was
+  /// scheduled before either happened. Every scheduled [Timer] and every
+  /// in-flight [_attemptConnect] captures the generation that was current
+  /// when it started; if that no longer matches [_generation] by the time
+  /// it would act, it's stale and no-ops instead -- closing whatever
+  /// socket it just opened rather than assigning it to [_channel], and
+  /// not rescheduling itself again.
+  int _generation = 0;
+
   /// The current reconnect backoff. Starts at [initialReconnectDelay],
   /// doubles on each failed reconnect attempt (capped at
   /// [maxReconnectDelay]), and resets to [initialReconnectDelay] as soon
@@ -105,7 +119,19 @@ class RelayClient {
   /// `bin/server.dart`, which uses this return value to decide whether to
   /// advertise this node's relay to friends at startup).
   Future<bool> connect(String relayUrl) async {
-    final connected = await _attemptConnect(relayUrl);
+    // Cancel whatever this client previously had scheduled for a *past*
+    // connection -- without this, calling connect() again after an
+    // unexpected drop (e.g. a caller reacting to "network restored")
+    // leaves the old scheduled reconnect free to fire later and race with
+    // whatever this call establishes. The generation bump below closes
+    // the other half of that same race: an old reconnect attempt that was
+    // already in flight (timer already fired) rather than merely
+    // scheduled -- see [_generation]'s doc comment.
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    final generation = ++_generation;
+
+    final connected = await _attemptConnect(relayUrl, generation);
     if (connected) {
       _relayUrl = relayUrl;
       _reconnectDelay = initialReconnectDelay;
@@ -113,7 +139,7 @@ class RelayClient {
     return connected;
   }
 
-  Future<bool> _attemptConnect(String relayUrl) async {
+  Future<bool> _attemptConnect(String relayUrl, int generation) async {
     try {
       final socket = await io.WebSocket.connect(
         relayUrl,
@@ -147,8 +173,20 @@ class RelayClient {
       final result = RelayMessage.decode(messages.current as String);
       if (result is! RelayAuthResult || !result.success) return false;
 
+      if (generation != _generation) {
+        // A newer connect() (or an intentional close()) has already taken
+        // over since this specific attempt started -- most likely this
+        // was a stale, superseded reconnect (see [_generation]'s doc
+        // comment). Tear this connection back down instead of either
+        // orphaning it (assigning to _channel would silently leak
+        // whatever the newer call already established) or leaving it
+        // open unused.
+        await channel.sink.close();
+        return false;
+      }
+
       _channel = channel;
-      unawaited(_serve(channel, messages));
+      unawaited(_serve(channel, messages, generation));
       return true;
     } catch (_) {
       // Relay unreachable, handshake malformed, or any other connection
@@ -159,11 +197,13 @@ class RelayClient {
   }
 
   /// Disconnects and, unlike a connection dropping unexpectedly, does *not*
-  /// trigger the automatic reconnect below -- clearing [_relayUrl] first is
-  /// what tells [_serve]'s cleanup (and any already-scheduled reconnect
-  /// timer) that this was intentional.
+  /// trigger the automatic reconnect below -- clearing [_relayUrl] and
+  /// bumping [_generation] first is what tells [_serve]'s cleanup (and any
+  /// already-scheduled or already-in-flight reconnect attempt) that this
+  /// was intentional.
   Future<void> close() async {
     _relayUrl = null;
+    _generation++;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     await _channel?.sink.close();
@@ -173,6 +213,7 @@ class RelayClient {
   Future<void> _serve(
     WebSocketChannel channel,
     StreamIterator<dynamic> messages,
+    int generation,
   ) async {
     try {
       while (await messages.moveNext()) {
@@ -188,28 +229,35 @@ class RelayClient {
         _channel = null;
       }
       // Only reconnect if this drop wasn't the result of an intentional
-      // close() (which clears _relayUrl first) -- see its doc comment.
+      // close() (which clears _relayUrl first, see its doc comment) *and*
+      // this connection's generation is still the current one -- an
+      // older, already-superseded generation's own drop shouldn't
+      // schedule a competing reconnect for a connection nobody is using
+      // anymore (a newer connect() already replaced it).
       final relayUrl = _relayUrl;
-      if (relayUrl != null) {
-        _scheduleReconnect(relayUrl);
+      if (relayUrl != null && generation == _generation) {
+        _scheduleReconnect(relayUrl, generation);
       }
     }
   }
 
   /// Schedules the next reconnect attempt after [_reconnectDelay], canceling
   /// whatever was previously scheduled first so there's ever only one
-  /// pending attempt at a time.
-  void _scheduleReconnect(String relayUrl) {
+  /// pending attempt at a time. [generation] is the generation this
+  /// specific reconnect chain belongs to -- see [_generation]'s doc
+  /// comment.
+  void _scheduleReconnect(String relayUrl, int generation) {
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(_reconnectDelay, () {
-      unawaited(_reconnect(relayUrl));
+      unawaited(_reconnect(relayUrl, generation));
     });
   }
 
-  Future<void> _reconnect(String relayUrl) async {
-    // close() may have run while this timer was pending -- honor it rather
-    // than resurrecting a connection nobody wants anymore.
-    if (_relayUrl == null) return;
+  Future<void> _reconnect(String relayUrl, int generation) async {
+    // A newer connect() or an intentional close() may have run since this
+    // attempt was scheduled -- honor whichever is current rather than
+    // resurrecting or duplicating a connection nobody wants anymore.
+    if (generation != _generation) return;
 
     if (!await _hasNetworkInterface()) {
       // No active network interface at all right now (e.g. airplane mode,
@@ -217,20 +265,18 @@ class RelayClient {
       // spends no data/radio activity, and check again after the same
       // wait without escalating the backoff, since nothing was actually
       // attempted.
-      _scheduleReconnect(relayUrl);
+      _scheduleReconnect(relayUrl, generation);
       return;
     }
 
-    final reconnected = await _attemptConnect(relayUrl);
+    final reconnected = await _attemptConnect(relayUrl, generation);
 
-    if (_relayUrl == null) {
-      // close() ran during the attempt above -- if it still somehow
-      // succeeded, tear it back down rather than leaving a connection
-      // open after an intentional shutdown.
-      if (reconnected) {
-        await _channel?.sink.close();
-        _channel = null;
-      }
+    if (generation != _generation) {
+      // Superseded while the attempt was in flight (by a newer connect()
+      // or a close()) -- _attemptConnect's own generation check already
+      // tore the connection back down if it happened to succeed anyway,
+      // so there's nothing left to do here, and definitely nothing to
+      // reschedule for a generation nobody cares about anymore.
       return;
     }
 
@@ -238,7 +284,7 @@ class RelayClient {
       _reconnectDelay = initialReconnectDelay;
     } else {
       _reconnectDelay = _nextReconnectDelay(_reconnectDelay);
-      _scheduleReconnect(relayUrl);
+      _scheduleReconnect(relayUrl, generation);
     }
   }
 

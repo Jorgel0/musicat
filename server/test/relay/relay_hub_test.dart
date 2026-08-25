@@ -150,6 +150,45 @@ void main() {
     await channel.sink.close();
   });
 
+  test('disconnecting a tunnel mid-request fails the in-flight request '
+      'promptly instead of making it wait out the full requestTimeout '
+      '(regression test for issue #4)', () async {
+    final (channel, messages) = await authenticate(identity);
+
+    // Deliberately never answers the forwarded request from this side --
+    // the point of this test is a request still genuinely in flight (the
+    // hub still waiting on tunnel.pending) at the moment disconnect()
+    // runs.
+    final requestReceived = Completer<void>();
+    unawaited(
+      Future(() async {
+        await messages.moveNext();
+        RelayMessage.decode(messages.current as String) as RelayRequestMessage;
+        requestReceived.complete();
+      }),
+    );
+
+    final stopwatch = Stopwatch()..start();
+    final responseFuture = http.get(
+      Uri.parse('$httpUrl/${identity.nodeId}/api/v1/node'),
+    );
+    await requestReceived.future;
+
+    await hub.disconnect(identity.nodeId);
+
+    final response = await responseFuture;
+    stopwatch.stop();
+
+    expect(response.statusCode, 502);
+    // This suite's hub has a 2-second requestTimeout (see setUp). A fix
+    // that actually completes the pending request the instant disconnect()
+    // learns the tunnel is gone should return in a small fraction of that
+    // -- not anywhere close to a clean timeout.
+    expect(stopwatch.elapsed, lessThan(const Duration(seconds: 1)));
+
+    await channel.sink.close();
+  });
+
   test('disconnecting the tunnel un-registers the node', () async {
     final (channel, _) = await authenticate(identity);
     expect(hub.isConnected(identity.nodeId), isTrue);

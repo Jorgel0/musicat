@@ -34,6 +34,14 @@ class _Tunnel {
   final Map<String, Completer<RelayResponseMessage>> pending = {};
 }
 
+/// Thrown to fail any request still waiting on a tunnel that
+/// [RelayHub.disconnect] just tore down, so [RelayHub._forward] can
+/// respond immediately instead of waiting out the full
+/// [RelayHub.requestTimeout] for a tunnel it already knows is gone.
+class _TunnelDisconnectedException implements Exception {
+  const _TunnelDisconnectedException();
+}
+
 /// A self-hosted fallback for when direct NAT hole-punching doesn't work
 /// (ADR 0021-0024 built it, ADR 0032 found real network pairs where it
 /// simply fails). Runs on a host with genuine public reachability — the
@@ -70,8 +78,19 @@ class RelayHub {
   /// this codebase), so even `HttpServer.close(force: true)` leaves
   /// already-open tunnels running -- this closes the specific tunnel's
   /// channel directly instead.
+  ///
+  /// Also immediately fails any request still in flight on this tunnel
+  /// (i.e. still waiting in [_Tunnel.pending]) rather than leaving it to
+  /// wait out the full [requestTimeout] for a tunnel the hub already knows
+  /// is gone -- see [_forward].
   Future<void> disconnect(String nodeId) async {
     final tunnel = _tunnels.remove(nodeId);
+    if (tunnel != null) {
+      for (final completer in tunnel.pending.values) {
+        completer.completeError(const _TunnelDisconnectedException());
+      }
+      tunnel.pending.clear();
+    }
     await tunnel?.channel.sink.close();
   }
 
@@ -211,6 +230,16 @@ class RelayHub {
       return _json({
         'error': 'Target node did not respond in time',
       }, status: 504);
+    } on _TunnelDisconnectedException {
+      // disconnect() already removed this tunnel (and completed/cleared
+      // this request's own completer) -- nothing left to clean up here,
+      // just respond promptly instead of waiting out requestTimeout for a
+      // tunnel already known to be gone. 502 (not 504) since this isn't a
+      // timeout -- the hub has definitive, immediate knowledge the target
+      // is unreachable, same status as "never was connected" above.
+      return _json({
+        'error': 'Target node disconnected before responding',
+      }, status: 502);
     }
   }
 }

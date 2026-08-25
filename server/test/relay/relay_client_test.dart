@@ -206,6 +206,51 @@ void main() {
     expect(hub.isConnected(identity.nodeId), isFalse);
   });
 
+  test('a fresh connect() while a reconnect is scheduled wins the race -- '
+      'the stale timer never clobbers or duplicates the new connection '
+      '(regression test for issue #3)', () async {
+    final localRouter = Router()
+      ..get('/api/v1/node', (Request request) => Response.ok('ok'));
+    client = RelayClient(
+      identity: identity,
+      localHandler: localRouter.call,
+      initialReconnectDelay: const Duration(milliseconds: 200),
+      maxReconnectDelay: const Duration(milliseconds: 400),
+    );
+
+    expect(await client.connect(wsUrl), isTrue);
+    expect(hub.connectedCount, 1);
+
+    // Drop the tunnel from the relay side -- this schedules a reconnect
+    // ~200ms out (see _scheduleReconnect).
+    await hub.disconnect(identity.nodeId);
+    expect(hub.connectedCount, 0);
+
+    // Before that stale timer fires, something else (e.g. a caller
+    // reacting to "network restored") calls connect() again directly.
+    // Without the fix, connect() never cancels the pending timer, so it
+    // stays armed in parallel with this new, legitimate connection.
+    expect(await client.connect(wsUrl), isTrue);
+    expect(hub.connectedCount, 1);
+
+    // Wait well past when the stale timer would have fired if it hadn't
+    // been invalidated. If issue #3's bug were still present, the timer
+    // would fire here, see a non-null _relayUrl (now pointing at the
+    // *new* connection's URL), and either silently orphan the new
+    // connection (by assigning its own new channel over it) or open a
+    // second, redundant tunnel alongside it.
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    expect(hub.connectedCount, 1);
+    expect(client.isConnected, isTrue);
+
+    // The one connection that's actually live must still work end to end.
+    final response = await http.get(
+      Uri.parse('$httpUrl/${identity.nodeId}/api/v1/node'),
+    );
+    expect(response.statusCode, 200);
+  });
+
   test('keeps quietly retrying with backoff -- never crashes and never '
       'falsely reports itself connected -- while the relay stays down for '
       'good', () async {
