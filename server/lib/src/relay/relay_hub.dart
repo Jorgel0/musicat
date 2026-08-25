@@ -60,6 +60,21 @@ class RelayHub {
   bool isConnected(String nodeId) => _tunnels.containsKey(nodeId);
   int get connectedCount => _tunnels.length;
 
+  /// Forcibly closes [nodeId]'s tunnel from this side, if one is currently
+  /// open -- a no-op otherwise. Useful operationally (e.g. kicking a
+  /// misbehaving node) and, in `relay_client_test.dart`, to simulate a
+  /// relay-initiated drop (a network blip, or the hub restarting) without
+  /// touching the listening socket: once a connection has been upgraded to
+  /// a WebSocket it's hijacked away from the underlying `HttpServer`
+  /// entirely (a real `dart:io`/`shelf` behavior, not a contrivance of
+  /// this codebase), so even `HttpServer.close(force: true)` leaves
+  /// already-open tunnels running -- this closes the specific tunnel's
+  /// channel directly instead.
+  Future<void> disconnect(String nodeId) async {
+    final tunnel = _tunnels.remove(nodeId);
+    await tunnel?.channel.sink.close();
+  }
+
   Router buildRouter() {
     final router = Router();
     router.mount('/connect', webSocketHandler(_onConnection));

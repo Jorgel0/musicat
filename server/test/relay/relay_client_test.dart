@@ -129,4 +129,129 @@ void main() {
     );
     expect(response.statusCode, 502);
   });
+
+  test('a previously-successful connection reconnects automatically after the '
+      'tunnel drops, with no external call telling it to', () async {
+    final localRouter = Router()
+      ..get(
+        '/api/v1/node',
+        (Request request) => Response.ok(
+          jsonEncode({'nodeId': identity.nodeId}),
+          headers: {'content-type': 'application/json'},
+        ),
+      );
+    // A tiny backoff so this test doesn't wait out the real 5s/300s
+    // production defaults.
+    client = RelayClient(
+      identity: identity,
+      localHandler: localRouter.call,
+      initialReconnectDelay: const Duration(milliseconds: 50),
+      maxReconnectDelay: const Duration(milliseconds: 200),
+    );
+
+    expect(await client.connect(wsUrl), isTrue);
+    expect(hub.isConnected(identity.nodeId), isTrue);
+
+    // Simulate the tunnel dropping (a network blip, or the relay kicking
+    // this connection) from the relay side -- deliberately *not* by
+    // closing the listening `server`: once a connection is upgraded to a
+    // WebSocket it's hijacked away from the `HttpServer` entirely (real
+    // `dart:io`/`shelf` behavior), so even `server.close(force: true)`
+    // would leave this specific tunnel running and the test would never
+    // see a drop at all. `hub.disconnect` severs the real underlying
+    // socket while the relay's own listening endpoint (and `wsUrl`) stays
+    // up throughout, exactly like a transient blip would.
+    await hub.disconnect(identity.nodeId);
+    expect(hub.isConnected(identity.nodeId), isFalse);
+
+    // Nothing external calls connect()/reconnect() again -- RelayClient
+    // must notice the drop and re-establish the tunnel on its own.
+    await _waitUntil(
+      () => hub.isConnected(identity.nodeId),
+      timeout: const Duration(seconds: 5),
+    );
+    expect(client.isConnected, isTrue);
+
+    final response = await http.get(
+      Uri.parse('$httpUrl/${identity.nodeId}/api/v1/node'),
+    );
+    expect(response.statusCode, 200);
+    expect(jsonDecode(response.body), {'nodeId': identity.nodeId});
+  });
+
+  test('close() cancels a pending scheduled reconnect -- it does not '
+      'resurrect the tunnel after an intentional shutdown', () async {
+    final localRouter = Router()
+      ..get('/api/v1/node', (Request request) => Response.ok('ok'));
+    client = RelayClient(
+      identity: identity,
+      localHandler: localRouter.call,
+      initialReconnectDelay: const Duration(milliseconds: 300),
+      maxReconnectDelay: const Duration(milliseconds: 500),
+    );
+
+    expect(await client.connect(wsUrl), isTrue);
+
+    // Drop the tunnel (schedules a reconnect ~300ms out), then close()
+    // well before that reconnect timer would fire. The relay itself stays
+    // up throughout -- if close() failed to cancel the pending timer, the
+    // client would have no trouble tunneling right back in, so this
+    // genuinely tests the cancellation, not mere unreachability.
+    await hub.disconnect(identity.nodeId);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    await client.close();
+
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    expect(client.isConnected, isFalse);
+    expect(hub.isConnected(identity.nodeId), isFalse);
+  });
+
+  test('keeps quietly retrying with backoff -- never crashes and never '
+      'falsely reports itself connected -- while the relay stays down for '
+      'good', () async {
+    final localRouter = Router()
+      ..get('/api/v1/node', (Request request) => Response.ok('ok'));
+    client = RelayClient(
+      identity: identity,
+      localHandler: localRouter.call,
+      initialReconnectDelay: const Duration(milliseconds: 30),
+      maxReconnectDelay: const Duration(milliseconds: 60),
+    );
+
+    expect(await client.connect(wsUrl), isTrue);
+
+    // Sever the current tunnel *and* take the relay's listening endpoint
+    // down for good this time, so every subsequent retry attempt fails
+    // outright (connection refused) rather than succeeding again.
+    await hub.disconnect(identity.nodeId);
+    await server.close(force: true);
+
+    // Several retry cycles' worth of real time: with a real (non-empty)
+    // set of network interfaces in this test environment, each tick
+    // actually attempts a doomed connection, hits `_attemptConnect`'s own
+    // `catch (_)`, and reschedules -- this exercises exactly the code
+    // path the "no network interface" skip sits next to, just via the
+    // "network present but relay unreachable" branch instead. It must
+    // never throw out of the test isolate and must never flip
+    // `isConnected` to true.
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    expect(client.isConnected, isFalse);
+  });
+}
+
+/// Polls [condition] until it's true or [timeout] elapses, without relying
+/// on any fixed sleep -- the reconnect under test is driven by real
+/// `Timer`s, so this only ever waits as long as it actually needs to.
+Future<void> _waitUntil(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 5),
+  Duration pollInterval = const Duration(milliseconds: 20),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('Condition not met within $timeout');
+    }
+    await Future<void>.delayed(pollInterval);
+  }
 }

@@ -23,16 +23,62 @@ import 'relay_protocol.dart';
 /// permits -- this is the fallback for when direct hole-punching (ADR
 /// 0021-0024) didn't work for a given pair of networks.
 ///
+/// A connection that [connect] established successfully and that later
+/// drops (relay restarted, network blip, ...) is reconnected automatically
+/// in the background, with an exponential backoff capped generously (5
+/// minutes by default) to avoid hammering the network on a long outage --
+/// deliberately more conservative than a typical desktop-service reconnect
+/// loop, since this process can run on a phone on a real mobile data plan.
+/// Before each retry, a cheap local check
+/// (`NetworkInterface.list()`, no network I/O) skips the attempt entirely
+/// if the device currently has no active network interface at all, without
+/// counting that tick against the backoff. A *failed initial* [connect]
+/// call is never retried automatically -- see its doc comment.
+///
 /// [RelayHub]: relay_hub.dart
 class RelayClient {
-  RelayClient({required this.identity, required this.localHandler});
+  RelayClient({
+    required this.identity,
+    required this.localHandler,
+    this.initialReconnectDelay = const Duration(seconds: 5),
+    this.maxReconnectDelay = const Duration(minutes: 5),
+  }) : _reconnectDelay = initialReconnectDelay;
 
   final NodeIdentity identity;
   final Handler localHandler;
 
+  /// How long to wait before the *first* reconnect attempt after a
+  /// previously-good connection drops, and what the backoff resets to
+  /// after a successful (re)connect. Configurable (rather than a bare
+  /// constant) purely so tests don't have to wait out the real
+  /// production values below.
+  final Duration initialReconnectDelay;
+
+  /// The backoff ceiling -- deliberately generous (5 minutes in
+  /// production) because this process can run on a phone on a mobile
+  /// data plan: if the relay or the network is down for a long stretch,
+  /// steady-state retries should stay infrequent rather than hammering
+  /// the radio.
+  final Duration maxReconnectDelay;
+
   static final _algorithm = Ed25519();
 
   WebSocketChannel? _channel;
+
+  /// The relay this client is supposed to be connected to right now --
+  /// non-null exactly when [connect] has succeeded at least once and
+  /// [close] hasn't been called since. The automatic reconnect loop below
+  /// uses this both as "should I keep retrying after an unexpected drop?"
+  /// and as the URL to retry.
+  String? _relayUrl;
+
+  /// The current reconnect backoff. Starts at [initialReconnectDelay],
+  /// doubles on each failed reconnect attempt (capped at
+  /// [maxReconnectDelay]), and resets to [initialReconnectDelay] as soon
+  /// as a (re)connect succeeds.
+  Duration _reconnectDelay;
+
+  Timer? _reconnectTimer;
 
   bool get isConnected => _channel != null;
 
@@ -51,7 +97,23 @@ class RelayClient {
   /// unhandled async error from the channel's internal sink-side
   /// subscription to that same future, which no try/catch around this
   /// method can reach. Connecting first sidesteps that path entirely.
+  ///
+  /// A connection reached this way is subject to the automatic reconnect
+  /// behavior below if it later drops; a *failed* initial attempt is not
+  /// retried in the background -- it returns `false` synchronously, same
+  /// as always, leaving that decision entirely to the caller (see
+  /// `bin/server.dart`, which uses this return value to decide whether to
+  /// advertise this node's relay to friends at startup).
   Future<bool> connect(String relayUrl) async {
+    final connected = await _attemptConnect(relayUrl);
+    if (connected) {
+      _relayUrl = relayUrl;
+      _reconnectDelay = initialReconnectDelay;
+    }
+    return connected;
+  }
+
+  Future<bool> _attemptConnect(String relayUrl) async {
     try {
       final socket = await io.WebSocket.connect(
         relayUrl,
@@ -96,7 +158,14 @@ class RelayClient {
     }
   }
 
+  /// Disconnects and, unlike a connection dropping unexpectedly, does *not*
+  /// trigger the automatic reconnect below -- clearing [_relayUrl] first is
+  /// what tells [_serve]'s cleanup (and any already-scheduled reconnect
+  /// timer) that this was intentional.
   Future<void> close() async {
+    _relayUrl = null;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     await _channel?.sink.close();
     _channel = null;
   }
@@ -113,11 +182,88 @@ class RelayClient {
         }
       }
     } catch (_) {
-      // Tunnel dropped -- nothing more to serve until reconnected.
+      // Tunnel dropped -- handled below, same as a clean stream end.
     } finally {
       if (_channel == channel) {
         _channel = null;
       }
+      // Only reconnect if this drop wasn't the result of an intentional
+      // close() (which clears _relayUrl first) -- see its doc comment.
+      final relayUrl = _relayUrl;
+      if (relayUrl != null) {
+        _scheduleReconnect(relayUrl);
+      }
+    }
+  }
+
+  /// Schedules the next reconnect attempt after [_reconnectDelay], canceling
+  /// whatever was previously scheduled first so there's ever only one
+  /// pending attempt at a time.
+  void _scheduleReconnect(String relayUrl) {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(_reconnectDelay, () {
+      unawaited(_reconnect(relayUrl));
+    });
+  }
+
+  Future<void> _reconnect(String relayUrl) async {
+    // close() may have run while this timer was pending -- honor it rather
+    // than resurrecting a connection nobody wants anymore.
+    if (_relayUrl == null) return;
+
+    if (!await _hasNetworkInterface()) {
+      // No active network interface at all right now (e.g. airplane mode,
+      // mobile data toggled off) -- skip the attempt entirely so this tick
+      // spends no data/radio activity, and check again after the same
+      // wait without escalating the backoff, since nothing was actually
+      // attempted.
+      _scheduleReconnect(relayUrl);
+      return;
+    }
+
+    final reconnected = await _attemptConnect(relayUrl);
+
+    if (_relayUrl == null) {
+      // close() ran during the attempt above -- if it still somehow
+      // succeeded, tear it back down rather than leaving a connection
+      // open after an intentional shutdown.
+      if (reconnected) {
+        await _channel?.sink.close();
+        _channel = null;
+      }
+      return;
+    }
+
+    if (reconnected) {
+      _reconnectDelay = initialReconnectDelay;
+    } else {
+      _reconnectDelay = _nextReconnectDelay(_reconnectDelay);
+      _scheduleReconnect(relayUrl);
+    }
+  }
+
+  Duration _nextReconnectDelay(Duration current) {
+    final doubled = current * 2;
+    return doubled > maxReconnectDelay ? maxReconnectDelay : doubled;
+  }
+
+  /// A cheap, local-only signal for "does this device have any active
+  /// network interface at all right now" -- `NetworkInterface.list()` is
+  /// purely an OS query with zero network I/O, so it's safe to call before
+  /// every retry tick without itself costing any data/radio activity. This
+  /// is *not* a real connectivity check (an interface can be up with no
+  /// actual route to the internet, e.g. a Wi-Fi AP with no upstream), just
+  /// a reasonable free proxy for the clear-cut "no network at all" case
+  /// (airplane mode, mobile data switched off) that's worth skipping an
+  /// attempt for entirely.
+  Future<bool> _hasNetworkInterface() async {
+    try {
+      final interfaces = await io.NetworkInterface.list(includeLoopback: false);
+      return interfaces.isNotEmpty;
+    } catch (_) {
+      // If the platform can't answer this at all, don't let that block
+      // reconnection forever -- fall back to just attempting.
+      return true;
     }
   }
 
