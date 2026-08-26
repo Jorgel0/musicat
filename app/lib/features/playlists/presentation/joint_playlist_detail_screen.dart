@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:share_plus/share_plus.dart';
 
+import '../../../core/invite/invite_uri.dart';
 import '../../friends/presentation/musicat_server_config_controller.dart';
 import '../../friends/presentation/shared_track_download.dart';
 import 'add_track_to_joint_playlist_sheet.dart';
@@ -24,7 +27,8 @@ class JointPlaylistDetailScreen extends ConsumerWidget {
           IconButton(
             tooltip: 'Share this playlist\'s id with a friend',
             icon: const Icon(Icons.info_outline),
-            onPressed: () => _showShareIdDialog(context),
+            onPressed: () =>
+                _showShareIdDialog(context, playlistAsync.value?.name),
           ),
           IconButton(
             tooltip: 'Sync with participants',
@@ -85,20 +89,53 @@ class JointPlaylistDetailScreen extends ConsumerWidget {
     );
   }
 
-  void _showShareIdDialog(BuildContext context) {
+  void _showShareIdDialog(BuildContext context, String? playlistName) {
+    final inviteUri = InviteUri.build(
+      PlaylistInvite(id: playlistId, name: playlistName),
+    );
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Playlist id'),
-        content: Row(
+        content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(child: SelectableText(playlistId)),
-            IconButton(
-              tooltip: 'Copy',
-              icon: const Icon(Icons.copy),
-              onPressed: () =>
-                  Clipboard.setData(ClipboardData(text: playlistId)),
+            // The fixed-size SizedBox matters, not just for layout: qr_flutter
+            // always wraps QrImageView in a LayoutBuilder internally, and
+            // AlertDialog sizes its content with IntrinsicWidth — the two
+            // are incompatible unless something above the LayoutBuilder
+            // already imposes tight constraints, which this SizedBox does.
+            SizedBox(
+              width: 180,
+              height: 180,
+              child: QrImageView(
+                // Keyed on its own data so a widget test can confirm
+                // exactly what got encoded (qr_flutter doesn't expose
+                // `data` as a public getter to assert on directly).
+                key: ValueKey('playlist-invite-qr:$inviteUri'),
+                data: inviteUri.toString(),
+                version: QrVersions.auto,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Expanded(child: SelectableText(playlistId)),
+                IconButton(
+                  tooltip: 'Copy',
+                  icon: const Icon(Icons.copy),
+                  onPressed: () =>
+                      Clipboard.setData(ClipboardData(text: playlistId)),
+                ),
+                IconButton(
+                  tooltip: 'Share invite link',
+                  icon: const Icon(Icons.share),
+                  onPressed: () => SharePlus.instance.share(
+                    ShareParams(text: inviteUri.toString()),
+                  ),
+                ),
+              ],
             ),
           ],
         ),

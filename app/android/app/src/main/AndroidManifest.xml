@@ -38,9 +38,29 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- Enables Flutter's built-in deep-link handling (an incoming
+                 Intent's data Uri is routed to the app's Router — see
+                 https://docs.flutter.dev/ui/navigation/deep-linking) so the
+                 musicat:// intent-filter below actually reaches go_router's
+                 top-level `redirect` in core/routing/app_router.dart. -->
+            <meta-data
+                android:name="flutter_deeplinking_enabled"
+                android:value="true" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- musicat:// invite links (friend pairing, joint-playlist
+                 join). A custom scheme, not http(s), so no App Links
+                 verification / assetlinks.json is needed — this
+                 registration alone is enough. See
+                 core/invite/invite_uri.dart for the exact URI shapes this
+                 accepts. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="musicat"/>
             </intent-filter>
         </activity>
 

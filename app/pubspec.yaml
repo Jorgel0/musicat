@@ -56,6 +56,12 @@ dependencies:
   permission_handler: ^13.0.1
   dio: ^5.11.0
   uuid: ^4.6.0
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^7.4.0
+  # Pinned below latest (13.x): 13.x bumps its win32 constraint to ^6.0.1,
+  # which conflicts with file_picker ^11.0.3's win32 ^5.9.0. 12.0.2 already
+  # has the SharePlus.instance.share(ShareParams(...)) API this app uses.
+  share_plus: ^12.0.2
 
 dev_dependencies:
   flutter_test:

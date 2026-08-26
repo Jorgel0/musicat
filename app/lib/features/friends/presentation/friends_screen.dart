@@ -2,17 +2,55 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:share_plus/share_plus.dart';
 
+import '../../../core/invite/invite_uri.dart';
+import '../../../core/invite/pending_invite.dart';
+import '../../../core/invite/qr_scanner_screen.dart';
 import '../../../core/network/federation/federation_client.dart';
 import '../domain/musicat_server_config.dart';
 import 'friends_controller.dart';
 import 'musicat_server_config_controller.dart';
 
-class FriendsScreen extends ConsumerWidget {
+/// Wraps [FriendsScreen]'s body; the actual screen also needs to notice a
+/// pending friend invite (deep link, see `pending_invite.dart`) and open
+/// the Add Friend sheet pre-filled, which needs a [State] to hook a
+/// post-frame callback — hence [ConsumerStatefulWidget] rather than the
+/// simpler [ConsumerWidget] most other top-level screens use.
+class FriendsScreen extends ConsumerStatefulWidget {
   const FriendsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<FriendsScreen> createState() => _FriendsScreenState();
+}
+
+class _FriendsScreenState extends ConsumerState<FriendsScreen> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _maybeOpenPendingInvite(ref.read(pendingInviteProvider)),
+    );
+  }
+
+  /// Opens the Add Friend sheet pre-filled if [pending] is a friend invite
+  /// that hasn't been shown yet. Deliberately leaves anything else (a
+  /// playlist invite, a parse error) untouched — those are some other
+  /// screen's concern (`PlaylistsScreen`, `AppShell`).
+  void _maybeOpenPendingInvite(PendingInvite? pending) {
+    if (pending is! PendingFriendInvite) return;
+    ref.read(pendingInviteProvider.notifier).consume();
+    _showAddFriendSheet(context, ref, prefill: pending.invite);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    ref.listen<PendingInvite?>(
+      pendingInviteProvider,
+      (previous, next) => _maybeOpenPendingInvite(next),
+    );
+
     final config = ref.watch(musicatServerConfigControllerProvider);
 
     return Scaffold(
@@ -54,11 +92,15 @@ class FriendsScreen extends ConsumerWidget {
     );
   }
 
-  void _showAddFriendSheet(BuildContext context, WidgetRef ref) {
+  void _showAddFriendSheet(
+    BuildContext context,
+    WidgetRef ref, {
+    FriendInvite? prefill,
+  }) {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      builder: (context) => const _AddFriendSheet(),
+      builder: (context) => _AddFriendSheet(prefill: prefill),
     );
   }
 }
@@ -300,16 +342,29 @@ class _RelayStatusRow extends StatelessWidget {
 }
 
 class _AddFriendSheet extends ConsumerStatefulWidget {
-  const _AddFriendSheet();
+  const _AddFriendSheet({this.prefill});
+
+  /// A friend invite already parsed from a deep link (see
+  /// `pending_invite.dart`) — pre-fills the "Add a friend" fields below so
+  /// the user still has to review and tap "Add friend" themselves; this
+  /// never auto-submits.
+  final FriendInvite? prefill;
 
   @override
   ConsumerState<_AddFriendSheet> createState() => _AddFriendSheetState();
 }
 
 class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
-  final _friendAddressController = TextEditingController();
-  final _codeController = TextEditingController();
-  final _displayNameController = TextEditingController();
+  late final _friendAddressController = TextEditingController(
+    text: widget.prefill?.address,
+  );
+  late final _codeController = TextEditingController(
+    text: widget.prefill?.code,
+  );
+  late final _displayNameController = TextEditingController(
+    text: widget.prefill?.displayName,
+  );
+  final _pasteLinkController = TextEditingController();
   String? _myCode;
   bool _generatingCode = false;
   bool _addingFriend = false;
@@ -320,7 +375,42 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
     _friendAddressController.dispose();
     _codeController.dispose();
     _displayNameController.dispose();
+    _pasteLinkController.dispose();
     super.dispose();
+  }
+
+  /// Runs [raw] — from a QR scan or the "paste an invite link" field —
+  /// through the shared [InviteUri] parser and pre-fills the address/code/
+  /// name fields above on a valid friend invite. Never auto-submits; the
+  /// user still has to review and tap "Add friend".
+  void _applyInvite(String raw) {
+    setState(() => _error = null);
+    final InvitePayload payload;
+    try {
+      payload = InviteUri.parse(raw);
+    } on InviteUriException catch (e) {
+      setState(() => _error = e.message);
+      return;
+    }
+    if (payload is! FriendInvite) {
+      setState(() => _error = 'That link is not a friend invite.');
+      return;
+    }
+    final invite = payload;
+    setState(() {
+      _friendAddressController.text = invite.address;
+      _codeController.text = invite.code;
+      if (invite.displayName != null) {
+        _displayNameController.text = invite.displayName!;
+      }
+      _pasteLinkController.clear();
+    });
+  }
+
+  Future<void> _scanInvite() async {
+    final raw = await scanQrCode(context, title: "Scan a friend's invite");
+    if (raw == null) return;
+    _applyInvite(raw);
   }
 
   Future<void> _generateMyCode() async {
@@ -397,7 +487,41 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
                       )
                     : const Text('Generate a code'),
               )
-            else
+            else ...[
+              // No natural source of "my own display name" exists anywhere
+              // in this app today (see my_profile_screen.dart, which has
+              // none either) — this self-invite omits `name` rather than
+              // guess at one.
+              Builder(
+                builder: (context) {
+                  final inviteUri = InviteUri.build(
+                    FriendInvite(address: myPublicAddress, code: _myCode!),
+                  );
+                  return Center(
+                    // Fixed-size SizedBox, not just for layout: qr_flutter
+                    // always wraps QrImageView in a LayoutBuilder
+                    // internally, which is incompatible with any ancestor
+                    // that sizes itself via IntrinsicWidth (e.g. an
+                    // AlertDialog, like the joint-playlist share dialog
+                    // uses) unless something above it already imposes
+                    // tight constraints — kept consistent here too.
+                    child: SizedBox(
+                      width: 180,
+                      height: 180,
+                      child: QrImageView(
+                        // Keyed on its own data so a widget test can
+                        // confirm exactly what got encoded (qr_flutter
+                        // doesn't expose `data` as a public getter to
+                        // assert on directly).
+                        key: ValueKey('friend-invite-qr:$inviteUri'),
+                        data: inviteUri.toString(),
+                        version: QrVersions.auto,
+                      ),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 8),
               Row(
                 children: [
                   Expanded(
@@ -414,8 +538,23 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
                     onPressed: () =>
                         Clipboard.setData(ClipboardData(text: _myCode!)),
                   ),
+                  IconButton(
+                    tooltip: 'Share invite link',
+                    icon: const Icon(Icons.share),
+                    onPressed: () => SharePlus.instance.share(
+                      ShareParams(
+                        text: InviteUri.build(
+                          FriendInvite(
+                            address: myPublicAddress,
+                            code: _myCode!,
+                          ),
+                        ).toString(),
+                      ),
+                    ),
+                  ),
                 ],
               ),
+            ],
             const Divider(height: 32),
             Text(
               'Add a friend',
@@ -438,6 +577,37 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
             TextField(
               controller: _displayNameController,
               decoration: const InputDecoration(labelText: 'Name (optional)'),
+            ),
+            const SizedBox(height: 12),
+            if (qrScanningSupported) ...[
+              OutlinedButton.icon(
+                onPressed: _scanInvite,
+                icon: const Icon(Icons.qr_code_scanner),
+                label: const Text('Scan a friend\'s QR code'),
+              ),
+              const SizedBox(height: 12),
+            ],
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _pasteLinkController,
+                    decoration: const InputDecoration(
+                      labelText: 'Or paste an invite link',
+                      hintText: 'musicat://friend?...',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: OutlinedButton(
+                    onPressed: () => _applyInvite(_pasteLinkController.text),
+                    child: const Text('Use'),
+                  ),
+                ),
+              ],
             ),
             if (_error != null) ...[
               const SizedBox(height: 12),
