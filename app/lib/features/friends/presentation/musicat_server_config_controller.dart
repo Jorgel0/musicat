@@ -56,12 +56,19 @@ final jointPlaylistClientProvider = Provider<JointPlaylistClient?>((ref) {
   return JointPlaylistClient(baseUrl: config.baseUrl);
 });
 
+/// This device's own full node info (id, public key, relay status), as
+/// reported by its Musicat Server. `null` while unconfigured.
+final myNodeInfoProvider = FutureProvider<MyNodeInfo?>((ref) async {
+  final client = ref.watch(federationClientProvider);
+  if (client == null) return null;
+  return client.getMyNode();
+});
+
 /// This node's own id, e.g. to tell a joint-playlist item this device
 /// added apart from ones a friend added. `null` while unconfigured.
 final myNodeIdProvider = FutureProvider<String?>((ref) async {
-  final client = ref.watch(federationClientProvider);
-  if (client == null) return null;
-  return (await client.getMyNode()).nodeId;
+  final info = await ref.watch(myNodeInfoProvider.future);
+  return info?.nodeId;
 });
 
 /// Loads the persisted config, for overriding

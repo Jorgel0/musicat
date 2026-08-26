@@ -41,9 +41,11 @@ class FriendDetailScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final friends = ref.watch(friendsControllerProvider).friends;
     String? displayName;
+    var hasRelay = false;
     for (final entry in friends) {
       if (entry.friend.nodeId == nodeId) {
         displayName = entry.friend.displayName;
+        hasRelay = entry.friend.relayUrl != null;
         break;
       }
     }
@@ -51,20 +53,48 @@ class FriendDetailScreen extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(title: Text(displayName ?? nodeId)),
-      body: tracksAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, stackTrace) =>
-            Center(child: Text('Could not load shared tracks: $error')),
-        data: (tracks) {
-          if (tracks.isEmpty) {
-            return const Center(child: Text('Nothing shared with you yet.'));
-          }
-          return ListView.builder(
-            itemCount: tracks.length,
-            itemBuilder: (context, index) =>
-                _SharedTrackTile(friendNodeId: nodeId, track: tracks[index]),
-          );
-        },
+      body: Column(
+        children: [
+          if (hasRelay)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.cloud_queue,
+                    size: 16,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Relay fallback available',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          Expanded(
+            child: tracksAsync.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (error, stackTrace) =>
+                  Center(child: Text('Could not load shared tracks: $error')),
+              data: (tracks) {
+                if (tracks.isEmpty) {
+                  return const Center(
+                    child: Text('Nothing shared with you yet.'),
+                  );
+                }
+                return ListView.builder(
+                  itemCount: tracks.length,
+                  itemBuilder: (context, index) => _SharedTrackTile(
+                    friendNodeId: nodeId,
+                    track: tracks[index],
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }

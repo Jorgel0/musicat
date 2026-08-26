@@ -46,7 +46,14 @@ class FriendsController extends Notifier<FriendsState> {
     ref.onDispose(() => _pollTimer?.cancel());
     final client = ref.watch(federationClientProvider);
     if (client != null) {
-      unawaited(_refresh(client));
+      // Deferred to a microtask: `_refresh` writes `state` as its very
+      // first (synchronous) statement, before its first `await`. Calling
+      // it directly here would run that write synchronously as part of
+      // `build()` itself, before Riverpod has finished initializing this
+      // provider's state from `build()`'s return value below — which
+      // throws "Tried to read the state of an uninitialized provider."
+      // A microtask runs after `build()` returns, once that's set up.
+      unawaited(Future.microtask(() => _refresh(client)));
       _pollTimer = Timer.periodic(
         const Duration(seconds: 5),
         (_) => _refresh(client),

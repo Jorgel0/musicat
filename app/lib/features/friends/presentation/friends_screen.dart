@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/network/federation/federation_client.dart';
 import '../domain/musicat_server_config.dart';
 import 'friends_controller.dart';
 import 'musicat_server_config_controller.dart';
@@ -115,6 +116,7 @@ class _FriendsList extends ConsumerWidget {
         itemBuilder: (context, index) {
           final entry = state.friends[index];
           final connected = entry.status?.connected ?? false;
+          final hasRelay = entry.friend.relayUrl != null;
           return ListTile(
             leading: CircleAvatar(
               backgroundColor: connected ? Colors.green : Colors.grey,
@@ -122,12 +124,25 @@ class _FriendsList extends ConsumerWidget {
             ),
             title: Text(entry.friend.displayName ?? entry.friend.nodeId),
             subtitle: Text(connected ? 'Connected' : 'Not connected'),
-            trailing: IconButton(
-              tooltip: 'Remove friend',
-              icon: const Icon(Icons.person_remove_outlined),
-              onPressed: () => ref
-                  .read(friendsControllerProvider.notifier)
-                  .removeFriend(entry.friend.nodeId),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (hasRelay)
+                  const Tooltip(
+                    message: 'Has a relay fallback registered',
+                    child: Padding(
+                      padding: EdgeInsets.only(right: 4),
+                      child: Icon(Icons.cloud_queue, size: 20),
+                    ),
+                  ),
+                IconButton(
+                  tooltip: 'Remove friend',
+                  icon: const Icon(Icons.person_remove_outlined),
+                  onPressed: () => ref
+                      .read(friendsControllerProvider.notifier)
+                      .removeFriend(entry.friend.nodeId),
+                ),
+              ],
             ),
             onTap: () => context.push('/friends/${entry.friend.nodeId}'),
           );
@@ -178,6 +193,8 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final myNodeInfoAsync = ref.watch(myNodeInfoProvider);
+
     return Padding(
       padding: EdgeInsets.only(
         left: 24,
@@ -196,7 +213,9 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
             'address to give friends so their server can reach yours.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
+          _RelayStatusRow(myNodeInfoAsync: myNodeInfoAsync),
+          const SizedBox(height: 12),
           TextField(
             controller: _hostController,
             decoration: const InputDecoration(
@@ -222,6 +241,60 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
           FilledButton(onPressed: _save, child: const Text('Save')),
         ],
       ),
+    );
+  }
+}
+
+/// Read-only status row telling the user whether *this device's own*
+/// Musicat Server currently has a relay fallback connected (ADR
+/// 0033/0034) — no raw relay URL shown, just a plain connected/not state.
+class _RelayStatusRow extends StatelessWidget {
+  const _RelayStatusRow({required this.myNodeInfoAsync});
+
+  final AsyncValue<MyNodeInfo?> myNodeInfoAsync;
+
+  @override
+  Widget build(BuildContext context) {
+    final textStyle = Theme.of(context).textTheme.bodySmall;
+    return myNodeInfoAsync.when(
+      loading: () => Row(
+        children: [
+          const SizedBox(
+            height: 14,
+            width: 14,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          const SizedBox(width: 8),
+          Text('Checking relay status…', style: textStyle),
+        ],
+      ),
+      error: (error, stackTrace) => Row(
+        children: [
+          Icon(
+            Icons.help_outline,
+            size: 16,
+            color: Theme.of(context).colorScheme.error,
+          ),
+          const SizedBox(width: 8),
+          Text('Relay status unavailable', style: textStyle),
+        ],
+      ),
+      data: (info) {
+        final connected = info?.relayUrl != null;
+        return Row(
+          children: [
+            Icon(
+              connected ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
+              size: 16,
+            ),
+            const SizedBox(width: 8),
+            Text(
+              connected ? 'Relay: connected' : 'Relay: not connected',
+              style: textStyle,
+            ),
+          ],
+        );
+      },
     );
   }
 }
