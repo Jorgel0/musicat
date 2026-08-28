@@ -62,6 +62,13 @@ Response _verificationErrorResponse(
 /// and returns this node's own in the response the same way, so a friend
 /// unreachable via [Friend.address] can still be reached as a fallback
 /// through whichever relay they reported.
+///
+/// `PATCH /friends/<nodeId>` sets [Friend.localNickname] — a purely local
+/// label this device's own user picks for a friend, distinct from
+/// [Friend.displayName] (what the friend calls *themselves*). Like `GET`/
+/// `DELETE /friends/<nodeId>`, this is called by this device's own app,
+/// not by another federation peer, so it isn't behind [RequestVerifier]
+/// either.
 Router buildFederationRouter(
   FriendStore friendStore,
   RequestVerifier verifier,
@@ -158,6 +165,30 @@ Router buildFederationRouter(
     await friendStore.remove(nodeId);
     puncher.stopKeepalive(nodeId);
     return Response(204);
+  });
+
+  router.patch('/friends/<nodeId>', (Request request, String nodeId) async {
+    final Map<String, dynamic> body;
+    try {
+      final raw = await request.readAsString();
+      body = raw.isEmpty ? {} : jsonDecode(raw) as Map<String, dynamic>;
+    } on FormatException {
+      return _error('Request body must be JSON');
+    }
+
+    final localNickname = body['localNickname'];
+    if (localNickname != null && localNickname is! String) {
+      return _error('"localNickname" must be a string if present');
+    }
+
+    final updated = await friendStore.setLocalNickname(
+      nodeId,
+      localNickname as String?,
+    );
+    if (updated == null) {
+      return _error('Unknown friend', status: 404);
+    }
+    return _json(updated.toJson());
   });
 
   router.get('/friends/<nodeId>/status', (

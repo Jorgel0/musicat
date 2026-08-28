@@ -93,4 +93,73 @@ void main() {
     await store.remove('does-not-exist'); // does not throw
     expect(await store.loadAll(), isEmpty);
   });
+
+  group('setLocalNickname', () {
+    test('sets a local nickname and persists it', () async {
+      await store.add(
+        const Friend(
+          nodeId: 'abc',
+          publicKeyBase64: 'key',
+          address: 'host:8080',
+          displayName: 'Friend A',
+        ),
+      );
+
+      final updated = await store.setLocalNickname('abc', 'Bestie');
+
+      expect(updated?.localNickname, 'Bestie');
+
+      final reloaded = FriendStore(tempDir);
+      final friend = await reloaded.findByNodeId('abc');
+      expect(friend?.localNickname, 'Bestie');
+    });
+
+    test('does not clobber the friend\'s other fields', () async {
+      await store.add(
+        const Friend(
+          nodeId: 'abc',
+          publicKeyBase64: 'key',
+          address: 'host:8080',
+          displayName: 'Friend A',
+          udpCandidate: '203.0.113.5:41234',
+          relayUrl: 'ws://relay.example.com/connect',
+        ),
+      );
+
+      final updated = await store.setLocalNickname('abc', 'Bestie');
+
+      expect(updated?.publicKeyBase64, 'key');
+      expect(updated?.address, 'host:8080');
+      expect(updated?.displayName, 'Friend A');
+      expect(updated?.udpCandidate, '203.0.113.5:41234');
+      expect(updated?.relayUrl, 'ws://relay.example.com/connect');
+    });
+
+    test('clearing it back to null persists', () async {
+      await store.add(
+        const Friend(
+          nodeId: 'abc',
+          publicKeyBase64: 'key',
+          address: 'host:8080',
+          localNickname: 'Bestie',
+        ),
+      );
+
+      final updated = await store.setLocalNickname('abc', null);
+
+      expect(updated?.localNickname, isNull);
+      final friend = await store.findByNodeId('abc');
+      expect(friend?.localNickname, isNull);
+    });
+
+    test(
+      'returns null for an unknown nodeId, without creating anything',
+      () async {
+        final updated = await store.setLocalNickname('does-not-exist', 'x');
+
+        expect(updated, isNull);
+        expect(await store.loadAll(), isEmpty);
+      },
+    );
+  });
 }

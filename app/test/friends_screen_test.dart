@@ -10,6 +10,7 @@ import 'package:musicat/features/friends/presentation/friends_controller.dart';
 import 'package:musicat/features/friends/presentation/friends_screen.dart';
 import 'package:musicat/features/friends/presentation/musicat_server_config_controller.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'fakes/fake_http_adapter.dart';
 
@@ -41,6 +42,12 @@ FederationClient _clientWith(
 }
 
 void main() {
+  // `_ServerConfigSheet`'s "Save" button persists via
+  // `MusicatServerConfigController.save`, which reads/writes real
+  // `SharedPreferences` — mocked here so any test that actually taps
+  // "Save" doesn't hit a missing platform channel.
+  setUp(() => SharedPreferences.setMockInitialValues({}));
+
   group('_FriendsList relay indicator', () {
     testWidgets('shows a relay icon only for friends with a relayUrl on file', (
       tester,
@@ -94,6 +101,67 @@ void main() {
       expect(find.byIcon(Icons.cloud_queue), findsOneWidget);
       expect(find.byTooltip('Has a relay fallback registered'), findsOneWidget);
     });
+  });
+
+  group('_FriendsList name precedence', () {
+    testWidgets(
+      'prefers localNickname, then displayName, then the raw nodeId',
+      (tester) async {
+        final container = ProviderContainer(
+          overrides: [
+            musicatServerConfigControllerProvider.overrideWith(
+              () => MusicatServerConfigController(_configured),
+            ),
+            friendsControllerProvider.overrideWith(
+              () => _FixedFriendsController(
+                const FriendsState(
+                  friends: [
+                    FriendWithStatus(
+                      friend: FederationFriend(
+                        nodeId: 'has-both',
+                        publicKeyBase64: 'pk1',
+                        address: 'a.example:8080',
+                        displayName: "Their own name",
+                        localNickname: 'My nickname for them',
+                      ),
+                    ),
+                    FriendWithStatus(
+                      friend: FederationFriend(
+                        nodeId: 'has-display-name-only',
+                        publicKeyBase64: 'pk2',
+                        address: 'b.example:8080',
+                        displayName: 'Bea',
+                      ),
+                    ),
+                    FriendWithStatus(
+                      friend: FederationFriend(
+                        nodeId: 'raw-node-id',
+                        publicKeyBase64: 'pk3',
+                        address: 'c.example:8080',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(home: FriendsScreen()),
+          ),
+        );
+        await tester.pump();
+
+        expect(find.text('My nickname for them'), findsOneWidget);
+        expect(find.text("Their own name"), findsNothing);
+        expect(find.text('Bea'), findsOneWidget);
+        expect(find.text('raw-node-id'), findsOneWidget);
+      },
+    );
   });
 
   group('_ServerConfigSheet relay status row', () {
@@ -177,9 +245,131 @@ void main() {
     });
   });
 
+  group('_ServerConfigSheet "Your display name" field', () {
+    testWidgets('pre-fills from the current config, and saving persists it', (
+      tester,
+    ) async {
+      final client = _clientWith((options) {
+        if (options.path == '/api/v1/node') {
+          return const FakeHttpResponse(200, {
+            'nodeId': 'my-node',
+            'publicKeyBase64': 'pk',
+          });
+        }
+        throw StateError('Unexpected request: ${options.path}');
+      });
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(
+              const MusicatServerConfig(
+                host: 'localhost',
+                port: 8080,
+                myPublicAddress: 'me.example:8080',
+                myDisplayName: 'Old Name',
+              ),
+            ),
+          ),
+          federationClientProvider.overrideWithValue(client),
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(const FriendsState()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byTooltip('Musicat Server settings'));
+      await tester.pumpAndSettle();
+
+      final nameField = tester.widget<TextField>(
+        find.widgetWithText(TextField, 'Your display name'),
+      );
+      expect(nameField.controller!.text, 'Old Name');
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Your display name'),
+        'New Name',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      expect(
+        container.read(musicatServerConfigControllerProvider).myDisplayName,
+        'New Name',
+      );
+    });
+
+    testWidgets('saving an empty display name clears it (stores null)', (
+      tester,
+    ) async {
+      final client = _clientWith((options) {
+        if (options.path == '/api/v1/node') {
+          return const FakeHttpResponse(200, {
+            'nodeId': 'my-node',
+            'publicKeyBase64': 'pk',
+          });
+        }
+        throw StateError('Unexpected request: ${options.path}');
+      });
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(
+              const MusicatServerConfig(
+                host: 'localhost',
+                port: 8080,
+                myPublicAddress: 'me.example:8080',
+                myDisplayName: 'Old Name',
+              ),
+            ),
+          ),
+          federationClientProvider.overrideWithValue(client),
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(const FriendsState()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byTooltip('Musicat Server settings'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Your display name'),
+        '',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      expect(
+        container.read(musicatServerConfigControllerProvider).myDisplayName,
+        isNull,
+      );
+    });
+  });
+
   group('_AddFriendSheet "paste an invite link" fallback', () {
     testWidgets(
-      'a pasted friend-invite link pre-fills address/code/name, no auto-submit',
+      'a pasted friend-invite link pre-fills address/code, no auto-submit, '
+      'and no longer shows a "Name (optional)" field (that field used to '
+      'be sent as this device\'s own displayName, crossing names with the '
+      'friend being added — see MusicatServerConfig.myDisplayName instead)',
       (tester) async {
         final container = ProviderContainer(
           overrides: [
@@ -231,10 +421,10 @@ void main() {
         );
         expect(codeField.controller!.text, 'paste-code');
 
-        final nameField = tester.widget<TextField>(
-          find.widgetWithText(TextField, 'Name (optional)'),
-        );
-        expect(nameField.controller!.text, 'Casey');
+        // The invite carried a `name` (Casey), but the add-friend flow has
+        // no field for it any more — it would only ever have been sent as
+        // *this device's own* displayName, not a label for the friend.
+        expect(find.widgetWithText(TextField, 'Name (optional)'), findsNothing);
 
         // Never auto-submits — the sheet is still open, "Add friend" was
         // never tapped.
@@ -354,64 +544,6 @@ void main() {
         await tester.pump();
 
         expect(find.text('This invite link is malformed.'), findsOneWidget);
-      },
-    );
-
-    testWidgets(
-      "a pasted invite's name never clobbers a name the user already typed "
-      '(regression: _AddFriendSheet used to unconditionally overwrite the '
-      'name field)',
-      (tester) async {
-        final container = ProviderContainer(
-          overrides: [
-            musicatServerConfigControllerProvider.overrideWith(
-              () => MusicatServerConfigController(_configured),
-            ),
-            friendsControllerProvider.overrideWith(
-              () => _FixedFriendsController(const FriendsState()),
-            ),
-          ],
-        );
-        addTearDown(container.dispose);
-
-        await tester.pumpWidget(
-          UncontrolledProviderScope(
-            container: container,
-            child: const MaterialApp(home: FriendsScreen()),
-          ),
-        );
-        await tester.pump();
-        await tester.tap(find.byIcon(Icons.person_add_alt));
-        await tester.pumpAndSettle();
-
-        await tester.enterText(
-          find.widgetWithText(TextField, 'Name (optional)'),
-          'My own name',
-        );
-
-        const invite = FriendInvite(
-          address: 'pasted.example:9090',
-          code: 'paste-code',
-          displayName: "Someone else's name",
-        );
-        final raw = InviteUri.build(invite).toString();
-
-        await tester.enterText(
-          find.widgetWithText(TextField, 'Or paste an invite link'),
-          raw,
-        );
-        await tester.tap(find.widgetWithText(OutlinedButton, 'Use'));
-        await tester.pump();
-
-        final addressField = tester.widget<TextField>(
-          find.widgetWithText(TextField, "Friend's address"),
-        );
-        expect(addressField.controller!.text, 'pasted.example:9090');
-
-        final nameField = tester.widget<TextField>(
-          find.widgetWithText(TextField, 'Name (optional)'),
-        );
-        expect(nameField.controller!.text, 'My own name');
       },
     );
   });

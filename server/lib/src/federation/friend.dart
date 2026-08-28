@@ -11,6 +11,7 @@ class Friend {
     this.displayName,
     this.udpCandidate,
     this.relayUrl,
+    this.localNickname,
   });
 
   final String nodeId;
@@ -34,6 +35,14 @@ class Friend {
   /// `http://$address/<path>`. `null` if they didn't configure a relay.
   final String? relayUrl;
 
+  /// A purely local label this device's own user chose for this friend --
+  /// distinct from [displayName], which is what the friend calls
+  /// *themselves*. Set/read only through this node's own app-facing API
+  /// (`PATCH /friends/<nodeId>` in `federation_routes.dart`); never
+  /// included in any outgoing federation request and never seen by, or
+  /// sent to, the friend it labels.
+  final String? localNickname;
+
   Map<String, Object?> toJson() => {
     'nodeId': nodeId,
     'publicKeyBase64': publicKeyBase64,
@@ -41,6 +50,7 @@ class Friend {
     'displayName': displayName,
     'udpCandidate': udpCandidate,
     'relayUrl': relayUrl,
+    'localNickname': localNickname,
   };
 
   factory Friend.fromJson(Map<String, dynamic> json) => Friend(
@@ -50,5 +60,6 @@ class Friend {
     displayName: json['displayName'] as String?,
     udpCandidate: json['udpCandidate'] as String?,
     relayUrl: json['relayUrl'] as String?,
+    localNickname: json['localNickname'] as String?,
   );
 }

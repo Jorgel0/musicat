@@ -9,6 +9,7 @@ import '../domain/musicat_server_config.dart';
 const _hostKey = 'musicatServerHost';
 const _portKey = 'musicatServerPort';
 const _myPublicAddressKey = 'musicatServerMyPublicAddress';
+const _myDisplayNameKey = 'musicatServerMyDisplayName';
 
 class MusicatServerConfigController extends Notifier<MusicatServerConfig> {
   MusicatServerConfigController([this._initial]);
@@ -24,6 +25,7 @@ class MusicatServerConfigController extends Notifier<MusicatServerConfig> {
     await prefs.setString(_hostKey, config.host);
     await prefs.setInt(_portKey, config.port);
     await prefs.setString(_myPublicAddressKey, config.myPublicAddress);
+    await prefs.setString(_myDisplayNameKey, config.myDisplayName ?? '');
   }
 }
 
@@ -76,9 +78,13 @@ final myNodeIdProvider = FutureProvider<String?>((ref) async {
 /// frame — same pattern as the Soulseek backend preference.
 Future<MusicatServerConfig> loadMusicatServerConfigPreference() async {
   final prefs = await SharedPreferences.getInstance();
+  final myDisplayName = prefs.getString(_myDisplayNameKey);
   return MusicatServerConfig(
     host: prefs.getString(_hostKey) ?? '',
     port: prefs.getInt(_portKey) ?? 8080,
     myPublicAddress: prefs.getString(_myPublicAddressKey) ?? '',
+    myDisplayName: (myDisplayName == null || myDisplayName.isEmpty)
+        ? null
+        : myDisplayName,
   );
 }

@@ -65,6 +65,10 @@ Endpoints so far:
 - `GET /api/v1/federation/friends` — lists trusted nodes
 - `DELETE /api/v1/federation/friends/<nodeId>` — revokes trust and stops
   maintaining its NAT keepalive
+- `PATCH /api/v1/federation/friends/<nodeId>` (`{"localNickname": "..." |
+  null}`) — sets/clears a purely local label for that friend (never sent
+  to them, distinct from the `displayName` they report about
+  themselves); 404 if `nodeId` isn't a known friend
 - `GET /api/v1/federation/friends/<nodeId>/status` —
   `{"connected": bool, "lastSeen": "...ISO..." | null}`
 - `GET /api/v1/federation/ping` — requires `X-Node-Id`/`X-Timestamp`/

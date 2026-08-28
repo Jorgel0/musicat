@@ -6,6 +6,7 @@ import 'package:musicat/features/friends/domain/musicat_server_config.dart';
 import 'package:musicat/features/friends/presentation/friends_controller.dart';
 import 'package:musicat/features/friends/presentation/musicat_server_config_controller.dart';
 
+import 'fakes/fake_federation_client.dart';
 import 'fakes/fake_http_adapter.dart';
 
 const _configured = MusicatServerConfig(
@@ -97,5 +98,131 @@ void main() {
         expect(state, const FriendsState());
       },
     );
+  });
+
+  group('FriendsController.addFriend', () {
+    test("sends this device's own configured myDisplayName as the outgoing "
+        'displayName, never anything caller-supplied (regression: this used '
+        'to be a caller-supplied argument, crossing names between the two '
+        'sides when both people filled in "Name (optional)" expecting to '
+        'label each other)', () async {
+      final client = FakeFederationClient();
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(
+              const MusicatServerConfig(
+                host: 'localhost',
+                port: 8080,
+                myPublicAddress: 'me.example:8080',
+                myDisplayName: 'My Own Name',
+              ),
+            ),
+          ),
+          federationClientProvider.overrideWithValue(client),
+        ],
+      );
+      addTearDown(container.dispose);
+      final subscription = container.listen(
+        friendsControllerProvider,
+        (a, b) {},
+      );
+      addTearDown(subscription.close);
+
+      await container
+          .read(friendsControllerProvider.notifier)
+          .addFriend(friendAddress: 'friend.example:9090', code: 'the-code');
+
+      expect(client.addFriendCalls, hasLength(1));
+      final call = client.addFriendCalls.single;
+      expect(call.friendBaseUrl, 'http://friend.example:9090');
+      expect(call.code, 'the-code');
+      expect(call.myPublicAddress, 'me.example:8080');
+      expect(call.displayName, 'My Own Name');
+    });
+
+    test('sends a null displayName when none is configured', () async {
+      final client = FakeFederationClient();
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(_configured),
+          ),
+          federationClientProvider.overrideWithValue(client),
+        ],
+      );
+      addTearDown(container.dispose);
+      final subscription = container.listen(
+        friendsControllerProvider,
+        (a, b) {},
+      );
+      addTearDown(subscription.close);
+
+      await container
+          .read(friendsControllerProvider.notifier)
+          .addFriend(friendAddress: 'friend.example:9090', code: 'the-code');
+
+      expect(client.addFriendCalls.single.displayName, isNull);
+    });
+  });
+
+  group('FriendsController.setLocalNickname', () {
+    test(
+      'sets the nickname via the client and refreshes state to reflect it',
+      () async {
+        final client = FakeFederationClient(
+          friends: const [
+            FederationFriend(
+              nodeId: 'n1',
+              publicKeyBase64: 'pk1',
+              address: 'a.example:8080',
+              displayName: 'Ada',
+            ),
+          ],
+        );
+        final container = ProviderContainer(
+          overrides: [
+            musicatServerConfigControllerProvider.overrideWith(
+              () => MusicatServerConfigController(_configured),
+            ),
+            federationClientProvider.overrideWithValue(client),
+          ],
+        );
+        addTearDown(container.dispose);
+        final subscription = container.listen(
+          friendsControllerProvider,
+          (a, b) {},
+        );
+        addTearDown(subscription.close);
+        // Let the initial (build-time) refresh settle before mutating.
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+
+        await container
+            .read(friendsControllerProvider.notifier)
+            .setLocalNickname('n1', 'Adita');
+
+        expect(client.setLocalNicknameCalls, [
+          (nodeId: 'n1', nickname: 'Adita'),
+        ]);
+        final state = container.read(friendsControllerProvider);
+        expect(state.friends.single.friend.localNickname, 'Adita');
+      },
+    );
+
+    test('is a no-op when the Musicat Server is not configured', () async {
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(MusicatServerConfig.empty),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      // Should simply return without throwing.
+      await container
+          .read(friendsControllerProvider.notifier)
+          .setLocalNickname('n1', 'x');
+    });
   });
 }

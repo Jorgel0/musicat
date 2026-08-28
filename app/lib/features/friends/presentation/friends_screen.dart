@@ -5,7 +5,6 @@ import 'package:go_router/go_router.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
-import '../../../core/invite/fill_if_empty.dart';
 import '../../../core/invite/invite_uri.dart';
 import '../../../core/invite/pending_invite.dart';
 import '../../../core/invite/qr_scanner_screen.dart';
@@ -165,7 +164,7 @@ class _FriendsList extends ConsumerWidget {
               backgroundColor: connected ? Colors.green : Colors.grey,
               child: const Icon(Icons.person, color: Colors.white),
             ),
-            title: Text(entry.friend.displayName ?? entry.friend.nodeId),
+            title: Text(entry.friend.displayLabel),
             subtitle: Text(connected ? 'Connected' : 'Not connected'),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
@@ -206,6 +205,7 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
   late final TextEditingController _hostController;
   late final TextEditingController _portController;
   late final TextEditingController _myAddressController;
+  late final TextEditingController _myDisplayNameController;
 
   @override
   void initState() {
@@ -214,6 +214,9 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
     _hostController = TextEditingController(text: config.host);
     _portController = TextEditingController(text: config.port.toString());
     _myAddressController = TextEditingController(text: config.myPublicAddress);
+    _myDisplayNameController = TextEditingController(
+      text: config.myDisplayName,
+    );
   }
 
   @override
@@ -221,14 +224,17 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
     _hostController.dispose();
     _portController.dispose();
     _myAddressController.dispose();
+    _myDisplayNameController.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
+    final myDisplayName = _myDisplayNameController.text.trim();
     final config = MusicatServerConfig(
       host: _hostController.text.trim(),
       port: int.tryParse(_portController.text.trim()) ?? 8080,
       myPublicAddress: _myAddressController.text.trim(),
+      myDisplayName: myDisplayName.isEmpty ? null : myDisplayName,
     );
     await ref.read(musicatServerConfigControllerProvider.notifier).save(config);
     if (mounted) Navigator.of(context).pop();
@@ -278,6 +284,14 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
             decoration: const InputDecoration(
               labelText: 'Your address (given to friends)',
               hintText: 'mydomain.example:8080',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _myDisplayNameController,
+            decoration: const InputDecoration(
+              labelText: 'Your display name',
+              hintText: 'Sent automatically when you add a friend',
             ),
           ),
           const SizedBox(height: 24),
@@ -362,9 +376,6 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
   late final _codeController = TextEditingController(
     text: widget.prefill?.code,
   );
-  late final _displayNameController = TextEditingController(
-    text: widget.prefill?.displayName,
-  );
   final _pasteLinkController = TextEditingController();
   String? _myCode;
   bool _generatingCode = false;
@@ -375,15 +386,17 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
   void dispose() {
     _friendAddressController.dispose();
     _codeController.dispose();
-    _displayNameController.dispose();
     _pasteLinkController.dispose();
     super.dispose();
   }
 
   /// Runs [raw] — from a QR scan or the "paste an invite link" field —
-  /// through the shared [InviteUri] parser and pre-fills the address/code/
-  /// name fields above on a valid friend invite. Never auto-submits; the
-  /// user still has to review and tap "Add friend".
+  /// through the shared [InviteUri] parser and pre-fills the address/code
+  /// fields above on a valid friend invite. Never auto-submits; the user
+  /// still has to review and tap "Add friend". Any `name` the invite
+  /// itself carries is the inviter's own display name — not something
+  /// this sheet asks the user to redo; it arrives automatically once the
+  /// invite is redeemed (see `FriendsController.addFriend`).
   void _applyInvite(String raw) {
     setState(() => _error = null);
     final InvitePayload payload;
@@ -401,9 +414,6 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
     setState(() {
       _friendAddressController.text = invite.address;
       _codeController.text = invite.code;
-      // Never clobber a name the user already typed — same rule as the
-      // joint-playlist sheet's equivalent `_applyInvite`.
-      fillIfEmpty(_displayNameController, invite.displayName);
       _pasteLinkController.clear();
     });
   }
@@ -439,9 +449,6 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
           .addFriend(
             friendAddress: _friendAddressController.text.trim(),
             code: _codeController.text.trim(),
-            displayName: _displayNameController.text.trim().isEmpty
-                ? null
-                : _displayNameController.text.trim(),
           );
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
@@ -489,10 +496,13 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
                     : const Text('Generate a code'),
               )
             else ...[
-              // No natural source of "my own display name" exists anywhere
-              // in this app today (see my_profile_screen.dart, which has
-              // none either) — this self-invite omits `name` rather than
-              // guess at one.
+              // This self-invite link deliberately omits `name`: the
+              // friend redeeming it never reads it (that field was
+              // removed from _AddFriendSheet — see the class doc), and
+              // this node's own configured myDisplayName already reaches
+              // them automatically, as the `displayName` on the addFriend
+              // request they send when redeeming this code (see
+              // FriendsController.addFriend).
               Builder(
                 builder: (context) {
                   final inviteUri = InviteUri.build(
@@ -573,11 +583,6 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
             TextField(
               controller: _codeController,
               decoration: const InputDecoration(labelText: "Friend's code"),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _displayNameController,
-              decoration: const InputDecoration(labelText: 'Name (optional)'),
             ),
             const SizedBox(height: 12),
             if (qrScanningSupported) ...[

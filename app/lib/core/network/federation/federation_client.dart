@@ -25,16 +25,31 @@ class FederationFriend {
     required this.address,
     this.displayName,
     this.relayUrl,
+    this.localNickname,
   });
 
   final String nodeId;
   final String publicKeyBase64;
   final String address;
+
+  /// The name this friend chose for *themselves* (sent as `displayName` on
+  /// their own [addFriend] call) — not a label chosen by this device's own
+  /// user. See [localNickname] for that.
   final String? displayName;
 
   /// This friend's own relay, as reported when they were added (`null` if
   /// they didn't have one connected at that time).
   final String? relayUrl;
+
+  /// A purely local label this device's own user chose for this friend,
+  /// via [FederationClient.setLocalNickname] — never sent to, or seen by,
+  /// the friend it labels. `null` until set.
+  final String? localNickname;
+
+  /// The name to actually show for this friend: [localNickname] (what
+  /// this device's user chose to call them) if set, else [displayName]
+  /// (what they call themselves), else the raw [nodeId] as a last resort.
+  String get displayLabel => localNickname ?? displayName ?? nodeId;
 
   factory FederationFriend.fromJson(Map<String, dynamic> json) =>
       FederationFriend(
@@ -43,6 +58,7 @@ class FederationFriend {
         address: json['address'] as String,
         displayName: json['displayName'] as String?,
         relayUrl: json['relayUrl'] as String?,
+        localNickname: json['localNickname'] as String?,
       );
 }
 
@@ -163,6 +179,24 @@ class FederationClient {
         _errorMessage(e),
       );
     }
+  }
+
+  /// Sets (or, with `nickname: null`, clears) [nodeId]'s purely local
+  /// [FederationFriend.localNickname] on this device's own Musicat Server.
+  /// Never sent to, or seen by, the friend it labels. Throws
+  /// [FederationClientException] with a 404 status for an unknown
+  /// [nodeId].
+  Future<FederationFriend> setLocalNickname(
+    String nodeId,
+    String? nickname,
+  ) async {
+    final response = await _handle(
+      () => _dio.patch<Map<String, dynamic>>(
+        '/api/v1/federation/friends/$nodeId',
+        data: {'localNickname': nickname},
+      ),
+    );
+    return FederationFriend.fromJson(response.data!);
   }
 
   Future<Response<T>> _handle<T>(Future<Response<T>> Function() request) async {

@@ -6,6 +6,7 @@ class MusicatServerConfig {
     required this.host,
     required this.port,
     required this.myPublicAddress,
+    this.myDisplayName,
   });
 
   /// How this app reaches its own Musicat Server (e.g. `localhost`).
@@ -18,6 +19,12 @@ class MusicatServerConfig {
   /// versus how this device reaches its own, likely local, server). See
   /// ADR 0021: making this reachable at all is on the user for now.
   final String myPublicAddress;
+
+  /// This device's own display name, sent automatically as `displayName`
+  /// whenever [FriendsController.addFriend] redeems a friend's code — the
+  /// name *they'll* see for this node in their own friends list. `null`
+  /// until the user sets one (nothing is sent in that case either).
+  final String? myDisplayName;
 
   bool get isConfigured => host.isNotEmpty;
 

@@ -48,6 +48,32 @@ class FriendStore {
     await _save(friends);
   }
 
+  /// Updates just [Friend.localNickname] for the friend with the given
+  /// [nodeId], leaving every other field untouched. Purely local: this
+  /// never touches anything sent to or received from the friend itself.
+  ///
+  /// Returns the updated [Friend], or `null` if [nodeId] isn't a known
+  /// friend (in which case nothing is saved).
+  Future<Friend?> setLocalNickname(String nodeId, String? nickname) async {
+    final friends = await loadAll();
+    final index = friends.indexWhere((f) => f.nodeId == nodeId);
+    if (index == -1) return null;
+
+    final existing = friends[index];
+    final updated = Friend(
+      nodeId: existing.nodeId,
+      publicKeyBase64: existing.publicKeyBase64,
+      address: existing.address,
+      displayName: existing.displayName,
+      udpCandidate: existing.udpCandidate,
+      relayUrl: existing.relayUrl,
+      localNickname: nickname,
+    );
+    friends[index] = updated;
+    await _save(friends);
+    return updated;
+  }
+
   Future<void> _save(List<Friend> friends) async {
     await dataDirectory.create(recursive: true);
     await _file.writeAsString(

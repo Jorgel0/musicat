@@ -52,6 +52,14 @@ void main() {
   Future<Response> delete(String path) async =>
       await handler(Request('DELETE', Uri.parse('http://localhost$path')));
 
+  Future<Response> patch(String path, Object body) async => await handler(
+    Request(
+      'PATCH',
+      Uri.parse('http://localhost$path'),
+      body: jsonEncode(body),
+    ),
+  );
+
   Future<String> newPairingCode() async {
     final response = await post('/pairing-codes', {});
     final body =
@@ -225,6 +233,86 @@ void main() {
         expect(puncher.isMaintaining('friend-1'), isFalse);
       },
     );
+  });
+
+  group('PATCH /friends/<nodeId>', () {
+    test('sets a local nickname and returns the updated friend', () async {
+      await pairAsFriend(
+        nodeId: 'friend-1',
+        publicKeyBase64: 'key',
+        address: 'host:8080',
+        code: await newPairingCode(),
+      );
+
+      final response = await patch('/friends/friend-1', {
+        'localNickname': 'Bestie',
+      });
+
+      expect(response.statusCode, 200);
+      final body = jsonDecode(await response.readAsString());
+      expect(body['nodeId'], 'friend-1');
+      expect(body['localNickname'], 'Bestie');
+
+      final friend = await friendStore.findByNodeId('friend-1');
+      expect(friend?.localNickname, 'Bestie');
+    });
+
+    test('clears a local nickname when given null', () async {
+      await pairAsFriend(
+        nodeId: 'friend-1',
+        publicKeyBase64: 'key',
+        address: 'host:8080',
+        code: await newPairingCode(),
+      );
+      await patch('/friends/friend-1', {'localNickname': 'Bestie'});
+
+      final response = await patch('/friends/friend-1', {
+        'localNickname': null,
+      });
+
+      expect(response.statusCode, 200);
+      final body = jsonDecode(await response.readAsString());
+      expect(body['localNickname'], isNull);
+    });
+
+    test('returns 404 for an unknown friend', () async {
+      final response = await patch('/friends/does-not-exist', {
+        'localNickname': 'Bestie',
+      });
+
+      expect(response.statusCode, 404);
+    });
+
+    test('rejects a non-string localNickname', () async {
+      await pairAsFriend(
+        nodeId: 'friend-1',
+        publicKeyBase64: 'key',
+        address: 'host:8080',
+        code: await newPairingCode(),
+      );
+
+      final response = await patch('/friends/friend-1', {
+        'localNickname': 12345,
+      });
+
+      expect(response.statusCode, 400);
+    });
+
+    test('GET /friends reflects the local nickname afterward', () async {
+      await pairAsFriend(
+        nodeId: 'friend-1',
+        publicKeyBase64: 'key',
+        address: 'host:8080',
+        code: await newPairingCode(),
+      );
+      await patch('/friends/friend-1', {'localNickname': 'Bestie'});
+
+      final response = await get('/friends');
+      final body = jsonDecode(await response.readAsString()) as List<dynamic>;
+
+      expect(body, hasLength(1));
+      expect((body.single as Map<String, dynamic>)['localNickname'], 'Bestie');
+    });
   });
 
   group('GET /friends/<nodeId>/status', () {

@@ -105,10 +105,17 @@ class FriendsController extends Notifier<FriendsState> {
   /// Redeems a friend's code, trusting *this* node on their server. See
   /// [FederationClient.addFriend] — the friend still needs to separately
   /// redeem a code of this node's own for the trust to go both ways.
+  ///
+  /// Always sends this device's own configured `myDisplayName` (see
+  /// [MusicatServerConfig]) as the outgoing `displayName` — not anything
+  /// supplied by the caller. That value is *this node's own*
+  /// self-description, as seen by the friend being added; it is unrelated
+  /// to [FederationFriend.localNickname], the purely local label this
+  /// device's own user can separately give *that* friend (see
+  /// [setLocalNickname]).
   Future<void> addFriend({
     required String friendAddress,
     required String code,
-    String? displayName,
   }) async {
     final client = ref.read(federationClientProvider);
     final config = ref.read(musicatServerConfigControllerProvider);
@@ -117,8 +124,18 @@ class FriendsController extends Notifier<FriendsState> {
       friendBaseUrl: 'http://$friendAddress',
       code: code,
       myPublicAddress: config.myPublicAddress,
-      displayName: displayName,
+      displayName: config.myDisplayName,
     );
+    await _refresh(client);
+  }
+
+  /// Sets/clears the purely local [FederationFriend.localNickname] for
+  /// [nodeId] — see [FederationClient.setLocalNickname]. A no-op if the
+  /// Musicat Server isn't configured.
+  Future<void> setLocalNickname(String nodeId, String? nickname) async {
+    final client = ref.read(federationClientProvider);
+    if (client == null) return;
+    await client.setLocalNickname(nodeId, nickname);
     await _refresh(client);
   }
 }

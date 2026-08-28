@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/network/federation/federation_client.dart';
 import '../../../core/network/social/sharing_client.dart';
 import 'friends_controller.dart';
 import 'musicat_server_config_controller.dart';
@@ -40,19 +41,29 @@ class FriendDetailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final friends = ref.watch(friendsControllerProvider).friends;
-    String? displayName;
-    var hasRelay = false;
+    FederationFriend? friend;
     for (final entry in friends) {
       if (entry.friend.nodeId == nodeId) {
-        displayName = entry.friend.displayName;
-        hasRelay = entry.friend.relayUrl != null;
+        friend = entry.friend;
         break;
       }
     }
+    final hasRelay = friend?.relayUrl != null;
     final tracksAsync = ref.watch(_friendSharedTracksProvider(nodeId));
 
     return Scaffold(
-      appBar: AppBar(title: Text(displayName ?? nodeId)),
+      appBar: AppBar(
+        title: Text(friend?.displayLabel ?? nodeId),
+        actions: [
+          IconButton(
+            tooltip: 'Edit nickname',
+            icon: const Icon(Icons.edit_outlined),
+            onPressed: friend == null
+                ? null
+                : () => _editNickname(context, ref, friend!),
+          ),
+        ],
+      ),
       body: Column(
         children: [
           if (hasRelay)
@@ -96,6 +107,77 @@ class FriendDetailScreen extends ConsumerWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Opens [_EditNicknameDialog] pre-filled with [friend]'s current
+/// [FederationFriend.localNickname], and, unless cancelled, saves whatever
+/// the user submitted via [FriendsController.setLocalNickname] — an empty
+/// submission clears the nickname, same convention as the old (now
+/// removed) "Name (optional)" field in `_AddFriendSheet`.
+Future<void> _editNickname(
+  BuildContext context,
+  WidgetRef ref,
+  FederationFriend friend,
+) async {
+  final result = await showDialog<String>(
+    context: context,
+    builder: (context) =>
+        _EditNicknameDialog(initialValue: friend.localNickname),
+  );
+  if (result == null) return; // Cancelled.
+  final trimmed = result.trim();
+  await ref
+      .read(friendsControllerProvider.notifier)
+      .setLocalNickname(friend.nodeId, trimmed.isEmpty ? null : trimmed);
+}
+
+/// A small dialog for setting/clearing a friend's purely local nickname —
+/// distinct from their own self-chosen [FederationFriend.displayName].
+/// Mirrors `promptPlaylistName`'s cancel-vs-submit convention: `null` means
+/// cancelled, any other (possibly empty) string means "save this".
+class _EditNicknameDialog extends StatefulWidget {
+  const _EditNicknameDialog({this.initialValue});
+
+  final String? initialValue;
+
+  @override
+  State<_EditNicknameDialog> createState() => _EditNicknameDialogState();
+}
+
+class _EditNicknameDialogState extends State<_EditNicknameDialog> {
+  late final _controller = TextEditingController(text: widget.initialValue);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Nickname'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: const InputDecoration(
+          labelText: 'Nickname',
+          hintText: 'Leave empty to remove',
+        ),
+        onSubmitted: (value) => Navigator.of(context).pop(value),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text),
+          child: const Text('Save'),
+        ),
+      ],
     );
   }
 }
