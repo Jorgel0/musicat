@@ -7,6 +7,7 @@ import 'core/audio/audio_providers.dart';
 import 'core/audio/audio_service_bootstrap.dart';
 import 'core/design_system/theme.dart';
 import 'core/embedded_server/embedded_server.dart';
+import 'features/friends/presentation/android_background_reachability_controller.dart';
 import 'features/friends/presentation/musicat_server_config_controller.dart';
 import 'features/settings/audio/presentation/normalization_controller.dart';
 import 'features/settings/soulseek/presentation/soulseek_config_controller.dart';
@@ -26,6 +27,8 @@ Future<void> bootstrap() async {
   await audioHandler.setNormalizationEnabled(normalizationEnabled);
   final soulseekConfig = await loadSoulseekConfigPreference();
   final musicatServerConfig = await loadMusicatServerConfigPreference();
+  final androidBackgroundReachabilityOverride =
+      await loadAndroidBackgroundReachabilityOverride();
 
   final container = ProviderContainer(
     overrides: [
@@ -45,11 +48,17 @@ Future<void> bootstrap() async {
       musicatServerConfigControllerProvider.overrideWith(
         () => MusicatServerConfigController(musicatServerConfig),
       ),
+      androidBackgroundReachabilityOverrideProvider.overrideWith(
+        () => AndroidBackgroundReachabilityOverrideController(
+          androidBackgroundReachabilityOverride,
+        ),
+      ),
     ],
   );
-  // Starts this device's own embedded Musicat Server (Linux/Windows only —
-  // see embedded_server.dart), running for the rest of this process's
-  // life. Deliberately not awaited: NAT traversal/STUN can take real time,
+  // Starts this device's own embedded Musicat Server (Linux, Windows, and
+  // Android — see embedded_server.dart), running for the rest of this
+  // process's life. Deliberately not awaited: NAT traversal/STUN can take
+  // real time,
   // and blocking here would delay the very first frame for it. `.read()`
   // is enough to kick `embeddedServerProvider`'s `FutureProvider.build()`
   // off immediately and have Riverpod cache the resulting Future — anyone

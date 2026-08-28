@@ -6,8 +6,22 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+    <!-- flutter_background_service: keeps this device's own embedded
+         Musicat Server (see core/embedded_server/embedded_server.dart)
+         reachable by a friend while the app is backgrounded, once this
+         device has at least one friend. Foreground-service type
+         "connectedDevice", not "dataSync": dataSync has a hard
+         6-hour-per-24-hours runtime cap on Android 15 (this app's
+         targetSdk) that would force periodic self-stops; connectedDevice
+         has no such cap. CHANGE_NETWORK_STATE is one of connectedDevice's
+         own prerequisite permissions per Android's foreground-service-type
+         requirements — a normal/install-time permission, so this adds no
+         extra runtime consent dialog beyond POST_NOTIFICATIONS below. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
     <!-- Android 13+ requires runtime permission to show any notification,
-         including the media playback one. -->
+         including the media playback one and flutter_background_service's
+         own persistent one above. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- The folder picker (file_picker's SAF directory chooser) only grants
          a content:// URI permission; the library scanner reads folders with
@@ -84,6 +98,22 @@
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </receiver>
+
+        <!-- flutter_background_service: runs this device's own embedded
+             Musicat Server (see core/embedded_server/embedded_server.dart)
+             inside a dedicated background-service isolate on Android,
+             promoted to a real foreground service (this persistent
+             notification) only once this device has at least one friend
+             — see android_background_reachability_controller.dart. The
+             service class itself belongs to the plugin
+             (flutter_background_service_android); this entry only adds
+             the foregroundServiceType its own manifest doesn't declare —
+             every other attribute (exported, stopWithTask, etc.) is
+             inherited unchanged from that plugin's own manifest via the
+             normal manifest-merge rules. -->
+        <service
+            android:name="id.flutter.flutter_background_service.BackgroundService"
+            android:foregroundServiceType="connectedDevice"/>
 
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

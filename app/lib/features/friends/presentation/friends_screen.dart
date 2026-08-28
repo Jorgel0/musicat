@@ -11,6 +11,7 @@ import '../../../core/invite/pending_invite.dart';
 import '../../../core/invite/qr_scanner_screen.dart';
 import '../../../core/network/federation/federation_client.dart';
 import '../domain/musicat_server_config.dart';
+import 'android_background_reachability_controller.dart';
 import 'friends_controller.dart';
 import 'musicat_server_config_controller.dart';
 
@@ -51,6 +52,12 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen> {
       pendingInviteProvider,
       (previous, next) => _maybeOpenPendingInvite(next),
     );
+    // Android only (a no-op everywhere else, see
+    // `setAndroidBackgroundReachable`) — keeps this device's real
+    // background-service mode in sync with its live friend count for as
+    // long as this screen (the only place a friend can ever be added)
+    // stays open. See `android_background_reachability_controller.dart`.
+    ref.watch(androidBackgroundReachabilityEffectProvider);
 
     final config = ref.watch(effectiveMusicatServerConfigProvider);
     // Purely a UI nicety: while the embedded server is still starting up
@@ -316,9 +323,10 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
             const SizedBox(height: 12),
             _RelayStatusRow(myNodeInfoAsync: myNodeInfoAsync),
             const SizedBox(height: 12),
-            // Only shown where an embedded server is even possible (desktop
-            // for now) — on Android there's nothing to toggle to yet, so the
-            // sheet looks exactly as it did before this feature.
+            // Only shown where an embedded server is even possible (Linux,
+            // Windows, and — as of this round — Android too). On any other
+            // platform the sheet looks exactly as it did before this
+            // feature.
             if (embeddedServerSupported) ...[
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
@@ -339,6 +347,28 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
                 embeddedAsync: ref.watch(embeddedServerProvider),
               ),
               const SizedBox(height: 12),
+              // Android only: on Linux/Windows this app runs full-time
+              // anyway, so there's no separate "background reachability"
+              // concept distinct from "use the built-in server" itself.
+              if (androidBackgroundReachabilitySupported) ...[
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Keep reachable in the background'),
+                  subtitle: const Text(
+                    'Shows a persistent notification so a friend can still '
+                    'reach your shared music while Musicat is closed. Turns '
+                    'on automatically once you add your first friend — use '
+                    'this to force it on or off yourself instead.',
+                  ),
+                  value: ref.watch(desiredAndroidBackgroundReachableProvider),
+                  onChanged: (value) => ref
+                      .read(
+                        androidBackgroundReachabilityOverrideProvider.notifier,
+                      )
+                      .save(value),
+                ),
+                const SizedBox(height: 12),
+              ],
             ] else ...[
               TextField(
                 controller: _hostController,

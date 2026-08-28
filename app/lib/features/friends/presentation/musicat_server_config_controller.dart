@@ -125,10 +125,11 @@ Future<MusicatServerConfig> loadMusicatServerConfigPreference() async {
   final myDisplayName = prefs.getString(_myDisplayNameKey);
   // `null` (the key was never saved) means this is a fresh install/first
   // run on this device: default to the embedded server on platforms that
-  // support it (no setup needed for the common case), `false` elsewhere
-  // (Android, for now — nothing to embed there yet). Once the user has
-  // ever explicitly saved a choice either way, that persisted value wins
-  // from then on, regardless of platform.
+  // support it (Linux, Windows, Android — no setup needed for the common
+  // case), `false` elsewhere (iOS isn't a target of this app at all yet,
+  // see docs/adr/0001-flutter-multiplatform.md). Once the user has ever
+  // explicitly saved a choice either way, that persisted value wins from
+  // then on, regardless of platform.
   final persistedUseEmbeddedServer = prefs.getBool(_useEmbeddedServerKey);
   return MusicatServerConfig(
     host: prefs.getString(_hostKey) ?? '',

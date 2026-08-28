@@ -68,6 +68,15 @@ dependencies:
   # both packages live in this same repo, app/ and server/ as siblings.
   musicat_server:
     path: ../server
+  # Runs the embedded server (see core/embedded_server/embedded_server.dart)
+  # inside a real Android background service, so a friend can still reach
+  # this device's server while the app is backgrounded -- Android suspends
+  # a plain in-process server independently of what the app thinks is
+  # happening. Desktop keeps running the server directly in-process
+  # (unchanged); this is Android-only wiring. See
+  # docs/adr/0042-embedded-server-desktop.md for the desktop half and the
+  # follow-up this extends.
+  flutter_background_service: ^5.1.0
 
 dev_dependencies:
   flutter_test:

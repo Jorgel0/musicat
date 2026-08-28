@@ -6,8 +6,8 @@
 /// meaningful as-is only when [useEmbeddedServer] is `false` (a separately
 /// self-hosted server: NAS, VPS, Docker Compose). When [useEmbeddedServer]
 /// is `true`, the *effective* host/port actually used by the app comes
-/// from the running embedded server instead (desktop only for now — see
-/// `core/embedded_server/embedded_server.dart`), not from these fields;
+/// from the running embedded server instead (Linux, Windows, or Android —
+/// see `core/embedded_server/embedded_server.dart`), not from these fields;
 /// see `effectiveMusicatServerConfigProvider`
 /// (`musicat_server_config_controller.dart`) for that substitution. This
 /// class itself stays a dumb, Riverpod-unaware value — it doesn't know
@@ -43,14 +43,16 @@ class MusicatServerConfig {
   /// until the user sets one (nothing is sent in that case either).
   final String? myDisplayName;
 
-  /// When `true`, this device uses its own in-process embedded Musicat
-  /// Server (started at app bootstrap on Linux/Windows) instead of
-  /// [host]/[port] above — the common case, needing no manual setup at
-  /// all. Defaults to `false` here (a "nothing configured" baseline, e.g.
-  /// [empty], or any platform embedding isn't supported on); the
-  /// platform-aware "default to `true` on a fresh desktop install" choice
-  /// is made by `loadMusicatServerConfigPreference`, the one call site
-  /// that actually knows whether this is a fresh install.
+  /// When `true`, this device uses its own embedded Musicat Server
+  /// (started at app bootstrap — directly in-process on Linux/Windows, or
+  /// inside a real Android background service, see
+  /// `core/embedded_server/embedded_server.dart`) instead of [host]/[port]
+  /// above — the common case, needing no manual setup at all. Defaults to
+  /// `false` here (a "nothing configured" baseline, e.g. [empty], or any
+  /// platform embedding isn't supported on); the platform-aware "default
+  /// to `true` on a fresh install where embedding is supported" choice is
+  /// made by `loadMusicatServerConfigPreference`, the one call site that
+  /// actually knows whether this is a fresh install.
   final bool useEmbeddedServer;
 
   bool get isConfigured => host.isNotEmpty;
