@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../../../core/invite/fill_if_empty.dart';
 import '../../../core/invite/invite_uri.dart';
 import '../../../core/invite/pending_invite.dart';
 import '../../../core/invite/qr_scanner_screen.dart';
@@ -400,9 +401,9 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
     setState(() {
       _friendAddressController.text = invite.address;
       _codeController.text = invite.code;
-      if (invite.displayName != null) {
-        _displayNameController.text = invite.displayName!;
-      }
+      // Never clobber a name the user already typed — same rule as the
+      // joint-playlist sheet's equivalent `_applyInvite`.
+      fillIfEmpty(_displayNameController, invite.displayName);
       _pasteLinkController.clear();
     });
   }

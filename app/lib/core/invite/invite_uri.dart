@@ -128,10 +128,23 @@ abstract final class InviteUri {
     if (uri.scheme != scheme) {
       throw InviteUriException('Not a "$scheme://" link.');
     }
+    // `Uri.queryParameters` lazily UTF-8-decodes each value the first time
+    // it's accessed, and throws a raw `FormatException` (not
+    // `InviteUriException`) for a malformed percent-encoded value (e.g.
+    // `%e0%e0`, which `Uri.parse` itself accepts as syntactically valid
+    // percent-encoding — the failure only surfaces here). Guarded once,
+    // right at the point of access, so every caller of this method keeps
+    // the documented "throws only InviteUriException" contract.
+    final Map<String, String> queryParameters;
+    try {
+      queryParameters = uri.queryParameters;
+    } on FormatException {
+      throw const InviteUriException('This invite link is malformed.');
+    }
     switch (uri.host) {
       case 'friend':
-        final address = uri.queryParameters['address'];
-        final code = uri.queryParameters['code'];
+        final address = queryParameters['address'];
+        final code = queryParameters['code'];
         if (address == null || address.isEmpty) {
           throw const InviteUriException(
             'This invite link is missing the address.',
@@ -142,20 +155,20 @@ abstract final class InviteUri {
             'This invite link is missing the pairing code.',
           );
         }
-        final name = uri.queryParameters['name'];
+        final name = queryParameters['name'];
         return FriendInvite(
           address: address,
           code: code,
           displayName: (name == null || name.isEmpty) ? null : name,
         );
       case 'playlist':
-        final id = uri.queryParameters['id'];
+        final id = queryParameters['id'];
         if (id == null || id.isEmpty) {
           throw const InviteUriException(
             'This invite link is missing the playlist id.',
           );
         }
-        final name = uri.queryParameters['name'];
+        final name = queryParameters['name'];
         return PlaylistInvite(
           id: id,
           name: (name == null || name.isEmpty) ? null : name,

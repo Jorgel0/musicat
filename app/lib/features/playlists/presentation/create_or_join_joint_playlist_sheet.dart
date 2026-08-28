@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/invite/fill_if_empty.dart';
 import '../../../core/invite/invite_uri.dart';
 import '../../../core/invite/qr_scanner_screen.dart';
 import '../../friends/presentation/friends_controller.dart';
@@ -74,9 +75,7 @@ class _CreateOrJoinJointPlaylistSheetState
     final invite = payload;
     setState(() {
       _joinIdController.text = invite.id;
-      if (invite.name != null && _nameController.text.trim().isEmpty) {
-        _nameController.text = invite.name!;
-      }
+      fillIfEmpty(_nameController, invite.name);
       _pasteLinkController.clear();
     });
   }

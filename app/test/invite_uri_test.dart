@@ -165,6 +165,28 @@ void main() {
       );
     });
 
+    test('rejects a malformed percent-encoded query value as an '
+        'InviteUriException, not a raw FormatException (regression: '
+        'Uri.queryParameters lazily UTF-8-decodes and throws its own '
+        'FormatException for something like "%e0%e0", which Uri.parse '
+        'itself accepts as syntactically valid percent-encoding)', () {
+      expect(
+        () => InviteUri.parse('musicat://friend?address=%e0%e0&code=abc'),
+        throwsA(isA<InviteUriException>()),
+      );
+    });
+
+    test(
+      'rejects malformed percent-encoding via parseUri too, not just parse',
+      () {
+        final uri = Uri.parse('musicat://friend?address=%e0%e0&code=abc');
+        expect(
+          () => InviteUri.parseUri(uri),
+          throwsA(isA<InviteUriException>()),
+        );
+      },
+    );
+
     test('InviteUriException.message is plain, presentable text', () {
       try {
         InviteUri.parse('musicat://playlist?name=x');

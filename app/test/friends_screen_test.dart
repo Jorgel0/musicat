@@ -317,6 +317,103 @@ void main() {
 
       expect(find.text('Not a "musicat://" link.'), findsOneWidget);
     });
+
+    testWidgets(
+      'pasting a link with malformed percent-encoding shows a friendly '
+      'error instead of crashing (regression: Uri.queryParameters used to '
+      'throw a raw FormatException that escaped the on InviteUriException '
+      'catch here)',
+      (tester) async {
+        final container = ProviderContainer(
+          overrides: [
+            musicatServerConfigControllerProvider.overrideWith(
+              () => MusicatServerConfigController(_configured),
+            ),
+            friendsControllerProvider.overrideWith(
+              () => _FixedFriendsController(const FriendsState()),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(home: FriendsScreen()),
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.byIcon(Icons.person_add_alt));
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Or paste an invite link'),
+          'musicat://friend?address=%e0%e0&code=abc',
+        );
+        await tester.tap(find.widgetWithText(OutlinedButton, 'Use'));
+        await tester.pump();
+
+        expect(find.text('This invite link is malformed.'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      "a pasted invite's name never clobbers a name the user already typed "
+      '(regression: _AddFriendSheet used to unconditionally overwrite the '
+      'name field)',
+      (tester) async {
+        final container = ProviderContainer(
+          overrides: [
+            musicatServerConfigControllerProvider.overrideWith(
+              () => MusicatServerConfigController(_configured),
+            ),
+            friendsControllerProvider.overrideWith(
+              () => _FixedFriendsController(const FriendsState()),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(home: FriendsScreen()),
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.byIcon(Icons.person_add_alt));
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Name (optional)'),
+          'My own name',
+        );
+
+        const invite = FriendInvite(
+          address: 'pasted.example:9090',
+          code: 'paste-code',
+          displayName: "Someone else's name",
+        );
+        final raw = InviteUri.build(invite).toString();
+
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Or paste an invite link'),
+          raw,
+        );
+        await tester.tap(find.widgetWithText(OutlinedButton, 'Use'));
+        await tester.pump();
+
+        final addressField = tester.widget<TextField>(
+          find.widgetWithText(TextField, "Friend's address"),
+        );
+        expect(addressField.controller!.text, 'pasted.example:9090');
+
+        final nameField = tester.widget<TextField>(
+          find.widgetWithText(TextField, 'Name (optional)'),
+        );
+        expect(nameField.controller!.text, 'My own name');
+      },
+    );
   });
 
   group('_AddFriendSheet deep-link pre-fill', () {
