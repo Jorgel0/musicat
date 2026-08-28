@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../core/embedded_server/embedded_server.dart';
 import '../../../core/network/federation/federation_client.dart';
 import '../../../core/network/social/joint_playlist_client.dart';
 import '../../../core/network/social/sharing_client.dart';
@@ -10,6 +11,7 @@ const _hostKey = 'musicatServerHost';
 const _portKey = 'musicatServerPort';
 const _myPublicAddressKey = 'musicatServerMyPublicAddress';
 const _myDisplayNameKey = 'musicatServerMyDisplayName';
+const _useEmbeddedServerKey = 'musicatServerUseEmbeddedServer';
 
 class MusicatServerConfigController extends Notifier<MusicatServerConfig> {
   MusicatServerConfigController([this._initial]);
@@ -26,6 +28,7 @@ class MusicatServerConfigController extends Notifier<MusicatServerConfig> {
     await prefs.setInt(_portKey, config.port);
     await prefs.setString(_myPublicAddressKey, config.myPublicAddress);
     await prefs.setString(_myDisplayNameKey, config.myDisplayName ?? '');
+    await prefs.setBool(_useEmbeddedServerKey, config.useEmbeddedServer);
   }
 }
 
@@ -34,10 +37,51 @@ final musicatServerConfigControllerProvider =
       MusicatServerConfigController.new,
     );
 
+/// The config this device's federation feature actually talks to right
+/// now — [musicatServerConfigControllerProvider]'s persisted/manual value
+/// unchanged when [MusicatServerConfig.useEmbeddedServer] is `false`, or,
+/// when it's `true`, that same config with [MusicatServerConfig.host]/
+/// [MusicatServerConfig.port] substituted for the embedded server's own
+/// `localhost:<port>` — `isConfigured` stays `false` until
+/// [embeddedServerProvider] actually resolves to a running server (still
+/// starting up, unsupported on this platform, or failed to start all
+/// count as "not configured yet", same as leaving the manual fields
+/// blank).
+///
+/// A plain synchronous [Provider], not a [FutureProvider]: every consumer
+/// of the *previous* `musicatServerConfigControllerProvider`-derived
+/// providers below (`federationClientProvider` and friends) already only
+/// needs a synchronous `MusicatServerConfig` to decide `isConfigured`/
+/// `baseUrl` — turning this into an async value would ripple that
+/// `AsyncValue` handling out to everything that reads them, for no benefit
+/// they actually need. It only ever *reads* [embeddedServerProvider]'s
+/// current [AsyncValue] via `ref.watch().when(...)` (never writes to any
+/// provider's state), so there's no window where a not-yet-initialized
+/// provider gets read or written from a widget-lifecycle callback — the
+/// exact bug class ADR 0037/0039 already hit twice. See
+/// `musicat_server_config_controller_test.dart` for `ProviderContainer`
+/// tests proving a cold read of this (and of `friendsControllerProvider`,
+/// which now transitively depends on it) never throws.
+final effectiveMusicatServerConfigProvider = Provider<MusicatServerConfig>((
+  ref,
+) {
+  final raw = ref.watch(musicatServerConfigControllerProvider);
+  if (!raw.useEmbeddedServer) return raw;
+
+  final embedded = ref.watch(embeddedServerProvider);
+  return embedded.when(
+    data: (info) => info == null
+        ? raw.copyWith(host: '')
+        : raw.copyWith(host: 'localhost', port: info.port),
+    loading: () => raw.copyWith(host: ''),
+    error: (error, stackTrace) => raw.copyWith(host: ''),
+  );
+});
+
 /// `null` when no Musicat Server is configured yet — the Friends screen
 /// should treat this as "set up your server first", not an error.
 final federationClientProvider = Provider<FederationClient?>((ref) {
-  final config = ref.watch(musicatServerConfigControllerProvider);
+  final config = ref.watch(effectiveMusicatServerConfigProvider);
   if (!config.isConfigured) return null;
   return FederationClient(baseUrl: config.baseUrl);
 });
@@ -45,7 +89,7 @@ final federationClientProvider = Provider<FederationClient?>((ref) {
 /// `null` when no Musicat Server is configured yet, same as
 /// [federationClientProvider] — both talk to this device's own server.
 final sharingClientProvider = Provider<SharingClient?>((ref) {
-  final config = ref.watch(musicatServerConfigControllerProvider);
+  final config = ref.watch(effectiveMusicatServerConfigProvider);
   if (!config.isConfigured) return null;
   return SharingClient(baseUrl: config.baseUrl);
 });
@@ -53,7 +97,7 @@ final sharingClientProvider = Provider<SharingClient?>((ref) {
 /// `null` when no Musicat Server is configured yet, same as
 /// [federationClientProvider].
 final jointPlaylistClientProvider = Provider<JointPlaylistClient?>((ref) {
-  final config = ref.watch(musicatServerConfigControllerProvider);
+  final config = ref.watch(effectiveMusicatServerConfigProvider);
   if (!config.isConfigured) return null;
   return JointPlaylistClient(baseUrl: config.baseUrl);
 });
@@ -79,6 +123,13 @@ final myNodeIdProvider = FutureProvider<String?>((ref) async {
 Future<MusicatServerConfig> loadMusicatServerConfigPreference() async {
   final prefs = await SharedPreferences.getInstance();
   final myDisplayName = prefs.getString(_myDisplayNameKey);
+  // `null` (the key was never saved) means this is a fresh install/first
+  // run on this device: default to the embedded server on platforms that
+  // support it (no setup needed for the common case), `false` elsewhere
+  // (Android, for now — nothing to embed there yet). Once the user has
+  // ever explicitly saved a choice either way, that persisted value wins
+  // from then on, regardless of platform.
+  final persistedUseEmbeddedServer = prefs.getBool(_useEmbeddedServerKey);
   return MusicatServerConfig(
     host: prefs.getString(_hostKey) ?? '',
     port: prefs.getInt(_portKey) ?? 8080,
@@ -86,5 +137,6 @@ Future<MusicatServerConfig> loadMusicatServerConfigPreference() async {
     myDisplayName: (myDisplayName == null || myDisplayName.isEmpty)
         ? null
         : myDisplayName,
+    useEmbeddedServer: persistedUseEmbeddedServer ?? embeddedServerSupported,
   );
 }

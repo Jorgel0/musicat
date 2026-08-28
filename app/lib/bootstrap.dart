@@ -6,6 +6,7 @@ import 'app.dart';
 import 'core/audio/audio_providers.dart';
 import 'core/audio/audio_service_bootstrap.dart';
 import 'core/design_system/theme.dart';
+import 'core/embedded_server/embedded_server.dart';
 import 'features/friends/presentation/musicat_server_config_controller.dart';
 import 'features/settings/audio/presentation/normalization_controller.dart';
 import 'features/settings/soulseek/presentation/soulseek_config_controller.dart';
@@ -25,27 +26,38 @@ Future<void> bootstrap() async {
   await audioHandler.setNormalizationEnabled(normalizationEnabled);
   final soulseekConfig = await loadSoulseekConfigPreference();
   final musicatServerConfig = await loadMusicatServerConfigPreference();
+
+  final container = ProviderContainer(
+    overrides: [
+      audioPlayerControllerProvider.overrideWithValue(audioHandler),
+      themeModeProvider.overrideWith(
+        () => ThemeModeController(themePreferences.themeMode),
+      ),
+      accentColorProvider.overrideWith(
+        () => AccentColorController(themePreferences.accentColor),
+      ),
+      normalizationControllerProvider.overrideWith(
+        () => NormalizationController(normalizationEnabled),
+      ),
+      soulseekConfigControllerProvider.overrideWith(
+        () => SoulseekConfigController(soulseekConfig),
+      ),
+      musicatServerConfigControllerProvider.overrideWith(
+        () => MusicatServerConfigController(musicatServerConfig),
+      ),
+    ],
+  );
+  // Starts this device's own embedded Musicat Server (Linux/Windows only —
+  // see embedded_server.dart), running for the rest of this process's
+  // life. Deliberately not awaited: NAT traversal/STUN can take real time,
+  // and blocking here would delay the very first frame for it. `.read()`
+  // is enough to kick `embeddedServerProvider`'s `FutureProvider.build()`
+  // off immediately and have Riverpod cache the resulting Future — anyone
+  // who later watches it (`effectiveMusicatServerConfigProvider`) just
+  // observes the same `AsyncValue` progress from `loading` to `data`.
+  container.read(embeddedServerProvider);
+
   runApp(
-    ProviderScope(
-      overrides: [
-        audioPlayerControllerProvider.overrideWithValue(audioHandler),
-        themeModeProvider.overrideWith(
-          () => ThemeModeController(themePreferences.themeMode),
-        ),
-        accentColorProvider.overrideWith(
-          () => AccentColorController(themePreferences.accentColor),
-        ),
-        normalizationControllerProvider.overrideWith(
-          () => NormalizationController(normalizationEnabled),
-        ),
-        soulseekConfigControllerProvider.overrideWith(
-          () => SoulseekConfigController(soulseekConfig),
-        ),
-        musicatServerConfigControllerProvider.overrideWith(
-          () => MusicatServerConfigController(musicatServerConfig),
-        ),
-      ],
-      child: const MusicatApp(),
-    ),
+    UncontrolledProviderScope(container: container, child: const MusicatApp()),
   );
 }

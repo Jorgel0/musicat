@@ -1,169 +1,32 @@
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:musicat_server/src/federation/federation_routes.dart';
-import 'package:musicat_server/src/federation/friend_store.dart';
-import 'package:musicat_server/src/federation/pairing_code_store.dart';
-import 'package:musicat_server/src/federation/request_signing.dart';
-import 'package:musicat_server/src/identity/node_identity.dart';
-import 'package:musicat_server/src/nat/udp_puncher.dart';
-import 'package:musicat_server/src/relay/relay_client.dart';
-import 'package:musicat_server/src/sharing/joint_playlist_store.dart';
-import 'package:musicat_server/src/sharing/playlist_routes.dart';
-import 'package:musicat_server/src/sharing/shared_track_store.dart';
-import 'package:musicat_server/src/sharing/sharing_routes.dart';
+import 'package:musicat_server/musicat_server_runtime.dart';
 import 'package:musicat_server/src/soulseek/slskd_config.dart';
-import 'package:musicat_server/src/soulseek/slskd_gateway.dart';
-import 'package:musicat_server/src/soulseek/soulseek_routes.dart';
-import 'package:shelf/shelf.dart';
-import 'package:shelf/shelf_io.dart';
-import 'package:shelf_router/shelf_router.dart';
 
-Response _jsonResponse(Map<String, Object?> body) => Response.ok(
-  jsonEncode(body),
-  headers: {'content-type': 'application/json'},
-);
-
-Router _buildRouter(
-  NodeIdentity identity,
-  String publicKeyBase64,
-  String? myRelayUrl,
-  Router soulseekRouter,
-  Router federationRouter,
-  Router libraryRouter,
-  Router playlistRouter,
-  Router sharingFederationRouter,
-) {
-  return Router()
-    ..get('/', (Request req) => _jsonResponse({'status': 'ok'}))
-    ..get(
-      '/api/v1/node',
-      (Request req) => _jsonResponse({
-        'nodeId': identity.nodeId,
-        'publicKeyBase64': publicKeyBase64,
-        'relayUrl': myRelayUrl,
-      }),
-    )
-    ..mount('/api/v1/soulseek/', soulseekRouter.call)
-    ..mount('/api/v1/federation/', federationRouter.call)
-    // Each of these is a sibling of /api/v1/federation/, not nested under
-    // it: shelf_router's mount() matches on prefix in registration order
-    // with no most-specific-first resolution, so a route actually nested
-    // under an already-mounted prefix would silently never be reached —
-    // the parent mount's wildcard would swallow it first.
-    ..mount('/api/v1/sharing/', sharingFederationRouter.call)
-    ..mount('/api/v1/library/', libraryRouter.call)
-    // No trailing slash here, unlike the mounts above: buildPlaylistRouter
-    // has a genuine bare-collection route ('/', for create/list) and
-    // shelf_router's mount() only matches a bare `/api/v1/playlists`
-    // request (no trailing slash) when the prefix itself is given without
-    // one -- with a trailing slash, only `/api/v1/playlists/<anything>`
-    // (note the required slash) would ever match.
-    ..mount('/api/v1/playlists', playlistRouter.call);
-}
-
+/// Thin CLI/Docker/self-hosting entry point: reads the same environment
+/// variables it always has and hands them to [startMusicatServer], which is
+/// the real, reusable implementation (also used by the Flutter app to embed
+/// the server in-process -- see ADR 0040/0041). The startup lines this
+/// prints are real operator-facing output depended on by deployed
+/// infrastructure (Docker/systemd), not just a convenience -- see
+/// `docs/self-hosting.md` and the relay's own systemd setup -- so they must
+/// keep printing exactly as before.
 void main(List<String> args) async {
-  final ip = InternetAddress.anyIPv4;
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   final dataDir = Directory(
     Platform.environment['MUSICAT_DATA_DIR'] ?? './data',
   );
-
-  final identity = await NodeIdentityStore(dataDir).loadOrCreate();
-  final publicKeyBase64 = await identity.publicKeyBase64();
-  print('Node identity: ${identity.nodeId}');
-
+  final udpPort =
+      int.tryParse(Platform.environment['MUSICAT_UDP_PORT'] ?? '') ?? 0;
+  final relayUrl = Platform.environment['MUSICAT_RELAY_URL'];
   final slskdConfig = SlskdConfig.fromEnvironment(Platform.environment);
-  final soulseekRouter = buildSoulseekRouter(SlskdGateway(config: slskdConfig));
 
-  final friendStore = FriendStore(dataDir);
-  final puncher = UdpPuncher(identity: identity, friendStore: friendStore);
-  final udpPort = await puncher.bind(
-    port: int.tryParse(Platform.environment['MUSICAT_UDP_PORT'] ?? '') ?? 0,
+  await startMusicatServer(
+    dataDir: dataDir,
+    port: port,
+    udpPort: udpPort,
+    relayUrl: relayUrl,
+    slskdConfig: slskdConfig,
+    onLog: print,
   );
-  final candidate = await puncher.refreshCandidate();
-  print(
-    'NAT traversal: listening for UDP punches on port $udpPort '
-    '(external candidate: ${candidate ?? "unknown — STUN unreachable"})',
-  );
-
-  // Self-hosted relay fallback (ADR 0032/0033) for when NAT hole-punching
-  // above doesn't work for a given pair of networks -- opt-in, since it
-  // requires a separately-deployed relay instance with real public
-  // reachability. Connecting is best-effort: a friend request can still
-  // arrive directly even if this node has no relay configured, or if the
-  // configured one is unreachable right now. Attempted *before* the
-  // federation router is built, since a successful connection is what
-  // gets advertised to friends at pairing time (`myRelayUrl` below) --
-  // `RelayClient` itself needs the final request handler to service
-  // tunneled requests, which doesn't exist yet this early, so it's given
-  // a forwarding closure that's only ever invoked once a real request
-  // arrives, by which point `_handler` has been assigned for real.
-  Handler? realHandler;
-  Future<Response> forwardToRealHandler(Request request) async =>
-      realHandler!(request);
-
-  String? myRelayUrl;
-  final relayUrlEnv = Platform.environment['MUSICAT_RELAY_URL'];
-  if (relayUrlEnv != null && relayUrlEnv.isNotEmpty) {
-    final relayClient = RelayClient(
-      identity: identity,
-      localHandler: forwardToRealHandler,
-    );
-    final connected = await relayClient.connect(relayUrlEnv);
-    if (connected) {
-      myRelayUrl = relayUrlEnv;
-      print(
-        'Relay: connected to $relayUrlEnv as a fallback for direct reachability',
-      );
-    } else {
-      print('Relay: could not connect to $relayUrlEnv (continuing without it)');
-    }
-  }
-
-  final federationRouter = buildFederationRouter(
-    friendStore,
-    RequestVerifier(friendStore),
-    PairingCodeStore(),
-    puncher,
-    myRelayUrl: myRelayUrl,
-  );
-
-  final sharedTrackStore = SharedTrackStore(dataDir);
-  final playlistStore = JointPlaylistStore(dataDir);
-  final libraryRouter = buildLibraryRouter(
-    sharedTrackStore,
-    friendStore,
-    identity,
-  );
-  final playlistRouter = buildPlaylistRouter(
-    playlistStore,
-    sharedTrackStore,
-    friendStore,
-    identity,
-  );
-  final sharingFederationRouter = buildSharingFederationRouter(
-    sharedTrackStore,
-    playlistStore,
-    RequestVerifier(friendStore),
-  );
-
-  final handler = Pipeline()
-      .addMiddleware(logRequests())
-      .addHandler(
-        _buildRouter(
-          identity,
-          publicKeyBase64,
-          myRelayUrl,
-          soulseekRouter,
-          federationRouter,
-          libraryRouter,
-          playlistRouter,
-          sharingFederationRouter,
-        ).call,
-      );
-  realHandler = handler;
-
-  final server = await serve(handler, ip, port);
-  print('Server listening on port ${server.port}');
 }

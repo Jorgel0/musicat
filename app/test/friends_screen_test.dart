@@ -298,6 +298,11 @@ void main() {
         find.widgetWithText(TextField, 'Your display name'),
         'New Name',
       );
+      // The "Use the built-in server" toggle (only relevant on
+      // Linux/Windows, which is what this test suite runs on) pushed
+      // "Save" below the default test viewport — scroll it into view
+      // before tapping, same as a real short window/screen would need.
+      await tester.ensureVisible(find.widgetWithText(FilledButton, 'Save'));
       await tester.tap(find.widgetWithText(FilledButton, 'Save'));
       await tester.pumpAndSettle();
 
@@ -354,6 +359,7 @@ void main() {
         find.widgetWithText(TextField, 'Your display name'),
         '',
       );
+      await tester.ensureVisible(find.widgetWithText(FilledButton, 'Save'));
       await tester.tap(find.widgetWithText(FilledButton, 'Save'));
       await tester.pumpAndSettle();
 

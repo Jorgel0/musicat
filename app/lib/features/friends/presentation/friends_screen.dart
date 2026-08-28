@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../../../core/embedded_server/embedded_server.dart';
 import '../../../core/invite/invite_uri.dart';
 import '../../../core/invite/pending_invite.dart';
 import '../../../core/invite/qr_scanner_screen.dart';
@@ -51,7 +52,20 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen> {
       (previous, next) => _maybeOpenPendingInvite(next),
     );
 
-    final config = ref.watch(musicatServerConfigControllerProvider);
+    final config = ref.watch(effectiveMusicatServerConfigProvider);
+    // Purely a UI nicety: while the embedded server is still starting up
+    // (NAT traversal/STUN can take a few seconds), `config.isConfigured`
+    // is `false` same as "genuinely unconfigured" — without this, the
+    // "Set up Musicat Server" prompt (which has nothing to actually do on
+    // the common desktop path any more) would flash briefly on every cold
+    // start before flipping over to the friends list.
+    final startingEmbeddedServer =
+        ref.watch(
+          musicatServerConfigControllerProvider.select(
+            (c) => c.useEmbeddedServer,
+          ),
+        ) &&
+        ref.watch(embeddedServerProvider).isLoading;
 
     return Scaffold(
       appBar: AppBar(
@@ -72,6 +86,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen> {
       ),
       body: config.isConfigured
           ? const _FriendsList()
+          : startingEmbeddedServer
+          ? const _StartingEmbeddedServer()
           : _ServerSetupPrompt(
               onConfigure: () => _showServerConfigSheet(context, ref),
             ),
@@ -101,6 +117,30 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen> {
       context: context,
       isScrollControlled: true,
       builder: (context) => _AddFriendSheet(prefill: prefill),
+    );
+  }
+}
+
+/// Shown instead of [_ServerSetupPrompt] while this device's own embedded
+/// Musicat Server is still starting up — see
+/// `_FriendsScreenState.build`'s `startingEmbeddedServer`.
+class _StartingEmbeddedServer extends StatelessWidget {
+  const _StartingEmbeddedServer();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text('Starting your Musicat Server…', textAlign: TextAlign.center),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -206,6 +246,7 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
   late final TextEditingController _portController;
   late final TextEditingController _myAddressController;
   late final TextEditingController _myDisplayNameController;
+  late bool _useEmbeddedServer;
 
   @override
   void initState() {
@@ -217,6 +258,7 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
     _myDisplayNameController = TextEditingController(
       text: config.myDisplayName,
     );
+    _useEmbeddedServer = config.useEmbeddedServer;
   }
 
   @override
@@ -235,6 +277,7 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
       port: int.tryParse(_portController.text.trim()) ?? 8080,
       myPublicAddress: _myAddressController.text.trim(),
       myDisplayName: myDisplayName.isEmpty ? null : myDisplayName,
+      useEmbeddedServer: _useEmbeddedServer,
     );
     await ref.read(musicatServerConfigControllerProvider.notifier).save(config);
     if (mounted) Navigator.of(context).pop();
@@ -251,52 +294,86 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
         top: 24,
         bottom: MediaQuery.of(context).viewInsets.bottom + 24,
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text('Musicat Server', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 8),
-          Text(
-            'Where this device reaches your own Musicat Server, and the '
-            'address to give friends so their server can reach yours.',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 12),
-          _RelayStatusRow(myNodeInfoAsync: myNodeInfoAsync),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _hostController,
-            decoration: const InputDecoration(
-              labelText: 'Host',
-              hintText: 'localhost',
+      // Scrollable, same as the sibling _AddFriendSheet below: the new
+      // "Use the built-in server" toggle (plus its explanatory subtitle)
+      // made this sheet's content taller than a small window/short screen
+      // can always show at once without this.
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Musicat Server',
+              style: Theme.of(context).textTheme.titleLarge,
             ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _portController,
-            decoration: const InputDecoration(labelText: 'Port'),
-            keyboardType: TextInputType.number,
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _myAddressController,
-            decoration: const InputDecoration(
-              labelText: 'Your address (given to friends)',
-              hintText: 'mydomain.example:8080',
+            const SizedBox(height: 8),
+            Text(
+              'Where this device reaches your own Musicat Server, and the '
+              'address to give friends so their server can reach yours.',
+              style: Theme.of(context).textTheme.bodySmall,
             ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _myDisplayNameController,
-            decoration: const InputDecoration(
-              labelText: 'Your display name',
-              hintText: 'Sent automatically when you add a friend',
+            const SizedBox(height: 12),
+            _RelayStatusRow(myNodeInfoAsync: myNodeInfoAsync),
+            const SizedBox(height: 12),
+            // Only shown where an embedded server is even possible (desktop
+            // for now) — on Android there's nothing to toggle to yet, so the
+            // sheet looks exactly as it did before this feature.
+            if (embeddedServerSupported) ...[
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Use the built-in server'),
+                subtitle: const Text(
+                  'Runs automatically on this device — no setup needed. Turn '
+                  'off to point at a separately self-hosted server instead '
+                  '(NAS, VPS, Docker Compose).',
+                ),
+                value: _useEmbeddedServer,
+                onChanged: (value) =>
+                    setState(() => _useEmbeddedServer = value),
+              ),
+              const SizedBox(height: 12),
+            ],
+            if (_useEmbeddedServer && embeddedServerSupported) ...[
+              _EmbeddedServerStatusRow(
+                embeddedAsync: ref.watch(embeddedServerProvider),
+              ),
+              const SizedBox(height: 12),
+            ] else ...[
+              TextField(
+                controller: _hostController,
+                decoration: const InputDecoration(
+                  labelText: 'Host',
+                  hintText: 'localhost',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _portController,
+                decoration: const InputDecoration(labelText: 'Port'),
+                keyboardType: TextInputType.number,
+              ),
+              const SizedBox(height: 12),
+            ],
+            TextField(
+              controller: _myAddressController,
+              decoration: const InputDecoration(
+                labelText: 'Your address (given to friends)',
+                hintText: 'mydomain.example:8080',
+              ),
             ),
-          ),
-          const SizedBox(height: 24),
-          FilledButton(onPressed: _save, child: const Text('Save')),
-        ],
+            const SizedBox(height: 12),
+            TextField(
+              controller: _myDisplayNameController,
+              decoration: const InputDecoration(
+                labelText: 'Your display name',
+                hintText: 'Sent automatically when you add a friend',
+              ),
+            ),
+            const SizedBox(height: 24),
+            FilledButton(onPressed: _save, child: const Text('Save')),
+          ],
+        ),
       ),
     );
   }
@@ -352,6 +429,60 @@ class _RelayStatusRow extends StatelessWidget {
           ],
         );
       },
+    );
+  }
+}
+
+/// Read-only status row shown in place of the host/port fields while
+/// [MusicatServerConfig.useEmbeddedServer] is on — this device's own
+/// server isn't something the user types in, just something to see the
+/// state of (starting up, running on which port, or unavailable).
+class _EmbeddedServerStatusRow extends StatelessWidget {
+  const _EmbeddedServerStatusRow({required this.embeddedAsync});
+
+  final AsyncValue<EmbeddedServerInfo?> embeddedAsync;
+
+  @override
+  Widget build(BuildContext context) {
+    final textStyle = Theme.of(context).textTheme.bodySmall;
+    return embeddedAsync.when(
+      loading: () => Row(
+        children: [
+          const SizedBox(
+            height: 14,
+            width: 14,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          const SizedBox(width: 8),
+          Text('Starting your built-in server…', style: textStyle),
+        ],
+      ),
+      error: (error, stackTrace) => Row(
+        children: [
+          Icon(
+            Icons.error_outline,
+            size: 16,
+            color: Theme.of(context).colorScheme.error,
+          ),
+          const SizedBox(width: 8),
+          Text('Could not start the built-in server', style: textStyle),
+        ],
+      ),
+      data: (info) => Row(
+        children: [
+          Icon(
+            info == null ? Icons.info_outline : Icons.check_circle_outline,
+            size: 16,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            info == null
+                ? 'Not available on this device'
+                : 'Running locally on port ${info.port}',
+            style: textStyle,
+          ),
+        ],
+      ),
     );
   }
 }
