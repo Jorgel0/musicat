@@ -94,6 +94,13 @@ class RelayClient {
 
   Timer? _reconnectTimer;
 
+  /// The in-flight [claimUsername] call's completer, if any -- there is
+  /// realistically only ever one claim happening at a time (driven by the
+  /// app's own UI), so a single field is enough; no need for the
+  /// [RelayRequestMessage.requestId]-keyed correlation [RelayHub]'s HTTP
+  /// forwarding needs to juggle many requests at once.
+  Completer<RelayClaimUsernameResult>? _pendingClaim;
+
   bool get isConnected => _channel != null;
 
   /// Connects to [relayUrl] (its WebSocket endpoint, e.g.
@@ -210,6 +217,56 @@ class RelayClient {
     _channel = null;
   }
 
+  /// Claims [username] as a friendly pointer to this node's own nodeId, over
+  /// the existing persistent channel established by [connect] -- see
+  /// [RelayClaimUsername]'s doc comment for why this piggybacks on the
+  /// connection's already-proven identity instead of being a separate,
+  /// authenticated-some-other-way HTTP call. Returns a clear failure result
+  /// (never throws) if this client isn't currently connected to a relay at
+  /// all, or if another claim is already in flight.
+  ///
+  /// Awaits the *next* [RelayClaimUsernameResult] the relay sends back (see
+  /// [_serve]) -- fine as long as only one claim is ever in flight at a
+  /// time, which holds here since this is only ever driven by the app's own
+  /// UI, never something needing the general per-request correlation
+  /// [RelayHub]'s HTTP forwarding uses `requestId`s for.
+  Future<RelayClaimUsernameResult> claimUsername(String username) async {
+    final channel = _channel;
+    if (channel == null) {
+      return const RelayClaimUsernameResult(
+        success: false,
+        error: 'Not currently connected to a relay',
+      );
+    }
+    if (_pendingClaim != null) {
+      return const RelayClaimUsernameResult(
+        success: false,
+        error: 'Another username claim is already in progress',
+      );
+    }
+
+    final completer = Completer<RelayClaimUsernameResult>();
+    _pendingClaim = completer;
+    channel.sink.add(RelayClaimUsername(username).encode());
+
+    try {
+      return await completer.future.timeout(const Duration(seconds: 10));
+    } on TimeoutException {
+      return const RelayClaimUsernameResult(
+        success: false,
+        error: 'Relay did not respond in time',
+      );
+    } finally {
+      // Only clear this if it's still the completer *this* call created --
+      // harmless either way in practice (only one claim is ever really in
+      // flight at once), but avoids this call's cleanup ever clobbering a
+      // different, newer claim's completer.
+      if (identical(_pendingClaim, completer)) {
+        _pendingClaim = null;
+      }
+    }
+  }
+
   Future<void> _serve(
     WebSocketChannel channel,
     StreamIterator<dynamic> messages,
@@ -220,6 +277,8 @@ class RelayClient {
         final message = RelayMessage.decode(messages.current as String);
         if (message is RelayRequestMessage) {
           unawaited(_handle(channel, message));
+        } else if (message is RelayClaimUsernameResult) {
+          _pendingClaim?.complete(message);
         }
       }
     } catch (_) {

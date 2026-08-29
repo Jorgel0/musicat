@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:cryptography/cryptography.dart';
@@ -9,6 +10,7 @@ import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'relay_protocol.dart';
+import 'username_directory_store.dart';
 
 Response _json(Object? body, {int status = 200}) => Response(
   status,
@@ -56,10 +58,34 @@ class _TunnelDisconnectedException implements Exception {
 /// comes back — it never inspects, authorizes, or trusts the *content*
 /// being relayed. That's still entirely the receiving Musicat Server's own
 /// job (`RequestVerifier`), exactly as if the request had arrived directly.
+///
+/// It also runs an optional username directory ([usernames]): a node that
+/// has already proven it controls nodeId X over its own tunnel (the same
+/// [RelayHello]/[RelayAuth] handshake above) can claim a short, memorable
+/// username as a friendly pointer to X (a [RelayClaimUsername] message over
+/// that same connection), and anyone can resolve one back to a nodeId with
+/// a plain `GET /directory/lookup?username=<name>` -- no more sensitive
+/// than a nodeId itself, which is already routinely shared via QR
+/// codes/links. A username is never a new form of trust or authentication;
+/// the nodeId/keypair stays the real trust anchor, exactly as before this
+/// existed.
 class RelayHub {
-  RelayHub({this.requestTimeout = const Duration(seconds: 20)});
+  /// [dataDir], if given, is where the `username -> nodeId` directory (see
+  /// [usernames]) is persisted across restarts -- a real deployment should
+  /// always pass one (see `bin/relay.dart`'s `MUSICAT_RELAY_DATA_DIR`).
+  /// Omitting it (the default) falls back to an in-memory-only directory
+  /// ([InMemoryUsernameDirectory]) so existing callers that never had a data
+  /// directory to begin with (unit tests, an ad hoc `RelayHub()`) keep
+  /// working -- just without any claim surviving a restart.
+  RelayHub({
+    this.requestTimeout = const Duration(seconds: 20),
+    Directory? dataDir,
+  }) : usernames = dataDir != null
+           ? UsernameDirectoryStore(dataDir)
+           : InMemoryUsernameDirectory();
 
   final Duration requestTimeout;
+  final UsernameDirectory usernames;
   final Map<String, _Tunnel> _tunnels = {};
   final Random _random = Random.secure();
 
@@ -97,12 +123,39 @@ class RelayHub {
   Router buildRouter() {
     final router = Router();
     router.mount('/connect', webSocketHandler(_onConnection));
+    // Registered before the catch-all forwarding route below: shelf_router
+    // tries routes in registration order and uses the first match (see its
+    // own doc comment), and '/<nodeId>/<path|[^]*>' would otherwise happily
+    // match '/directory/lookup' too (nodeId='directory', path='lookup') --
+    // no real nodeId is ever literally "directory" (it's a 64-char hex
+    // fingerprint), but registration order is what actually guarantees this
+    // route wins, not that coincidence.
+    router.get('/directory/lookup', _lookupUsername);
     router.all(
       '/<nodeId>/<path|[^]*>',
       (Request request, String nodeId, String path) =>
           _forward(nodeId, path, request),
     );
     return router;
+  }
+
+  /// Plain, unauthenticated HTTP GET: read-only and no more sensitive than a
+  /// nodeId itself (already routinely shared via QR codes/links), so it
+  /// needs no auth at all -- see [RelayClaimUsername]'s doc comment for why
+  /// *claiming* one is different.
+  Future<Response> _lookupUsername(Request request) async {
+    final username = request.requestedUri.queryParameters['username'];
+    if (username == null || username.isEmpty) {
+      return _json({
+        'error': '"username" query parameter is required',
+      }, status: 400);
+    }
+
+    final nodeId = await usernames.lookup(username);
+    if (nodeId == null) {
+      return _json({'error': 'Username not found'}, status: 404);
+    }
+    return _json({'nodeId': nodeId});
   }
 
   void _onConnection(WebSocketChannel channel, String? protocol) {
@@ -181,6 +234,14 @@ class RelayHub {
           _tunnels[nodeId]?.pending
               .remove(message.requestId)
               ?.complete(message);
+        } else if (message is RelayClaimUsername) {
+          final result = await usernames.claim(message.username, nodeId);
+          channel.sink.add(
+            RelayClaimUsernameResult(
+              success: result.success,
+              error: result.error,
+            ).encode(),
+          );
         }
       }
     } catch (_) {

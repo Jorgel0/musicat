@@ -193,6 +193,37 @@ class FederationClient {
     }
   }
 
+  /// Claims [username] (3-32 chars, `[a-zA-Z0-9_-]`) as this node's own
+  /// friendly identity on its own currently-connected relay — so a friend
+  /// can look it up (see [lookupUsername]) instead of needing a raw
+  /// address. Idempotent if [username] is already this node's own.
+  /// Throws [FederationClientException] with a 409 status if it's already
+  /// taken by a different node, 400 on an invalid format, or 503 if this
+  /// node has no relay currently connected to claim it on.
+  Future<void> setUsername(String username) async {
+    await _handle(
+      () => _dio.post<Map<String, dynamic>>(
+        '/api/v1/federation/username',
+        data: {'username': username},
+      ),
+    );
+  }
+
+  /// Resolves [username] to the `nodeId` that claimed it, via this node's
+  /// own currently-connected relay's directory. Throws
+  /// [FederationClientException] with a 404 status if no one has claimed
+  /// [username], or 503 if this node has no relay currently connected to
+  /// look it up against.
+  Future<String> lookupUsername(String username) async {
+    final response = await _handle(
+      () => _dio.get<Map<String, dynamic>>(
+        '/api/v1/federation/directory/lookup',
+        queryParameters: {'username': username},
+      ),
+    );
+    return response.data!['nodeId'] as String;
+  }
+
   /// Sets (or, with `nickname: null`, clears) [nodeId]'s purely local
   /// [FederationFriend.localNickname] on this device's own Musicat Server.
   /// Never sent to, or seen by, the friend it labels. Throws

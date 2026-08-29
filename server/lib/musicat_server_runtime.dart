@@ -245,6 +245,7 @@ Future<MusicatServerHandle> startMusicatServer({
     puncher,
     myRelayUrl: myRelayUrl,
     appApiKey: appApiKey,
+    relayClient: relayClient,
   );
 
   final sharedTrackStore = SharedTrackStore(dataDir);

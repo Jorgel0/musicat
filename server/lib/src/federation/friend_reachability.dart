@@ -5,23 +5,34 @@ import 'friend.dart';
 Uri _directUri(Friend friend, String path) =>
     Uri.parse('http://${friend.address}$path');
 
+/// The relay's own plain-HTTP origin (scheme/host/port only, no path), given
+/// its WebSocket connect endpoint (e.g. `ws://relay.example.com:8090/connect`
+/// -> `http://relay.example.com:8090`, `wss://...` -> `https://...`).
+/// Ignores whatever path the given URL happens to have -- callers attach
+/// their own via [Uri.replace] -- so it doesn't matter whether that value
+/// includes `/connect` or not.
+///
+/// Shared by [relayForwardUri] below (which forwards a request to a specific
+/// node through the relay) and by `federation_routes.dart`'s `GET
+/// /api/v1/federation/directory/lookup` (which calls the relay's *own*
+/// `/directory/lookup`, not a specific node) -- both need this exact
+/// ws(s)://-to-http(s):// mapping, and duplicating it in two places is
+/// exactly the kind of thing that drifts.
+Uri relayHttpOrigin(String relayUrl) {
+  final uri = Uri.parse(relayUrl);
+  final scheme = uri.scheme == 'wss' ? 'https' : 'http';
+  return Uri(scheme: scheme, host: uri.host, port: uri.port);
+}
+
 /// The HTTP address to forward a request for [nodeId] through a relay
 /// (ADR 0032/0033), given that relay's own base URL as reported at pairing
 /// time (`Friend.relayUrl` — its WebSocket connect endpoint, e.g.
 /// `ws://relay.example.com:8090/connect`). Always rebuilt from just the
-/// scheme/host/port, ignoring whatever path the stored value happens to
-/// have, so it doesn't matter whether that value includes `/connect` or
-/// not.
-Uri relayForwardUri(String relayUrl, String nodeId, String path) {
-  final uri = Uri.parse(relayUrl);
-  final scheme = uri.scheme == 'wss' ? 'https' : 'http';
-  return Uri(
-    scheme: scheme,
-    host: uri.host,
-    port: uri.port,
-    path: '/$nodeId$path',
-  );
-}
+/// scheme/host/port (see [relayHttpOrigin]), ignoring whatever path the
+/// stored value happens to have, so it doesn't matter whether that value
+/// includes `/connect` or not.
+Uri relayForwardUri(String relayUrl, String nodeId, String path) =>
+    relayHttpOrigin(relayUrl).replace(path: '/$nodeId$path');
 
 /// Reaches [friend] at their direct [Friend.address] first, falling back
 /// to their relay (`Friend.relayUrl`, ADR 0032/0033) only on a genuine

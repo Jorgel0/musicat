@@ -12,6 +12,7 @@ import 'package:musicat/features/friends/presentation/musicat_server_config_cont
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'fakes/fake_federation_client.dart';
 import 'fakes/fake_http_adapter.dart';
 
 const _configured = MusicatServerConfig(
@@ -382,6 +383,11 @@ void main() {
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
+            // The sheet now also watches myNodeInfoProvider itself (to
+            // decide whether to show its "By username" add-friend mode) —
+            // a fake here keeps that off the real network, same reason
+            // the sibling tests below need it too.
+            federationClientProvider.overrideWithValue(FakeFederationClient()),
             friendsControllerProvider.overrideWith(
               () => _FixedFriendsController(const FriendsState()),
             ),
@@ -447,6 +453,7 @@ void main() {
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
+            federationClientProvider.overrideWithValue(FakeFederationClient()),
             friendsControllerProvider.overrideWith(
               () => _FixedFriendsController(const FriendsState()),
             ),
@@ -487,6 +494,7 @@ void main() {
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(_configured),
           ),
+          federationClientProvider.overrideWithValue(FakeFederationClient()),
           friendsControllerProvider.overrideWith(
             () => _FixedFriendsController(const FriendsState()),
           ),
@@ -525,6 +533,7 @@ void main() {
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
+            federationClientProvider.overrideWithValue(FakeFederationClient()),
             friendsControllerProvider.overrideWith(
               () => _FixedFriendsController(const FriendsState()),
             ),
@@ -567,6 +576,7 @@ void main() {
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
+            federationClientProvider.overrideWithValue(FakeFederationClient()),
             friendsControllerProvider.overrideWith(
               () => _FixedFriendsController(const FriendsState()),
             ),
@@ -604,6 +614,15 @@ void main() {
       final client = _clientWith((options) {
         if (options.path == '/api/v1/federation/pairing-codes') {
           return const FakeHttpResponse(200, {'code': 'qr-code-value'});
+        }
+        // The sheet also watches myNodeInfoProvider (to decide whether to
+        // show its "By username" add-friend mode) — served here as "no
+        // relay connected" so this test doesn't need to care about it.
+        if (options.path == '/api/v1/node') {
+          return const FakeHttpResponse(200, {
+            'nodeId': 'my-node',
+            'publicKeyBase64': 'pk',
+          });
         }
         throw StateError('Unexpected request: ${options.path}');
       });
@@ -643,5 +662,364 @@ void main() {
         findsOneWidget,
       );
     });
+  });
+
+  group('_ServerConfigSheet "Choose your username"', () {
+    testWidgets(
+      'is hidden (with an explanatory note) when this device has no relay '
+      'connected',
+      (tester) async {
+        final client = FakeFederationClient(
+          myNode: const MyNodeInfo(nodeId: 'my-node', publicKeyBase64: 'pk'),
+        );
+        final container = ProviderContainer(
+          overrides: [
+            musicatServerConfigControllerProvider.overrideWith(
+              () => MusicatServerConfigController(_configured),
+            ),
+            federationClientProvider.overrideWithValue(client),
+            friendsControllerProvider.overrideWith(
+              () => _FixedFriendsController(const FriendsState()),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(home: FriendsScreen()),
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.byTooltip('Musicat Server settings'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('Connect to a relay to claim a username.'),
+          findsOneWidget,
+        );
+        expect(
+          find.widgetWithText(TextField, 'Your username (optional)'),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets('claiming a username succeeds and shows a success snackbar', (
+      tester,
+    ) async {
+      final client = FakeFederationClient(
+        myNode: const MyNodeInfo(
+          nodeId: 'my-node',
+          publicKeyBase64: 'pk',
+          relayUrl: 'wss://relay.example:9443/session/abc',
+        ),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(_configured),
+          ),
+          federationClientProvider.overrideWithValue(client),
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(const FriendsState()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Musicat Server settings'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Your username (optional)'),
+        'coolname',
+      );
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Claim'));
+      await tester.pumpAndSettle();
+
+      expect(client.setUsernameCalls, ['coolname']);
+      expect(find.text('Username "coolname" claimed.'), findsOneWidget);
+    });
+
+    testWidgets(
+      'claiming an already-taken username shows a clear message, not a '
+      'generic error',
+      (tester) async {
+        final client =
+            FakeFederationClient(
+                myNode: const MyNodeInfo(
+                  nodeId: 'my-node',
+                  publicKeyBase64: 'pk',
+                  relayUrl: 'wss://relay.example:9443/session/abc',
+                ),
+              )
+              ..setUsernameError = const FederationClientException(
+                409,
+                'Username already taken',
+              );
+        final container = ProviderContainer(
+          overrides: [
+            musicatServerConfigControllerProvider.overrideWith(
+              () => MusicatServerConfigController(_configured),
+            ),
+            federationClientProvider.overrideWithValue(client),
+            friendsControllerProvider.overrideWith(
+              () => _FixedFriendsController(const FriendsState()),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(home: FriendsScreen()),
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.byTooltip('Musicat Server settings'));
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Your username (optional)'),
+          'taken',
+        );
+        await tester.tap(find.widgetWithText(OutlinedButton, 'Claim'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('That username is already taken — try another one.'),
+          findsOneWidget,
+        );
+        // Not the raw exception text, and not a generic fallback message.
+        expect(find.text('Username already taken'), findsNothing);
+      },
+    );
+  });
+
+  group('_AddFriendSheet "By username" mode', () {
+    testWidgets('the "By address"/"By username" toggle is hidden, and only the '
+        'address field is shown, when this device has no relay connected', (
+      tester,
+    ) async {
+      final client = FakeFederationClient(
+        myNode: const MyNodeInfo(nodeId: 'my-node', publicKeyBase64: 'pk'),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(_configured),
+          ),
+          federationClientProvider.overrideWithValue(client),
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(const FriendsState()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byIcon(Icons.person_add_alt));
+      await tester.pumpAndSettle();
+
+      expect(find.text('By address'), findsNothing);
+      expect(find.text('By username'), findsNothing);
+      expect(
+        find.widgetWithText(TextField, "Friend's address"),
+        findsOneWidget,
+      );
+      expect(find.widgetWithText(TextField, "Friend's username"), findsNothing);
+    });
+
+    testWidgets('resolves a username via this device\'s own relay, then calls '
+        'addFriend with the relay-routed address', (tester) async {
+      final client = FakeFederationClient(
+        myNode: const MyNodeInfo(
+          nodeId: 'my-node',
+          publicKeyBase64: 'pk',
+          relayUrl: 'wss://relay.example:9443/session/abc',
+        ),
+      )..usernameDirectory['bob'] = 'node-bob';
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(_configured),
+          ),
+          federationClientProvider.overrideWithValue(client),
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(const FriendsState()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byIcon(Icons.person_add_alt));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('By username'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.widgetWithText(TextField, "Friend's username"),
+        'bob',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextField, "Friend's code"),
+        'the-code',
+      );
+      await tester.ensureVisible(
+        find.widgetWithText(FilledButton, 'Add friend'),
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Add friend'));
+      await tester.pumpAndSettle();
+
+      expect(client.lookupUsernameCalls, ['bob']);
+      expect(client.addFriendCalls, hasLength(1));
+      final call = client.addFriendCalls.single;
+      expect(call.friendBaseUrl, 'http://relay.example:9443/node-bob');
+      expect(call.code, 'the-code');
+    });
+
+    testWidgets(
+      'a failed username lookup (not found) shows a clear error and never '
+      'calls addFriend',
+      (tester) async {
+        final client = FakeFederationClient(
+          myNode: const MyNodeInfo(
+            nodeId: 'my-node',
+            publicKeyBase64: 'pk',
+            relayUrl: 'wss://relay.example:9443/session/abc',
+          ),
+        );
+        final container = ProviderContainer(
+          overrides: [
+            musicatServerConfigControllerProvider.overrideWith(
+              () => MusicatServerConfigController(_configured),
+            ),
+            federationClientProvider.overrideWithValue(client),
+            friendsControllerProvider.overrideWith(
+              () => _FixedFriendsController(const FriendsState()),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(home: FriendsScreen()),
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.byIcon(Icons.person_add_alt));
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('By username'));
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.widgetWithText(TextField, "Friend's username"),
+          'ghost',
+        );
+        await tester.enterText(
+          find.widgetWithText(TextField, "Friend's code"),
+          'the-code',
+        );
+        await tester.ensureVisible(
+          find.widgetWithText(FilledButton, 'Add friend'),
+        );
+        await tester.tap(find.widgetWithText(FilledButton, 'Add friend'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Username not found'), findsOneWidget);
+        expect(client.addFriendCalls, isEmpty);
+      },
+    );
+
+    testWidgets(
+      'a failed username lookup (no relay currently connected) shows a '
+      'clear error and never calls addFriend',
+      (tester) async {
+        final client =
+            FakeFederationClient(
+                myNode: const MyNodeInfo(
+                  nodeId: 'my-node',
+                  publicKeyBase64: 'pk',
+                  relayUrl: 'wss://relay.example:9443/session/abc',
+                ),
+              )
+              ..lookupUsernameError = const FederationClientException(
+                503,
+                'No relay is currently connected to this node',
+              );
+        final container = ProviderContainer(
+          overrides: [
+            musicatServerConfigControllerProvider.overrideWith(
+              () => MusicatServerConfigController(_configured),
+            ),
+            federationClientProvider.overrideWithValue(client),
+            friendsControllerProvider.overrideWith(
+              () => _FixedFriendsController(const FriendsState()),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(home: FriendsScreen()),
+          ),
+        );
+        await tester.pump();
+        await tester.tap(find.byIcon(Icons.person_add_alt));
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('By username'));
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.widgetWithText(TextField, "Friend's username"),
+          'bob',
+        );
+        await tester.enterText(
+          find.widgetWithText(TextField, "Friend's code"),
+          'the-code',
+        );
+        await tester.ensureVisible(
+          find.widgetWithText(FilledButton, 'Add friend'),
+        );
+        await tester.tap(find.widgetWithText(FilledButton, 'Add friend'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('No relay is currently connected to this node'),
+          findsOneWidget,
+        );
+        expect(client.addFriendCalls, isEmpty);
+      },
+    );
   });
 }

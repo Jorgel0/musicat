@@ -254,7 +254,10 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
   late final TextEditingController _myAddressController;
   late final TextEditingController _myDisplayNameController;
   late final TextEditingController _apiKeyController;
+  final _usernameController = TextEditingController();
   late bool _useEmbeddedServer;
+  bool _claimingUsername = false;
+  String? _usernameError;
 
   @override
   void initState() {
@@ -277,7 +280,42 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
     _myAddressController.dispose();
     _myDisplayNameController.dispose();
     _apiKeyController.dispose();
+    _usernameController.dispose();
     super.dispose();
+  }
+
+  /// Claims [_usernameController]'s text on this device's own
+  /// currently-connected relay (see [FederationClient.setUsername]) —
+  /// only ever invoked while that relay connection is up, since the
+  /// "Claim" button is only shown then in the first place. A 409 ("already
+  /// taken") is worth spelling out plainly rather than surfacing the raw
+  /// exception text.
+  Future<void> _claimUsername() async {
+    final client = ref.read(federationClientProvider);
+    if (client == null) return;
+    final username = _usernameController.text.trim();
+    setState(() {
+      _claimingUsername = true;
+      _usernameError = null;
+    });
+    try {
+      await client.setUsername(username);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Username "$username" claimed.')),
+        );
+      }
+    } on FederationClientException catch (e) {
+      setState(() {
+        _usernameError = e.statusCode == 409
+            ? 'That username is already taken — try another one.'
+            : e.message;
+      });
+    } catch (e) {
+      setState(() => _usernameError = 'Could not claim a username: $e');
+    } finally {
+      if (mounted) setState(() => _claimingUsername = false);
+    }
   }
 
   Future<void> _save() async {
@@ -327,6 +365,14 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
             ),
             const SizedBox(height: 12),
             _RelayStatusRow(myNodeInfoAsync: myNodeInfoAsync),
+            const SizedBox(height: 12),
+            _UsernameClaimSection(
+              myNodeInfoAsync: myNodeInfoAsync,
+              usernameController: _usernameController,
+              claiming: _claimingUsername,
+              error: _usernameError,
+              onClaim: _claimUsername,
+            ),
             const SizedBox(height: 12),
             // Only shown where an embedded server is even possible (Linux,
             // Windows, and — as of this round — Android too). On any other
@@ -476,6 +522,80 @@ class _RelayStatusRow extends StatelessWidget {
   }
 }
 
+/// Lets this device claim a friendly username on its own
+/// currently-connected relay — so a friend can add it via
+/// `_AddFriendSheet`'s "By username" mode instead of needing a raw
+/// address. Only shown once [myNodeInfoAsync] resolves to a node with a
+/// relay actually connected (`relayUrl` non-null): a relay is what stores
+/// and serves the username directory, so there's nothing to claim
+/// without one — a plain note is shown in its place otherwise.
+class _UsernameClaimSection extends StatelessWidget {
+  const _UsernameClaimSection({
+    required this.myNodeInfoAsync,
+    required this.usernameController,
+    required this.claiming,
+    required this.error,
+    required this.onClaim,
+  });
+
+  final AsyncValue<MyNodeInfo?> myNodeInfoAsync;
+  final TextEditingController usernameController;
+  final bool claiming;
+  final String? error;
+  final Future<void> Function() onClaim;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasRelay = myNodeInfoAsync.value?.relayUrl != null;
+    if (!hasRelay) {
+      return Text(
+        'Connect to a relay to claim a username.',
+        style: Theme.of(context).textTheme.bodySmall,
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: TextField(
+                controller: usernameController,
+                decoration: const InputDecoration(
+                  labelText: 'Your username (optional)',
+                  hintText: 'lets a friend add you without your address',
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: OutlinedButton(
+                onPressed: claiming ? null : onClaim,
+                child: claiming
+                    ? const SizedBox(
+                        height: 16,
+                        width: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text('Claim'),
+              ),
+            ),
+          ],
+        ),
+        if (error != null) ...[
+          const SizedBox(height: 4),
+          Text(
+            error!,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 /// Read-only status row shown in place of the host/port fields while
 /// [MusicatServerConfig.useEmbeddedServer] is on — this device's own
 /// server isn't something the user types in, just something to see the
@@ -530,6 +650,12 @@ class _EmbeddedServerStatusRow extends StatelessWidget {
   }
 }
 
+/// Which field [_AddFriendSheetState] uses to fill in the friend's
+/// address: the raw address text directly, or a username resolved
+/// through this device's own relay (see
+/// [_AddFriendSheetState._resolveUsernameAddress]).
+enum _AddFriendMode { address, username }
+
 class _AddFriendSheet extends ConsumerStatefulWidget {
   const _AddFriendSheet({this.prefill});
 
@@ -551,6 +677,8 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
     text: widget.prefill?.code,
   );
   final _pasteLinkController = TextEditingController();
+  final _friendUsernameController = TextEditingController();
+  _AddFriendMode _mode = _AddFriendMode.address;
   String? _myCode;
   bool _generatingCode = false;
   bool _addingFriend = false;
@@ -561,6 +689,7 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
     _friendAddressController.dispose();
     _codeController.dispose();
     _pasteLinkController.dispose();
+    _friendUsernameController.dispose();
     super.dispose();
   }
 
@@ -617,11 +746,30 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
       _addingFriend = true;
       _error = null;
     });
+
+    final String friendAddress;
+    if (_mode == _AddFriendMode.username &&
+        (ref.read(myNodeInfoProvider).value?.relayUrl != null)) {
+      try {
+        friendAddress = await _resolveUsernameAddress();
+      } catch (e) {
+        setState(() {
+          _error = e is FederationClientException
+              ? e.message
+              : 'Could not resolve that username: $e';
+          _addingFriend = false;
+        });
+        return;
+      }
+    } else {
+      friendAddress = _friendAddressController.text.trim();
+    }
+
     try {
       await ref
           .read(friendsControllerProvider.notifier)
           .addFriend(
-            friendAddress: _friendAddressController.text.trim(),
+            friendAddress: friendAddress,
             code: _codeController.text.trim(),
           );
       if (mounted) Navigator.of(context).pop();
@@ -632,11 +780,59 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
     }
   }
 
+  /// Resolves [_friendUsernameController]'s text to the friend's address,
+  /// routed through this device's own currently-connected relay exactly
+  /// the way ordinary friend-to-friend fallback traffic already is:
+  /// `<relay-host>:<relay-port>/<nodeId>` (see `relay_hub.dart`'s own
+  /// forwarding route shape on the server side) — no new addressing
+  /// mechanism, [FederationClient.addFriend] already turns this into
+  /// `http://<relay-host>:<relay-port>/<nodeId>/api/v1/federation/friends`
+  /// the same way it does for a plain address today. Never calls
+  /// `addFriend` itself; throws (without falling back to a bad address)
+  /// if the username can't be resolved, or if this device has no relay to
+  /// route through at all.
+  Future<String> _resolveUsernameAddress() async {
+    final client = ref.read(federationClientProvider);
+    if (client == null) {
+      throw StateError('Musicat Server not configured');
+    }
+    final myNode = await ref.read(myNodeInfoProvider.future);
+    final relayHostAndPort = _relayHostAndPort(myNode?.relayUrl);
+    if (relayHostAndPort == null) {
+      throw const FederationClientException(
+        503,
+        'No relay is currently connected to this device.',
+      );
+    }
+    final nodeId = await client.lookupUsername(
+      _friendUsernameController.text.trim(),
+    );
+    return '$relayHostAndPort/$nodeId';
+  }
+
+  /// Strips the `ws://`/`wss://` scheme and any path from a relay's own
+  /// `wss://<host>:<port>/session/<id>`-shaped [MyNodeInfo.relayUrl], down
+  /// to just the `<host>:<port>` this sheet needs to build an "add friend
+  /// by username" address — a small, local string operation, not a new
+  /// server route. `null` for `null`/an unparsable [relayUrl].
+  static String? _relayHostAndPort(String? relayUrl) {
+    if (relayUrl == null) return null;
+    final uri = Uri.tryParse(relayUrl);
+    if (uri == null || uri.host.isEmpty) return null;
+    return uri.authority;
+  }
+
   @override
   Widget build(BuildContext context) {
     final myPublicAddress = ref.watch(
       musicatServerConfigControllerProvider.select((c) => c.myPublicAddress),
     );
+    // "By username" mode needs this device's own relay to route the
+    // request through (see _resolveUsernameAddress) — hidden entirely
+    // without one, same as _UsernameClaimSection hides the "Claim a
+    // username" field in _ServerConfigSheet for the same reason.
+    final hasRelay = ref.watch(myNodeInfoProvider).value?.relayUrl != null;
+    final effectiveMode = hasRelay ? _mode : _AddFriendMode.address;
 
     return Padding(
       padding: EdgeInsets.only(
@@ -746,13 +942,40 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
-            TextField(
-              controller: _friendAddressController,
-              decoration: const InputDecoration(
-                labelText: "Friend's address",
-                hintText: 'their-address.example:8080',
+            if (hasRelay) ...[
+              SegmentedButton<_AddFriendMode>(
+                segments: const [
+                  ButtonSegment(
+                    value: _AddFriendMode.address,
+                    label: Text('By address'),
+                  ),
+                  ButtonSegment(
+                    value: _AddFriendMode.username,
+                    label: Text('By username'),
+                  ),
+                ],
+                selected: {effectiveMode},
+                onSelectionChanged: (selection) =>
+                    setState(() => _mode = selection.first),
               ),
-            ),
+              const SizedBox(height: 12),
+            ],
+            if (effectiveMode == _AddFriendMode.username)
+              TextField(
+                controller: _friendUsernameController,
+                decoration: const InputDecoration(
+                  labelText: "Friend's username",
+                  hintText: 'the username they claimed on their own relay',
+                ),
+              )
+            else
+              TextField(
+                controller: _friendAddressController,
+                decoration: const InputDecoration(
+                  labelText: "Friend's address",
+                  hintText: 'their-address.example:8080',
+                ),
+              ),
             const SizedBox(height: 12),
             TextField(
               controller: _codeController,

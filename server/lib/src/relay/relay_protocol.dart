@@ -57,6 +57,11 @@ abstract class RelayMessage {
           ),
           bodyBase64: json['bodyBase64'] as String,
         ),
+        'claimUsername' => RelayClaimUsername(json['username'] as String),
+        'claimUsernameResult' => RelayClaimUsernameResult(
+          success: json['success'] as bool,
+          error: json['error'] as String?,
+        ),
         _ => throw FormatException(
           'Unknown relay message type: ${json['type']}',
         ),
@@ -169,5 +174,43 @@ class RelayResponseMessage extends RelayMessage {
     'statusCode': statusCode,
     'headers': headers,
     'bodyBase64': bodyBase64,
+  };
+}
+
+/// Client → hub: "claim this username as a friendly pointer to my nodeId" --
+/// a username is never a new form of authentication or a new account
+/// system, just a memorable alias for a nodeId; the nodeId/keypair stays the
+/// real trust anchor. Sent over the same already-authenticated channel a
+/// [RelayHello]/[RelayAuth] exchange established, not a separate HTTP call:
+/// the hub already knows, beyond doubt, which nodeId this connection
+/// controls, so reusing that proof is simpler and safer than inventing a
+/// second, HTTP-level signature scheme just for this.
+class RelayClaimUsername extends RelayMessage {
+  const RelayClaimUsername(this.username);
+
+  final String username;
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'claimUsername',
+    'username': username,
+  };
+}
+
+/// Hub's reply to a [RelayClaimUsername]: whether [RelayClaimUsername.username]
+/// now (or already did) resolve to the caller's own nodeId. [error] is a
+/// plain, user-presentable string (e.g. "Username already taken", "Invalid
+/// username format") and is `null` exactly when [success] is `true`.
+class RelayClaimUsernameResult extends RelayMessage {
+  const RelayClaimUsernameResult({required this.success, this.error});
+
+  final bool success;
+  final String? error;
+
+  @override
+  Map<String, Object?> toJson() => {
+    'type': 'claimUsernameResult',
+    'success': success,
+    'error': error,
   };
 }

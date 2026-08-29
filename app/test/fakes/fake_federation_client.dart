@@ -43,6 +43,25 @@ class FakeFederationClient implements FederationClient {
   final List<String> removedNodeIds = [];
   final List<({String nodeId, String? nickname})> setLocalNicknameCalls = [];
 
+  /// Overrides [setUsername]'s outcome: `null` (the default) means every
+  /// call succeeds; otherwise thrown as-is on every call — typically a
+  /// [FederationClientException], to drive a specific error (e.g. a 409
+  /// "already taken") through the same real UI path a live one would.
+  Object? setUsernameError;
+  final List<String> setUsernameCalls = [];
+
+  /// Username -> nodeId entries this fake's directory knows about — backs
+  /// [lookupUsername]'s success case. A username missing from this map
+  /// throws the same 404 [FederationClientException] the real relay's own
+  /// `/directory/lookup` route would.
+  Map<String, String> usernameDirectory = {};
+
+  /// Overrides [lookupUsername]'s outcome entirely (e.g. a 503 "no relay
+  /// connected"), regardless of [usernameDirectory] — `null` (the
+  /// default) falls back to the directory-lookup behavior above.
+  Object? lookupUsernameError;
+  final List<String> lookupUsernameCalls = [];
+
   @override
   Future<MyNodeInfo> getMyNode() async => myNode;
 
@@ -77,6 +96,25 @@ class FakeFederationClient implements FederationClient {
         displayName: displayName,
       ),
     );
+  }
+
+  @override
+  Future<void> setUsername(String username) async {
+    setUsernameCalls.add(username);
+    final error = setUsernameError;
+    if (error != null) throw error;
+  }
+
+  @override
+  Future<String> lookupUsername(String username) async {
+    lookupUsernameCalls.add(username);
+    final error = lookupUsernameError;
+    if (error != null) throw error;
+    final nodeId = usernameDirectory[username];
+    if (nodeId == null) {
+      throw const FederationClientException(404, 'Username not found');
+    }
+    return nodeId;
   }
 
   @override

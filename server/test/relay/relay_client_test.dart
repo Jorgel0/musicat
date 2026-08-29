@@ -282,6 +282,58 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 400));
     expect(client.isConnected, isFalse);
   });
+
+  group('claimUsername', () {
+    test('a successful claim round-trips through a real hub', () async {
+      client = RelayClient(
+        identity: identity,
+        localHandler: (request) async => Response.ok('unused'),
+      );
+      expect(await client.connect(wsUrl), isTrue);
+
+      final result = await client.claimUsername('alice');
+
+      expect(result.success, isTrue);
+      expect(result.error, isNull);
+      expect(await hub.usernames.lookup('alice'), identity.nodeId);
+    });
+
+    test('a rejected claim (already taken by a different node) surfaces the '
+        "hub's error", () async {
+      final otherIdentityDir = Directory.systemTemp.createTempSync(
+        'musicat_relay_client_other_',
+      );
+      addTearDown(() => otherIdentityDir.deleteSync(recursive: true));
+      final otherIdentity = await NodeIdentityStore(
+        otherIdentityDir,
+      ).loadOrCreate();
+      await hub.usernames.claim('alice', otherIdentity.nodeId);
+
+      client = RelayClient(
+        identity: identity,
+        localHandler: (request) async => Response.ok('unused'),
+      );
+      expect(await client.connect(wsUrl), isTrue);
+
+      final result = await client.claimUsername('alice');
+
+      expect(result.success, isFalse);
+      expect(result.error, 'Username already taken');
+    });
+
+    test('returns a clear failure result, not a thrown exception, when not '
+        'currently connected', () async {
+      client = RelayClient(
+        identity: identity,
+        localHandler: (request) async => Response.ok('unused'),
+      );
+
+      final result = await client.claimUsername('alice');
+
+      expect(result.success, isFalse);
+      expect(result.error, isNotNull);
+    });
+  });
 }
 
 /// Polls [condition] until it's true or [timeout] elapses, without relying

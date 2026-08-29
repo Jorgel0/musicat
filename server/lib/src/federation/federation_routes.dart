@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:http/http.dart' as http;
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
 import '../http/require_local.dart';
 import '../nat/udp_puncher.dart';
+import '../relay/relay_client.dart';
+import '../relay/username_directory_store.dart';
 import 'friend.dart';
+import 'friend_reachability.dart';
 import 'friend_store.dart';
 import 'pairing_code_store.dart';
 import 'request_signing.dart';
@@ -89,6 +93,20 @@ Response _verificationErrorResponse(
 /// see that function's own doc comment for what it does. `null`/empty (the
 /// default) reproduces the exact loopback-only behavior from before this
 /// parameter existed.
+///
+/// `POST /username` and `GET /directory/lookup` are also app-facing
+/// (wrapped in [requireLocal]): the first claims a username on [relayClient]'s
+/// currently-connected relay (over the same authenticated tunnel, see
+/// `RelayClaimUsername`'s doc comment -- never a new form of authentication,
+/// just a friendly pointer to this node's own nodeId), returning `503` if
+/// no relay is currently connected, `200` on success, `409` if the username
+/// is already claimed by a different node, and `400` on an invalid format.
+/// The second resolves a username against that same relay's own `GET
+/// /directory/lookup` (a plain, unauthenticated HTTP call -- see
+/// `relay_hub.dart`), forwarding its exact status code and body back
+/// (`200` with `{"nodeId": ...}`, or `404`); `503` if no relay is currently
+/// connected. [relayClient] is `null` exactly when `startMusicatServer` was
+/// never given a relay to connect to at all.
 Router buildFederationRouter(
   FriendStore friendStore,
   RequestVerifier verifier,
@@ -96,7 +114,10 @@ Router buildFederationRouter(
   UdpPuncher puncher, {
   String? myRelayUrl,
   String? appApiKey,
+  RelayClient? relayClient,
+  http.Client? httpClient,
 }) {
+  final client = httpClient ?? http.Client();
   final router = Router();
 
   router.post(
@@ -235,6 +256,83 @@ Router buildFederationRouter(
         'connected': puncher.isConnected(nodeId),
         'lastSeen': lastSeen?.toIso8601String(),
       });
+    }, appApiKey: appApiKey),
+  );
+
+  router.post(
+    '/username',
+    requireLocal((Request request) async {
+      if (relayClient == null || !relayClient.isConnected) {
+        return _error(
+          'No relay is currently connected to this node',
+          status: 503,
+        );
+      }
+
+      final Map<String, dynamic> body;
+      try {
+        body = jsonDecode(await request.readAsString()) as Map<String, dynamic>;
+      } on FormatException {
+        return _error('Request body must be JSON');
+      }
+
+      final username = body['username'];
+      if (username is! String || username.isEmpty) {
+        return _error('"username" is required');
+      }
+
+      final result = await relayClient.claimUsername(username);
+      if (result.success) {
+        return _json({'username': username});
+      }
+
+      final status = switch (result.error) {
+        usernameAlreadyTakenError => 409,
+        invalidUsernameFormatError => 400,
+        // Anything else is a relay-side/transport problem (not currently
+        // connected after all, a claim already in flight, a timeout, ...)
+        // rather than the claim itself being rejected on its merits.
+        _ => 502,
+      };
+      return _error(result.error ?? 'Failed to claim username', status: status);
+    }, appApiKey: appApiKey),
+  );
+
+  router.get(
+    '/directory/lookup',
+    requireLocal((Request request) async {
+      final relayUrl = myRelayUrl;
+      if (relayClient == null || !relayClient.isConnected || relayUrl == null) {
+        return _error(
+          'No relay is currently connected to this node',
+          status: 503,
+        );
+      }
+
+      final username = request.requestedUri.queryParameters['username'];
+      if (username == null || username.isEmpty) {
+        return _error('"username" query parameter is required');
+      }
+
+      final lookupUri = relayHttpOrigin(relayUrl).replace(
+        path: '/directory/lookup',
+        queryParameters: {'username': username},
+      );
+
+      final http.Response relayResponse;
+      try {
+        relayResponse = await client
+            .get(lookupUri)
+            .timeout(const Duration(seconds: 10));
+      } catch (_) {
+        return _error('Could not reach the relay', status: 502);
+      }
+
+      return Response(
+        relayResponse.statusCode,
+        body: relayResponse.body,
+        headers: {'content-type': 'application/json'},
+      );
     }, appApiKey: appApiKey),
   );
 
