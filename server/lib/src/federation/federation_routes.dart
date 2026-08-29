@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
+import '../http/require_local.dart';
 import '../nat/udp_puncher.dart';
 import 'friend.dart';
 import 'friend_store.dart';
@@ -44,10 +45,24 @@ Response _verificationErrorResponse(
 /// [RequestVerifier]: there's no existing trust relationship yet for
 /// `/friends` to check against, and `/pairing-codes` is what a node offers
 /// to someone *becoming* a friend, so it can't require already being one.
+/// `POST /friends` must also stay reachable over the real network — it's
+/// what a friend's server calls directly to redeem a code — so, unlike the
+/// routes below, it is **not** wrapped in [requireLocal].
 ///
 /// `GET /ping` **is** behind [RequestVerifier.verify]: it's the proof that
 /// the signing/verification trust model actually works end to end before
 /// any real federation feature is built on top of it.
+///
+/// `POST /pairing-codes`, `GET /friends`, `DELETE /friends/<nodeId>`,
+/// `PATCH /friends/<nodeId>`, and `GET /friends/<nodeId>/status` are all
+/// app-facing — meant only for this device's own app talking to its own
+/// local server, never for a friend's server — and are wrapped in
+/// [requireLocal] (see its own doc comment for the full rationale and the
+/// relay-tunnel edge case it also covers). Before this, none of them
+/// checked anything beyond "can this caller reach the server at all",
+/// which is exactly the gap that made a stranger minting themselves a
+/// pairing code and immediately self-registering as a friend possible with
+/// zero involvement from this device's real owner.
 ///
 /// `POST /friends` also accepts an optional `udpCandidate` (the caller's
 /// own STUN-discovered address, ADR 0022) and returns this node's current
@@ -78,9 +93,12 @@ Router buildFederationRouter(
 }) {
   final router = Router();
 
-  router.post('/pairing-codes', (Request request) async {
-    return _json({'code': pairingCodes.generate()}, status: 201);
-  });
+  router.post(
+    '/pairing-codes',
+    requireLocal((Request request) async {
+      return _json({'code': pairingCodes.generate()}, status: 201);
+    }),
+  );
 
   router.post('/friends', (Request request) async {
     final Map<String, dynamic> body;
@@ -156,51 +174,63 @@ Router buildFederationRouter(
     }, status: 201);
   });
 
-  router.get('/friends', (Request request) async {
-    final friends = await friendStore.loadAll();
-    return _json([for (final friend in friends) friend.toJson()]);
-  });
+  router.get(
+    '/friends',
+    requireLocal((Request request) async {
+      final friends = await friendStore.loadAll();
+      return _json([for (final friend in friends) friend.toJson()]);
+    }),
+  );
 
-  router.delete('/friends/<nodeId>', (Request request, String nodeId) async {
-    await friendStore.remove(nodeId);
-    puncher.stopKeepalive(nodeId);
-    return Response(204);
-  });
+  router.delete(
+    '/friends/<nodeId>',
+    requireLocal((Request request) async {
+      final nodeId = request.params['nodeId']!;
+      await friendStore.remove(nodeId);
+      puncher.stopKeepalive(nodeId);
+      return Response(204);
+    }),
+  );
 
-  router.patch('/friends/<nodeId>', (Request request, String nodeId) async {
-    final Map<String, dynamic> body;
-    try {
-      final raw = await request.readAsString();
-      body = raw.isEmpty ? {} : jsonDecode(raw) as Map<String, dynamic>;
-    } on FormatException {
-      return _error('Request body must be JSON');
-    }
+  router.patch(
+    '/friends/<nodeId>',
+    requireLocal((Request request) async {
+      final nodeId = request.params['nodeId']!;
+      final Map<String, dynamic> body;
+      try {
+        final raw = await request.readAsString();
+        body = raw.isEmpty ? {} : jsonDecode(raw) as Map<String, dynamic>;
+      } on FormatException {
+        return _error('Request body must be JSON');
+      }
 
-    final localNickname = body['localNickname'];
-    if (localNickname != null && localNickname is! String) {
-      return _error('"localNickname" must be a string if present');
-    }
+      final localNickname = body['localNickname'];
+      if (localNickname != null && localNickname is! String) {
+        return _error('"localNickname" must be a string if present');
+      }
 
-    final updated = await friendStore.setLocalNickname(
-      nodeId,
-      localNickname as String?,
-    );
-    if (updated == null) {
-      return _error('Unknown friend', status: 404);
-    }
-    return _json(updated.toJson());
-  });
+      final updated = await friendStore.setLocalNickname(
+        nodeId,
+        localNickname as String?,
+      );
+      if (updated == null) {
+        return _error('Unknown friend', status: 404);
+      }
+      return _json(updated.toJson());
+    }),
+  );
 
-  router.get('/friends/<nodeId>/status', (
-    Request request,
-    String nodeId,
-  ) async {
-    final lastSeen = puncher.lastSeen(nodeId);
-    return _json({
-      'connected': puncher.isConnected(nodeId),
-      'lastSeen': lastSeen?.toIso8601String(),
-    });
-  });
+  router.get(
+    '/friends/<nodeId>/status',
+    requireLocal((Request request) async {
+      final nodeId = request.params['nodeId']!;
+      final lastSeen = puncher.lastSeen(nodeId);
+      return _json({
+        'connected': puncher.isConnected(nodeId),
+        'lastSeen': lastSeen?.toIso8601String(),
+      });
+    }),
+  );
 
   router.get('/ping', (Request request) async {
     final result = await verifier.verify(

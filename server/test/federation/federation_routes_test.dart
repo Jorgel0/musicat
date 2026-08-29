@@ -10,6 +10,29 @@ import 'package:musicat_server/src/nat/udp_puncher.dart';
 import 'package:shelf/shelf.dart';
 import 'package:test/test.dart';
 
+/// A hand-built [HttpConnectionInfo] -- the real one is only ever produced
+/// by `shelf_io`'s actual socket listener, which these unit tests never go
+/// through (they call the router's handler directly). Standing in for it is
+/// what lets these tests simulate "this request arrived on loopback" (or
+/// not) for `requireLocal`'s sake -- see require_local.dart.
+class _FakeConnectionInfo implements HttpConnectionInfo {
+  _FakeConnectionInfo(this.remoteAddress);
+
+  @override
+  final InternetAddress remoteAddress;
+
+  @override
+  int get remotePort => 12345;
+
+  @override
+  int get localPort => 8080;
+}
+
+/// The exact context key `shelf_io`'s real `serve()` attaches to every
+/// request it hands off (see shelf_io.dart), and the one `requireLocal`
+/// reads.
+const _connectionInfoContextKey = 'shelf.io.connection_info';
+
 void main() {
   late Directory serverDir;
   late Directory friendDir;
@@ -40,23 +63,51 @@ void main() {
     friendDir.deleteSync(recursive: true);
   });
 
+  // Every request built by the helpers below simulates the common case
+  // these tests otherwise want to exercise -- this device's own app calling
+  // its own local server on loopback -- so the `requireLocal`-wrapped
+  // routes (see federation_routes.dart) behave the same as before this
+  // context existed. The dedicated 'requireLocal' group further below
+  // overrides this to prove the restriction itself.
+  Map<String, Object> loopbackContext() => {
+    _connectionInfoContextKey: _FakeConnectionInfo(
+      InternetAddress.loopbackIPv4,
+    ),
+  };
+
   Future<Response> post(String path, Object body) async => await handler(
-    Request('POST', Uri.parse('http://localhost$path'), body: jsonEncode(body)),
+    Request(
+      'POST',
+      Uri.parse('http://localhost$path'),
+      body: jsonEncode(body),
+      context: loopbackContext(),
+    ),
   );
 
   Future<Response> get(String path, {Map<String, String>? headers}) async =>
       await handler(
-        Request('GET', Uri.parse('http://localhost$path'), headers: headers),
+        Request(
+          'GET',
+          Uri.parse('http://localhost$path'),
+          headers: headers,
+          context: loopbackContext(),
+        ),
       );
 
-  Future<Response> delete(String path) async =>
-      await handler(Request('DELETE', Uri.parse('http://localhost$path')));
+  Future<Response> delete(String path) async => await handler(
+    Request(
+      'DELETE',
+      Uri.parse('http://localhost$path'),
+      context: loopbackContext(),
+    ),
+  );
 
   Future<Response> patch(String path, Object body) async => await handler(
     Request(
       'PATCH',
       Uri.parse('http://localhost$path'),
       body: jsonEncode(body),
+      context: loopbackContext(),
     ),
   );
 
@@ -398,6 +449,79 @@ void main() {
       );
 
       expect(response.statusCode, 403);
+    });
+  });
+
+  group('requireLocal restricts the app-facing routes', () {
+    Future<Response> nonLoopback(String method, String path) async =>
+        await handler(
+          Request(
+            method,
+            Uri.parse('http://localhost$path'),
+            context: {
+              _connectionInfoContextKey: _FakeConnectionInfo(
+                InternetAddress('8.8.8.8'),
+              ),
+            },
+          ),
+        );
+
+    Future<Response> noConnectionInfo(String method, String path) async =>
+        await handler(Request(method, Uri.parse('http://localhost$path')));
+
+    for (final (method, path) in [
+      ('POST', '/pairing-codes'),
+      ('GET', '/friends'),
+      ('DELETE', '/friends/friend-1'),
+      ('PATCH', '/friends/friend-1'),
+      ('GET', '/friends/friend-1/status'),
+    ]) {
+      test('$method $path rejects a non-loopback caller with 403', () async {
+        final response = await nonLoopback(method, path);
+        expect(response.statusCode, 403);
+        final body = jsonDecode(await response.readAsString());
+        expect(body['error'], isNotEmpty);
+      });
+
+      test('$method $path rejects a request with no connection info at all '
+          '(e.g. relay-tunneled) with 403', () async {
+        final response = await noConnectionInfo(method, path);
+        expect(response.statusCode, 403);
+      });
+
+      test('$method $path succeeds for a loopback caller', () async {
+        // These helpers (post/get/delete/patch) already attach loopback
+        // connection info -- this just confirms the restriction doesn't
+        // also accidentally block the legitimate case.
+        final response = switch (method) {
+          'POST' => await post(path, {}),
+          'GET' => await get(path),
+          'DELETE' => await delete(path),
+          'PATCH' => await patch(path, {}),
+          _ => throw StateError('unexpected method $method'),
+        };
+        expect(response.statusCode, isNot(403));
+      });
+    }
+
+    test('POST /friends (pairing-code redemption) is NOT restricted -- a '
+        'non-loopback caller reaches the ordinary application logic instead '
+        'of getting a 403 from this check', () async {
+      final response = await nonLoopback('POST', '/friends');
+      // No body was sent, so this fails validation -- the important part
+      // is that it's a 400 from the route's own body parsing, not a 403
+      // from requireLocal.
+      expect(response.statusCode, isNot(403));
+    });
+
+    test('GET /ping is NOT restricted -- a non-loopback caller still reaches '
+        "RequestVerifier's own check instead of getting a 403 from this "
+        'check', () async {
+      final response = await nonLoopback('GET', '/ping');
+      // No signature headers were sent, so RequestVerifier itself rejects
+      // this with 401 -- the important part is that it isn't requireLocal's
+      // 403.
+      expect(response.statusCode, 401);
     });
   });
 }

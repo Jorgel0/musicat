@@ -9,6 +9,7 @@ import 'src/federation/federation_routes.dart';
 import 'src/federation/friend_store.dart';
 import 'src/federation/pairing_code_store.dart';
 import 'src/federation/request_signing.dart';
+import 'src/http/require_local.dart';
 import 'src/identity/node_identity.dart';
 import 'src/nat/udp_puncher.dart';
 import 'src/relay/relay_client.dart';
@@ -99,7 +100,16 @@ Router _buildRouter(
         'relayUrl': myRelayUrl,
       }),
     )
-    ..mount('/api/v1/soulseek/', soulseekRouter.call)
+    // soulseek/library/playlists are entirely app-facing (this device's own
+    // app talking to its own local server) -- wrapped in requireLocal()
+    // here, at the mount site, rather than touching every individual route
+    // inside those routers. sharingFederationRouter and the bulk of
+    // federationRouter are deliberately left unwrapped: they're what a
+    // friend's server calls, and must stay reachable over the real network
+    // (see require_local.dart's doc comment). federationRouter wraps its
+    // own handful of app-facing routes internally -- see
+    // buildFederationRouter's doc comment in federation_routes.dart.
+    ..mount('/api/v1/soulseek/', requireLocal(soulseekRouter.call))
     ..mount('/api/v1/federation/', federationRouter.call)
     // Each of these is a sibling of /api/v1/federation/, not nested under
     // it: shelf_router's mount() matches on prefix in registration order
@@ -107,14 +117,14 @@ Router _buildRouter(
     // under an already-mounted prefix would silently never be reached --
     // the parent mount's wildcard would swallow it first.
     ..mount('/api/v1/sharing/', sharingFederationRouter.call)
-    ..mount('/api/v1/library/', libraryRouter.call)
+    ..mount('/api/v1/library/', requireLocal(libraryRouter.call))
     // No trailing slash here, unlike the mounts above: buildPlaylistRouter
     // has a genuine bare-collection route ('/', for create/list) and
     // shelf_router's mount() only matches a bare `/api/v1/playlists`
     // request (no trailing slash) when the prefix itself is given without
     // one -- with a trailing slash, only `/api/v1/playlists/<anything>`
     // (note the required slash) would ever match.
-    ..mount('/api/v1/playlists', playlistRouter.call);
+    ..mount('/api/v1/playlists', requireLocal(playlistRouter.call));
 }
 
 /// Starts a full Musicat Server: loads/creates this node's identity from
