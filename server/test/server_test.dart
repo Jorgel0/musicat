@@ -136,6 +136,123 @@ void main() {
       });
     });
 
+    group('MUSICAT_APP_API_KEY opt-in for a non-loopback caller', () {
+      test(
+        'a non-loopback caller with the correct X-Api-Key succeeds',
+        () async {
+          handle = await startMusicatServer(
+            dataDir: dataDir,
+            port: 0,
+            appApiKey: 'correct-key',
+          );
+          final port = handle!.port;
+
+          final lanAddress = await findLanAddress();
+          if (lanAddress == null) {
+            markTestSkipped(
+              'No non-loopback network interface available in this sandbox',
+            );
+            return;
+          }
+
+          final response = await http
+              .get(
+                Uri.parse('http://$lanAddress:$port/api/v1/federation/friends'),
+                headers: {'X-Api-Key': 'correct-key'},
+              )
+              .timeout(const Duration(seconds: 5));
+          expect(response.statusCode, 200);
+        },
+      );
+
+      test('a non-loopback caller with a missing X-Api-Key still gets 403 '
+          'even though a key is configured', () async {
+        handle = await startMusicatServer(
+          dataDir: dataDir,
+          port: 0,
+          appApiKey: 'correct-key',
+        );
+        final port = handle!.port;
+
+        final lanAddress = await findLanAddress();
+        if (lanAddress == null) {
+          markTestSkipped(
+            'No non-loopback network interface available in this sandbox',
+          );
+          return;
+        }
+
+        final response = await http
+            .get(
+              Uri.parse('http://$lanAddress:$port/api/v1/federation/friends'),
+            )
+            .timeout(const Duration(seconds: 5));
+        expect(response.statusCode, 403);
+      });
+
+      test('a non-loopback caller with the wrong X-Api-Key gets 403', () async {
+        handle = await startMusicatServer(
+          dataDir: dataDir,
+          port: 0,
+          appApiKey: 'correct-key',
+        );
+        final port = handle!.port;
+
+        final lanAddress = await findLanAddress();
+        if (lanAddress == null) {
+          markTestSkipped(
+            'No non-loopback network interface available in this sandbox',
+          );
+          return;
+        }
+
+        final response = await http
+            .get(
+              Uri.parse('http://$lanAddress:$port/api/v1/federation/friends'),
+              headers: {'X-Api-Key': 'wrong-key'},
+            )
+            .timeout(const Duration(seconds: 5));
+        expect(response.statusCode, 403);
+      });
+
+      test('a non-loopback caller presenting a key gets 403 when no key is '
+          'configured at all (the default)', () async {
+        handle = await startMusicatServer(dataDir: dataDir, port: 0);
+        final port = handle!.port;
+
+        final lanAddress = await findLanAddress();
+        if (lanAddress == null) {
+          markTestSkipped(
+            'No non-loopback network interface available in this sandbox',
+          );
+          return;
+        }
+
+        final response = await http
+            .get(
+              Uri.parse('http://$lanAddress:$port/api/v1/federation/friends'),
+              headers: {'X-Api-Key': 'some-key'},
+            )
+            .timeout(const Duration(seconds: 5));
+        expect(response.statusCode, 403);
+      });
+
+      test('a loopback caller succeeds with no key needed at all, whether '
+          'or not one is configured', () async {
+        handle = await startMusicatServer(
+          dataDir: dataDir,
+          port: 0,
+          appApiKey: 'correct-key',
+        );
+        final port = handle!.port;
+
+        final response = await http.get(
+          Uri.parse('http://127.0.0.1:$port/api/v1/federation/friends'),
+        );
+        expect(response.statusCode, 200);
+      });
+    });
+
     test('POST /api/v1/federation/friends (pairing-code redemption) and '
         '/api/v1/sharing/* stay reachable via a non-loopback address -- only '
         'ordinary application errors, never this new 403', () async {

@@ -1,4 +1,4 @@
-# 0044 — Restrict app-facing routes to loopback callers
+# 0044 — Restrict app-facing routes to loopback callers, with an API-key escape hatch for genuine remote self-hosting
 
 ## Context
 Found while reviewing ADR 0041's `PATCH /friends/<nodeId>` addition, but
@@ -49,10 +49,51 @@ username, then hit their app-facing API directly."
   `GET /ping` (already behind `RequestVerifier`), and the entirety of
   `buildSharingFederationRouter` (`/api/v1/sharing/`).
 
+## A regression this caused, and the fix: an API-key escape hatch
+The loopback-only design above broke a real, documented, previously
+working feature: `docs/self-hosting.md` explicitly describes running
+Musicat Server on a separate machine (NAS/VPS, via Docker Compose) and
+pointing the app at it "wherever this stack is reachable" — not
+necessarily the same device. Found and flagged before this ever shipped,
+not after. Jorge's decision: keep loopback-only as the zero-config
+default (which is what the now-standard embedded server, ADR 0040-0043,
+always is), but add an explicit opt-in for genuine remote self-hosting,
+mirroring this project's own existing `SLSKD_API_KEY` pattern.
+
+- **`requireLocal` gains an optional `appApiKey` parameter.** A loopback
+  request is allowed through unconditionally either way — no key ever
+  required for the local/embedded case. A non-loopback request is let
+  through only if `appApiKey` is configured *and* the request presents a
+  matching value in an `X-Api-Key` header, compared with a constant-time
+  check (SHA-256 both sides via `cryptography`, already a dependency and
+  already used this way in `node_identity.dart`, then XOR-folded byte by
+  byte with no early exit) rather than a plain `==` on a secret. Threaded
+  through `startMusicatServer`/`buildFederationRouter` to every
+  `requireLocal` call site; `bin/server.dart` reads it from a new
+  `MUSICAT_APP_API_KEY` env var, documented in `.env.example`,
+  `docker-compose.yml`, `server/README.md`, and `docs/self-hosting.md`.
+- **App side**: `MusicatServerConfig` (Friends/federation) gains an
+  `apiKey` field, shown in `_ServerConfigSheet` only in manual/remote mode
+  (never for the embedded case, which never populates it at all).
+  `FederationClient`/`SharingClient`/`JointPlaylistClient` send it as
+  `X-Api-Key` on every call to *this device's own* server —
+  deliberately never on `FederationClient.addFriend()`'s separate call to
+  a *friend's* server, which has its own, unrelated pairing-code auth.
+  The Soulseek-via-Musicat-Server path (`MusicatServerSoulseekClient`)
+  reuses `SoulseekConfig`'s existing `apiKey` field rather than adding a
+  second one — that field already existed for slskd's own key in "direct
+  slskd" mode and was simply unused in "via Musicat Server" mode; since
+  only one backend mode is ever active, its meaning is just mode-dependent
+  now. Fixed a real UI bug found while wiring this up: the Soulseek
+  settings screen had the API key field's visibility inverted (hidden
+  exactly in "via Musicat Server" mode, the one case that would now need
+  it) — corrected alongside this change.
+
 ## Consequences
-- `dart analyze`/`dart test` clean, 186 passed (up from 182) — verified
-  directly, not just from the implementing agent's report; reviewed the
-  actual diff line by line first.
+- `dart analyze`/`dart test` clean, 196 passed (182 before this ADR's work
+  began) on the server side, and 217 passed on the app side — verified
+  directly, not just from the implementing agents' reports; reviewed each
+  round's actual diff line by line before running anything.
 - **Verified for real, at the socket level, all four scenarios that
   actually matter**: `GET /api/v1/federation/friends` succeeds via
   `127.0.0.1` and gets `403` via this machine's real LAN IP (resolved

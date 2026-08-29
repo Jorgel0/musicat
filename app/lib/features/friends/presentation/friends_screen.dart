@@ -253,6 +253,7 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
   late final TextEditingController _portController;
   late final TextEditingController _myAddressController;
   late final TextEditingController _myDisplayNameController;
+  late final TextEditingController _apiKeyController;
   late bool _useEmbeddedServer;
 
   @override
@@ -265,6 +266,7 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
     _myDisplayNameController = TextEditingController(
       text: config.myDisplayName,
     );
+    _apiKeyController = TextEditingController(text: config.apiKey);
     _useEmbeddedServer = config.useEmbeddedServer;
   }
 
@@ -274,17 +276,20 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
     _portController.dispose();
     _myAddressController.dispose();
     _myDisplayNameController.dispose();
+    _apiKeyController.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
     final myDisplayName = _myDisplayNameController.text.trim();
+    final apiKey = _apiKeyController.text.trim();
     final config = MusicatServerConfig(
       host: _hostController.text.trim(),
       port: int.tryParse(_portController.text.trim()) ?? 8080,
       myPublicAddress: _myAddressController.text.trim(),
       myDisplayName: myDisplayName.isEmpty ? null : myDisplayName,
       useEmbeddedServer: _useEmbeddedServer,
+      apiKey: apiKey.isEmpty ? null : apiKey,
     );
     await ref.read(musicatServerConfigControllerProvider.notifier).save(config);
     if (mounted) Navigator.of(context).pop();
@@ -382,6 +387,14 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
                 controller: _portController,
                 decoration: const InputDecoration(labelText: 'Port'),
                 keyboardType: TextInputType.number,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _apiKeyController,
+                decoration: const InputDecoration(
+                  labelText: 'API key (only needed for a remote server)',
+                ),
+                obscureText: true,
               ),
               const SizedBox(height: 12),
             ],

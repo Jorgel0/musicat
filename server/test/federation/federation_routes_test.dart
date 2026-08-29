@@ -523,5 +523,93 @@ void main() {
       // 403.
       expect(response.statusCode, 401);
     });
+
+    test('a non-loopback caller presenting a key gets 403 when none is '
+        'configured at all (the default -- this handler was built without '
+        'appApiKey)', () async {
+      final response = await handler(
+        Request(
+          'GET',
+          Uri.parse('http://localhost/friends'),
+          headers: {'X-Api-Key': 'some-key'},
+          context: {
+            _connectionInfoContextKey: _FakeConnectionInfo(
+              InternetAddress('8.8.8.8'),
+            ),
+          },
+        ),
+      );
+      expect(response.statusCode, 403);
+    });
+  });
+
+  group('requireLocal MUSICAT_APP_API_KEY opt-in', () {
+    late Handler handlerWithKey;
+
+    setUp(() {
+      handlerWithKey = buildFederationRouter(
+        friendStore,
+        RequestVerifier(friendStore),
+        PairingCodeStore(),
+        puncher,
+        appApiKey: 'correct-key',
+      ).call;
+    });
+
+    Future<Response> nonLoopbackWithKey(
+      String method,
+      String path, {
+      Map<String, String>? headers,
+    }) async => await handlerWithKey(
+      Request(
+        method,
+        Uri.parse('http://localhost$path'),
+        headers: headers,
+        context: {
+          _connectionInfoContextKey: _FakeConnectionInfo(
+            InternetAddress('8.8.8.8'),
+          ),
+        },
+      ),
+    );
+
+    test('a non-loopback caller with the correct X-Api-Key reaches the '
+        'route instead of getting requireLocal\'s 403', () async {
+      final response = await nonLoopbackWithKey(
+        'GET',
+        '/friends',
+        headers: {'X-Api-Key': 'correct-key'},
+      );
+      expect(response.statusCode, isNot(403));
+    });
+
+    test(
+      'a non-loopback caller with a missing X-Api-Key still gets 403',
+      () async {
+        final response = await nonLoopbackWithKey('GET', '/friends');
+        expect(response.statusCode, 403);
+      },
+    );
+
+    test('a non-loopback caller with the wrong X-Api-Key gets 403', () async {
+      final response = await nonLoopbackWithKey(
+        'GET',
+        '/friends',
+        headers: {'X-Api-Key': 'wrong-key'},
+      );
+      expect(response.statusCode, 403);
+    });
+
+    test('a loopback caller succeeds with no key needed at all, even though '
+        'one is configured', () async {
+      final response = await handlerWithKey(
+        Request(
+          'GET',
+          Uri.parse('http://localhost/friends'),
+          context: loopbackContext(),
+        ),
+      );
+      expect(response.statusCode, isNot(403));
+    });
   });
 }

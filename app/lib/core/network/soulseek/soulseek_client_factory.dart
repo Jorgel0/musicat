@@ -14,5 +14,6 @@ SoulseekClient buildSoulseekClient(SoulseekConfig config) =>
       ),
       SoulseekBackendType.musicatServer => MusicatServerSoulseekClient(
         baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
       ),
     };

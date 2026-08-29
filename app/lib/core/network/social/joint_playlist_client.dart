@@ -97,9 +97,17 @@ class JointPlaylistClientException implements Exception {
 /// (ADR 0026/0027) — this node's own view of each playlist, reconciled
 /// with the other participants' copies via an explicit [sync] call.
 class JointPlaylistClient {
-  JointPlaylistClient({required String baseUrl, Dio? dio})
+  /// [apiKey], when non-null and non-empty, is sent as `X-Api-Key` on every
+  /// call — only ever meaningful for a genuinely remote, self-hosted
+  /// server configured to require it (see
+  /// `server/lib/src/http/require_local.dart`); `null`/empty (the default)
+  /// sends no such header.
+  JointPlaylistClient({required String baseUrl, Dio? dio, String? apiKey})
     : _dio = dio ?? Dio() {
     _dio.options.baseUrl = baseUrl;
+    if (apiKey != null && apiKey.isNotEmpty) {
+      _dio.options.headers['X-Api-Key'] = apiKey;
+    }
   }
 
   final Dio _dio;

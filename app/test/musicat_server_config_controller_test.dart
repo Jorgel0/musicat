@@ -63,6 +63,34 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getBool('musicatServerUseEmbeddedServer'), isTrue);
     });
+
+    test('persists apiKey, and loadMusicatServerConfigPreference reads it '
+        'back', () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      await container
+          .read(musicatServerConfigControllerProvider.notifier)
+          .save(_manual.copyWith(apiKey: 'remote-secret'));
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('musicatServerApiKey'), 'remote-secret');
+
+      final loaded = await loadMusicatServerConfigPreference();
+      expect(loaded.apiKey, 'remote-secret');
+    });
+
+    test('an unset/empty apiKey persists and loads back as null', () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      await container
+          .read(musicatServerConfigControllerProvider.notifier)
+          .save(_manual);
+
+      final loaded = await loadMusicatServerConfigPreference();
+      expect(loaded.apiKey, isNull);
+    });
   });
 
   group('effectiveMusicatServerConfigProvider — manual mode', () {
@@ -238,6 +266,48 @@ void main() {
       effective = container.read(effectiveMusicatServerConfigProvider);
       expect(effective.host, 'nas.example');
       expect(effective.port, 9090);
+    });
+  });
+
+  group('effectiveMusicatServerConfigProvider — apiKey', () {
+    test('is preserved unchanged in manual mode', () {
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(
+              _manual.copyWith(apiKey: 'remote-secret'),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      expect(
+        container.read(effectiveMusicatServerConfigProvider).apiKey,
+        'remote-secret',
+      );
+    });
+
+    test('stays null for the embedded server, which never populates it '
+        '(the UI never shows the field in that mode)', () async {
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(_embedded),
+          ),
+          embeddedServerProvider.overrideWith(
+            (ref) async => const EmbeddedServerInfo(port: 54321),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(embeddedServerProvider.future);
+
+      expect(
+        container.read(effectiveMusicatServerConfigProvider).apiKey,
+        isNull,
+      );
     });
   });
 

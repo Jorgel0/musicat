@@ -22,6 +22,7 @@ class MusicatServerConfig {
     required this.myPublicAddress,
     this.myDisplayName,
     this.useEmbeddedServer = false,
+    this.apiKey,
   });
 
   /// How this app reaches its own Musicat Server (e.g. `localhost`) when
@@ -55,6 +56,17 @@ class MusicatServerConfig {
   /// actually knows whether this is a fresh install.
   final bool useEmbeddedServer;
 
+  /// This operator's shared secret for a genuinely remote, self-hosted
+  /// server ([useEmbeddedServer] `false`) that's configured to require one
+  /// (`MUSICAT_APP_API_KEY` server-side — see
+  /// `server/lib/src/http/require_local.dart`). Sent as the `X-Api-Key`
+  /// header on every call this device makes to its own configured server.
+  /// `null`/empty (the default, and always the case for the embedded
+  /// server, which never populates this field) means no header is sent —
+  /// fine for the embedded server (always loopback) and for a remote
+  /// server that hasn't opted into requiring the key.
+  final String? apiKey;
+
   bool get isConfigured => host.isNotEmpty;
 
   String get baseUrl => 'http://$host:$port';
@@ -65,12 +77,14 @@ class MusicatServerConfig {
     String? myPublicAddress,
     String? myDisplayName,
     bool? useEmbeddedServer,
+    String? apiKey,
   }) => MusicatServerConfig(
     host: host ?? this.host,
     port: port ?? this.port,
     myPublicAddress: myPublicAddress ?? this.myPublicAddress,
     myDisplayName: myDisplayName ?? this.myDisplayName,
     useEmbeddedServer: useEmbeddedServer ?? this.useEmbeddedServer,
+    apiKey: apiKey ?? this.apiKey,
   );
 
   static const empty = MusicatServerConfig(

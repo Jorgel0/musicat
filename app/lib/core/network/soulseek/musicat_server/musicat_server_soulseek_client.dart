@@ -12,9 +12,24 @@ import '../soulseek_client.dart';
 /// parsing), so this client is just a JSON decoder for an API that's
 /// already shaped the way the app's domain types expect it. See ADR 0017.
 class MusicatServerSoulseekClient implements SoulseekClient {
-  MusicatServerSoulseekClient({required String baseUrl, Dio? dio})
-    : _dio = dio ?? Dio() {
+  /// [apiKey], when non-null and non-empty, is sent as `X-Api-Key` on every
+  /// call — only ever meaningful for a genuinely remote, self-hosted
+  /// Musicat Server configured to require it (see
+  /// `server/lib/src/http/require_local.dart`); `null`/empty (the default)
+  /// sends no such header. Distinct from `SlskdSoulseekClient`'s own
+  /// `apiKey` (that one authenticates straight to slskd itself, via
+  /// `X-API-Key`) even though both reuse the same `SoulseekConfig.apiKey`
+  /// field — only one backend mode is ever active at a time, so its
+  /// meaning is simply mode-dependent (see `soulseek_client_factory.dart`).
+  MusicatServerSoulseekClient({
+    required String baseUrl,
+    Dio? dio,
+    String? apiKey,
+  }) : _dio = dio ?? Dio() {
     _dio.options.baseUrl = baseUrl;
+    if (apiKey != null && apiKey.isNotEmpty) {
+      _dio.options.headers['X-Api-Key'] = apiKey;
+    }
   }
 
   final Dio _dio;

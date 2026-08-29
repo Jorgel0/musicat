@@ -84,12 +84,18 @@ Response _verificationErrorResponse(
 /// `DELETE /friends/<nodeId>`, this is called by this device's own app,
 /// not by another federation peer, so it isn't behind [RequestVerifier]
 /// either.
+///
+/// [appApiKey] is forwarded to every [requireLocal] call below unchanged --
+/// see that function's own doc comment for what it does. `null`/empty (the
+/// default) reproduces the exact loopback-only behavior from before this
+/// parameter existed.
 Router buildFederationRouter(
   FriendStore friendStore,
   RequestVerifier verifier,
   PairingCodeStore pairingCodes,
   UdpPuncher puncher, {
   String? myRelayUrl,
+  String? appApiKey,
 }) {
   final router = Router();
 
@@ -97,7 +103,7 @@ Router buildFederationRouter(
     '/pairing-codes',
     requireLocal((Request request) async {
       return _json({'code': pairingCodes.generate()}, status: 201);
-    }),
+    }, appApiKey: appApiKey),
   );
 
   router.post('/friends', (Request request) async {
@@ -179,7 +185,7 @@ Router buildFederationRouter(
     requireLocal((Request request) async {
       final friends = await friendStore.loadAll();
       return _json([for (final friend in friends) friend.toJson()]);
-    }),
+    }, appApiKey: appApiKey),
   );
 
   router.delete(
@@ -189,7 +195,7 @@ Router buildFederationRouter(
       await friendStore.remove(nodeId);
       puncher.stopKeepalive(nodeId);
       return Response(204);
-    }),
+    }, appApiKey: appApiKey),
   );
 
   router.patch(
@@ -217,7 +223,7 @@ Router buildFederationRouter(
         return _error('Unknown friend', status: 404);
       }
       return _json(updated.toJson());
-    }),
+    }, appApiKey: appApiKey),
   );
 
   router.get(
@@ -229,7 +235,7 @@ Router buildFederationRouter(
         'connected': puncher.isConnected(nodeId),
         'lastSeen': lastSeen?.toIso8601String(),
       });
-    }),
+    }, appApiKey: appApiKey),
   );
 
   router.get('/ping', (Request request) async {

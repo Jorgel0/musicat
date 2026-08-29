@@ -126,8 +126,9 @@ class _SoulseekSettingsScreenState
           Text(
             isMusicatServer
                 ? 'Musicat searches and downloads via a self-hosted Musicat '
-                      'Server instance, which wraps slskd for you — no API '
-                      'key needed here.'
+                      'Server instance, which wraps slskd for you. An API '
+                      'key is only needed if that instance is a genuinely '
+                      'remote, self-hosted server configured to require one.'
                 : 'Musicat searches and downloads via a self-hosted slskd '
                       'instance. Point it at one on your network below.',
           ),
@@ -145,23 +146,24 @@ class _SoulseekSettingsScreenState
             decoration: const InputDecoration(labelText: 'Port'),
             keyboardType: TextInputType.number,
           ),
-          if (!isMusicatServer) ...[
-            const SizedBox(height: 12),
-            TextField(
-              controller: _apiKeyController,
-              obscureText: _obscureApiKey,
-              decoration: InputDecoration(
-                labelText: 'API key',
-                suffixIcon: IconButton(
-                  icon: Icon(
-                    _obscureApiKey ? Icons.visibility : Icons.visibility_off,
-                  ),
-                  onPressed: () =>
-                      setState(() => _obscureApiKey = !_obscureApiKey),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _apiKeyController,
+            obscureText: _obscureApiKey,
+            decoration: InputDecoration(
+              labelText: 'API key',
+              hintText: isMusicatServer
+                  ? 'Only needed for a remote Musicat Server'
+                  : null,
+              suffixIcon: IconButton(
+                icon: Icon(
+                  _obscureApiKey ? Icons.visibility : Icons.visibility_off,
                 ),
+                onPressed: () =>
+                    setState(() => _obscureApiKey = !_obscureApiKey),
               ),
             ),
-          ],
+          ),
           const SizedBox(height: 16),
           Text(
             'If the reported downloads directory exists on this device, '

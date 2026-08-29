@@ -12,6 +12,7 @@ const _portKey = 'musicatServerPort';
 const _myPublicAddressKey = 'musicatServerMyPublicAddress';
 const _myDisplayNameKey = 'musicatServerMyDisplayName';
 const _useEmbeddedServerKey = 'musicatServerUseEmbeddedServer';
+const _apiKeyKey = 'musicatServerApiKey';
 
 class MusicatServerConfigController extends Notifier<MusicatServerConfig> {
   MusicatServerConfigController([this._initial]);
@@ -29,6 +30,7 @@ class MusicatServerConfigController extends Notifier<MusicatServerConfig> {
     await prefs.setString(_myPublicAddressKey, config.myPublicAddress);
     await prefs.setString(_myDisplayNameKey, config.myDisplayName ?? '');
     await prefs.setBool(_useEmbeddedServerKey, config.useEmbeddedServer);
+    await prefs.setString(_apiKeyKey, config.apiKey ?? '');
   }
 }
 
@@ -83,7 +85,7 @@ final effectiveMusicatServerConfigProvider = Provider<MusicatServerConfig>((
 final federationClientProvider = Provider<FederationClient?>((ref) {
   final config = ref.watch(effectiveMusicatServerConfigProvider);
   if (!config.isConfigured) return null;
-  return FederationClient(baseUrl: config.baseUrl);
+  return FederationClient(baseUrl: config.baseUrl, apiKey: config.apiKey);
 });
 
 /// `null` when no Musicat Server is configured yet, same as
@@ -91,7 +93,7 @@ final federationClientProvider = Provider<FederationClient?>((ref) {
 final sharingClientProvider = Provider<SharingClient?>((ref) {
   final config = ref.watch(effectiveMusicatServerConfigProvider);
   if (!config.isConfigured) return null;
-  return SharingClient(baseUrl: config.baseUrl);
+  return SharingClient(baseUrl: config.baseUrl, apiKey: config.apiKey);
 });
 
 /// `null` when no Musicat Server is configured yet, same as
@@ -99,7 +101,7 @@ final sharingClientProvider = Provider<SharingClient?>((ref) {
 final jointPlaylistClientProvider = Provider<JointPlaylistClient?>((ref) {
   final config = ref.watch(effectiveMusicatServerConfigProvider);
   if (!config.isConfigured) return null;
-  return JointPlaylistClient(baseUrl: config.baseUrl);
+  return JointPlaylistClient(baseUrl: config.baseUrl, apiKey: config.apiKey);
 });
 
 /// This device's own full node info (id, public key, relay status), as
@@ -131,6 +133,7 @@ Future<MusicatServerConfig> loadMusicatServerConfigPreference() async {
   // explicitly saved a choice either way, that persisted value wins from
   // then on, regardless of platform.
   final persistedUseEmbeddedServer = prefs.getBool(_useEmbeddedServerKey);
+  final apiKey = prefs.getString(_apiKeyKey);
   return MusicatServerConfig(
     host: prefs.getString(_hostKey) ?? '',
     port: prefs.getInt(_portKey) ?? 8080,
@@ -139,5 +142,6 @@ Future<MusicatServerConfig> loadMusicatServerConfigPreference() async {
         ? null
         : myDisplayName,
     useEmbeddedServer: persistedUseEmbeddedServer ?? embeddedServerSupported,
+    apiKey: (apiKey == null || apiKey.isEmpty) ? null : apiKey,
   );
 }

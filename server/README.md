@@ -123,6 +123,17 @@ Configuration is via environment variables:
 - `MUSICAT_UDP_PORT` — local UDP port for NAT hole-punching (default:
   random, OS-assigned). Set this and forward it on your router if you
   want a stable, predictable port for federation traversal.
+- `MUSICAT_APP_API_KEY` — a shared secret (default: unset) that lets a
+  non-loopback caller reach the app-facing routes below (Soulseek
+  config/search, friend management, library/shared-track management,
+  joint playlists) — these normally only accept requests from this exact
+  machine's own loopback interface. Only needed if you're running this
+  server on a separate machine from the app (see
+  [`docs/self-hosting.md`](../docs/self-hosting.md)); leave unset for the
+  now-default case of the app embedding its own local server, which is
+  always loopback and never needs this. When set, a non-loopback request
+  must present the same value in an `X-Api-Key` header, or it gets `403`
+  exactly as it would with no key configured at all.
 
 ## Running with Docker
 

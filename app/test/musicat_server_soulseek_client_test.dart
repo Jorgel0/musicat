@@ -17,6 +17,62 @@ MusicatServerSoulseekClient _clientWith(
 }
 
 void main() {
+  group('X-Api-Key header', () {
+    test('is sent when apiKey is configured (a remote, self-hosted Musicat '
+        'Server opted into requiring one)', () async {
+      late RequestOptions seen;
+      final adapter = FakeHttpAdapter((options) {
+        seen = options;
+        return const FakeHttpResponse(200, {'connected': true});
+      });
+      final dio = Dio()..httpClientAdapter = adapter;
+      final client = MusicatServerSoulseekClient(
+        baseUrl: 'http://musicat-server.test',
+        dio: dio,
+        apiKey: 'secret-key',
+      );
+
+      await client.isConnected();
+
+      expect(seen.headers['X-Api-Key'], 'secret-key');
+    });
+
+    test('is not sent when apiKey is null (the default)', () async {
+      late RequestOptions seen;
+      final adapter = FakeHttpAdapter((options) {
+        seen = options;
+        return const FakeHttpResponse(200, {'connected': true});
+      });
+      final dio = Dio()..httpClientAdapter = adapter;
+      final client = MusicatServerSoulseekClient(
+        baseUrl: 'http://musicat-server.test',
+        dio: dio,
+      );
+
+      await client.isConnected();
+
+      expect(seen.headers.containsKey('X-Api-Key'), isFalse);
+    });
+
+    test('is not sent when apiKey is empty', () async {
+      late RequestOptions seen;
+      final adapter = FakeHttpAdapter((options) {
+        seen = options;
+        return const FakeHttpResponse(200, {'connected': true});
+      });
+      final dio = Dio()..httpClientAdapter = adapter;
+      final client = MusicatServerSoulseekClient(
+        baseUrl: 'http://musicat-server.test',
+        dio: dio,
+        apiKey: '',
+      );
+
+      await client.isConnected();
+
+      expect(seen.headers.containsKey('X-Api-Key'), isFalse);
+    });
+  });
+
   group('isConnected', () {
     test('true when the server reports connected', () async {
       late RequestOptions seen;

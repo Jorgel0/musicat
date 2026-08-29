@@ -88,8 +88,9 @@ Router _buildRouter(
   Router federationRouter,
   Router libraryRouter,
   Router playlistRouter,
-  Router sharingFederationRouter,
-) {
+  Router sharingFederationRouter, {
+  String? appApiKey,
+}) {
   return Router()
     ..get('/', (Request req) => _jsonResponse({'status': 'ok'}))
     ..get(
@@ -109,7 +110,10 @@ Router _buildRouter(
     // (see require_local.dart's doc comment). federationRouter wraps its
     // own handful of app-facing routes internally -- see
     // buildFederationRouter's doc comment in federation_routes.dart.
-    ..mount('/api/v1/soulseek/', requireLocal(soulseekRouter.call))
+    ..mount(
+      '/api/v1/soulseek/',
+      requireLocal(soulseekRouter.call, appApiKey: appApiKey),
+    )
     ..mount('/api/v1/federation/', federationRouter.call)
     // Each of these is a sibling of /api/v1/federation/, not nested under
     // it: shelf_router's mount() matches on prefix in registration order
@@ -117,14 +121,20 @@ Router _buildRouter(
     // under an already-mounted prefix would silently never be reached --
     // the parent mount's wildcard would swallow it first.
     ..mount('/api/v1/sharing/', sharingFederationRouter.call)
-    ..mount('/api/v1/library/', requireLocal(libraryRouter.call))
+    ..mount(
+      '/api/v1/library/',
+      requireLocal(libraryRouter.call, appApiKey: appApiKey),
+    )
     // No trailing slash here, unlike the mounts above: buildPlaylistRouter
     // has a genuine bare-collection route ('/', for create/list) and
     // shelf_router's mount() only matches a bare `/api/v1/playlists`
     // request (no trailing slash) when the prefix itself is given without
     // one -- with a trailing slash, only `/api/v1/playlists/<anything>`
     // (note the required slash) would ever match.
-    ..mount('/api/v1/playlists', requireLocal(playlistRouter.call));
+    ..mount(
+      '/api/v1/playlists',
+      requireLocal(playlistRouter.call, appApiKey: appApiKey),
+    );
 }
 
 /// Starts a full Musicat Server: loads/creates this node's identity from
@@ -154,6 +164,15 @@ Router _buildRouter(
 /// always printed (identity, NAT candidate, relay status, listening port)
 /// -- omit it (the default) to run silently, which is what an in-process
 /// embedding wants; `bin/server.dart` passes `print`.
+/// [appApiKey]: an operator-configured shared secret (`MUSICAT_APP_API_KEY`)
+/// that lets a non-loopback caller reach the app-facing routes this server
+/// would otherwise restrict to its own device -- the explicit opt-in for
+/// genuinely remote, intentionally self-hosted setups (`docs/
+/// self-hosting.md`); see `requireLocal`'s own doc comment
+/// (`src/http/require_local.dart`) for exactly how it's checked. Omit or
+/// leave empty (the default) to keep today's loopback-only behavior --
+/// what the embedded-in-the-app case (ADR 0040/0041) always wants, since
+/// it's always loopback and never needs this at all.
 Future<MusicatServerHandle> startMusicatServer({
   required Directory dataDir,
   int port = 8080,
@@ -161,6 +180,7 @@ Future<MusicatServerHandle> startMusicatServer({
   String? relayUrl,
   SlskdConfig? slskdConfig,
   void Function(String message)? onLog,
+  String? appApiKey,
 }) async {
   final ip = InternetAddress.anyIPv4;
   final log = onLog ?? (String message) {};
@@ -224,6 +244,7 @@ Future<MusicatServerHandle> startMusicatServer({
     PairingCodeStore(),
     puncher,
     myRelayUrl: myRelayUrl,
+    appApiKey: appApiKey,
   );
 
   final sharedTrackStore = SharedTrackStore(dataDir);
@@ -257,6 +278,7 @@ Future<MusicatServerHandle> startMusicatServer({
           libraryRouter,
           playlistRouter,
           sharingFederationRouter,
+          appApiKey: appApiKey,
         ).call,
       );
   realHandler = handler;

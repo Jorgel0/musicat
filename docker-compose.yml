@@ -33,5 +33,6 @@ services:
       SLSKD_PORT: "5030"
       SLSKD_API_KEY: ${SLSKD_API_KEY}
       MUSICAT_DATA_DIR: /app/data
+      MUSICAT_APP_API_KEY: ${MUSICAT_APP_API_KEY}
     volumes:
       - ./data/musicat-server:/app/data

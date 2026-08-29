@@ -86,8 +86,17 @@ class SharingClientException implements Exception {
 /// since the app itself never holds this node's signing key — the server
 /// proxies them, signed, exactly like it does for joint-playlist sync.
 class SharingClient {
-  SharingClient({required String baseUrl, Dio? dio}) : _dio = dio ?? Dio() {
+  /// [apiKey], when non-null and non-empty, is sent as `X-Api-Key` on every
+  /// call — only ever meaningful for a genuinely remote, self-hosted
+  /// server configured to require it (see
+  /// `server/lib/src/http/require_local.dart`); `null`/empty (the default)
+  /// sends no such header.
+  SharingClient({required String baseUrl, Dio? dio, String? apiKey})
+    : _dio = dio ?? Dio() {
     _dio.options.baseUrl = baseUrl;
+    if (apiKey != null && apiKey.isNotEmpty) {
+      _dio.options.headers['X-Api-Key'] = apiKey;
+    }
   }
 
   final Dio _dio;

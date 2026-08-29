@@ -1,7 +1,19 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:shelf/shelf.dart';
+
+/// The header a non-loopback caller must present a matching value in for
+/// [requireLocal] to let it through -- see its `appApiKey` parameter. Chosen
+/// distinct from `X-API-Key` (`slskd_gateway.dart`'s header, presented
+/// *outbound* to slskd) even though the two only differ in case -- headers
+/// are case-insensitive on both ends anyway -- because they authenticate
+/// entirely different things: that one lets this server talk to slskd, this
+/// one lets a genuinely remote, explicitly self-hosted Musicat Server (see
+/// `docs/self-hosting.md`) accept calls from an app that isn't running on
+/// the same machine.
+const appApiKeyHeader = 'X-Api-Key';
 
 Response _error(String message, {required int status}) => Response(
   status,
@@ -9,11 +21,38 @@ Response _error(String message, {required int status}) => Response(
   headers: {'content-type': 'application/json'},
 );
 
+/// Compares [a] and [b] for equality without leaking how many leading
+/// characters matched through response-timing -- the usual risk of a plain
+/// `==` on a secret. Hashes both sides first (SHA-256, via the
+/// `cryptography` package this project already depends on and already uses
+/// this exact way elsewhere -- see `node_identity.dart`) so both digests are
+/// always the same fixed length regardless of [a]/[b]'s own lengths, then
+/// XOR-folds every byte of both digests unconditionally -- no early return
+/// the moment a mismatch is found, which is what makes a naive comparison
+/// loop timing-safe in the first place.
+Future<bool> _constantTimeEquals(String a, String b) async {
+  final hashA = await Sha256().hash(utf8.encode(a));
+  final hashB = await Sha256().hash(utf8.encode(b));
+  var difference = 0;
+  for (var i = 0; i < hashA.bytes.length; i++) {
+    difference |= hashA.bytes[i] ^ hashB.bytes[i];
+  }
+  return difference == 0;
+}
+
 /// Wraps [inner] so it only ever runs for a request that arrived on this
 /// exact machine's own loopback interface (127.0.0.1 / ::1) -- i.e. this
 /// device's own app talking to its own local server, never a friend's
 /// server, another device on the LAN, or anyone reaching this node's public
-/// IP or relay tunnel.
+/// IP or relay tunnel -- **unless** [appApiKey] is configured and the
+/// request presents a matching one, the explicit opt-in escape hatch for
+/// genuinely remote, intentionally self-hosted setups (see
+/// `docs/self-hosting.md`): running Musicat Server on a separate machine
+/// (NAS/VPS) and pointing the app at it over the real network, which the
+/// loopback-only default would otherwise make impossible even for an
+/// operator who wants exactly that. The embedded-server case (ADR
+/// 0040-0043), which is now the default and never needs any of this, is
+/// completely unaffected either way -- it's always loopback.
 ///
 /// This is how every *app-facing* route (this node's own Soulseek backend,
 /// its own shared-track/library bookkeeping, its own joint playlists, and a
@@ -50,16 +89,37 @@ Response _error(String message, {required int status}) => Response(
 /// an app-facing route must stay unreachable through it too. Treating
 /// "missing" as "trusted" instead would reopen exactly the hole this closes
 /// for anyone routing through the relay.
-Handler requireLocal(Handler inner) {
+///
+/// [appApiKey], when non-null and non-empty, is this operator's configured
+/// shared secret (`MUSICAT_APP_API_KEY` -- mirrors the existing
+/// `SLSKD_API_KEY` pattern, `server/README.md`/`docs/self-hosting.md`). A
+/// non-loopback request is let through anyway if it carries a matching
+/// value in the [appApiKeyHeader] header, compared with [_constantTimeEquals]
+/// rather than a plain string `==` since this is a secret. A non-loopback
+/// request with that header missing, empty, or wrong -- or [appApiKey] left
+/// unconfigured entirely, the default -- gets the same `403` as before; a
+/// loopback request never needs the key at all, [appApiKey] configured or
+/// not.
+Handler requireLocal(Handler inner, {String? appApiKey}) {
   return (Request request) async {
     final connectionInfo = request.context['shelf.io.connection_info'];
-    if (connectionInfo is! HttpConnectionInfo ||
-        !connectionInfo.remoteAddress.isLoopback) {
-      return _error(
-        'This endpoint is only reachable from this device itself.',
-        status: 403,
-      );
+    final isLoopback =
+        connectionInfo is HttpConnectionInfo &&
+        connectionInfo.remoteAddress.isLoopback;
+    if (isLoopback) {
+      return inner(request);
     }
-    return inner(request);
+
+    if (appApiKey != null && appApiKey.isNotEmpty) {
+      final provided = request.headers[appApiKeyHeader];
+      if (provided != null && await _constantTimeEquals(provided, appApiKey)) {
+        return inner(request);
+      }
+    }
+
+    return _error(
+      'This endpoint is only reachable from this device itself.',
+      status: 403,
+    );
   };
 }

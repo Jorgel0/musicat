@@ -23,6 +23,9 @@ Musicat app then points at Musicat Server from Settings → Soulseek backend.
    - `SLSKD_API_KEY` — a shared secret between slskd and Musicat Server.
      Generate one with `openssl rand -hex 32` (or `docker run --rm
      slskd/slskd:latest --generate-secret 32`).
+   - `MUSICAT_APP_API_KEY` — only needed if the app will reach this stack
+     over the real network rather than running on the same machine (see
+     step 3 below). Generate one the same way: `openssl rand -hex 32`.
 
 2. Start the stack:
    ```
@@ -35,7 +38,25 @@ Musicat app then points at Musicat Server from Settings → Soulseek backend.
 3. In the Musicat app, go to **Settings → Soulseek backend**, select
    **Musicat Server**, and set the host/port to wherever this stack is
    reachable (`localhost:8080` if it's running on the same machine as the
-   app). Tap **Test connection** to confirm.
+   app). If this stack is running on a *different* machine than the app
+   (a NAS or VPS, say) rather than `localhost`, also set the API key you
+   generated for `MUSICAT_APP_API_KEY` above in the same settings screen —
+   without it, this server rejects every request that doesn't arrive from
+   its own machine, by design (see "Remote access" below). Tap **Test
+   connection** to confirm.
+
+## Remote access
+
+By default, Musicat Server only accepts requests from its own machine —
+this is what makes the common case (the app embedding its own local
+server, needing no setup at all) safe by default. Pointing the app at a
+Musicat Server running somewhere else, as described in step 3 above, is
+the one case where this needs to be relaxed: set `MUSICAT_APP_API_KEY` in
+`.env` (a random secret, generated the same way as `SLSKD_API_KEY` above)
+and configure that *same* key in the app's Musicat Server settings. A
+request without the right key still gets rejected exactly as before. If
+you're only ever going to run the app on the same machine as this stack,
+you don't need to set this at all.
 
 ## Notes
 

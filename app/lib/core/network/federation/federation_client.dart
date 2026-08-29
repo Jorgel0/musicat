@@ -92,8 +92,20 @@ class FederationClientException implements Exception {
 /// [SoulseekClient]/`MusicatServerSoulseekClient` (ADR 0017), even though
 /// both ultimately point at the same running Musicat Server instance.
 class FederationClient {
-  FederationClient({required String baseUrl, Dio? dio}) : _dio = dio ?? Dio() {
+  /// [apiKey], when non-null and non-empty, is sent as `X-Api-Key` on every
+  /// call this makes to [baseUrl] — this device's own server. Only ever
+  /// meaningful for a genuinely remote, self-hosted server configured to
+  /// require it (see `server/lib/src/http/require_local.dart`); `null` or
+  /// empty (the default) sends no such header. Deliberately never applied
+  /// to [addFriend]'s own separate, non-injectable `Dio` pointed at a
+  /// *friend's* server — that call is federation-facing and has its own,
+  /// unrelated auth via the pairing code itself.
+  FederationClient({required String baseUrl, Dio? dio, String? apiKey})
+    : _dio = dio ?? Dio() {
     _dio.options.baseUrl = baseUrl;
+    if (apiKey != null && apiKey.isNotEmpty) {
+      _dio.options.headers['X-Api-Key'] = apiKey;
+    }
   }
 
   final Dio _dio;
