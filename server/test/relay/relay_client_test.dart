@@ -333,6 +333,58 @@ void main() {
       expect(result.success, isFalse);
       expect(result.error, isNotNull);
     });
+
+    test('a claim in flight when the tunnel drops fails promptly, and a '
+        'subsequent claim on the reconnected tunnel succeeds right away '
+        '(regression test for issue #9)', () async {
+      client = RelayClient(
+        identity: identity,
+        localHandler: (request) async => Response.ok('unused'),
+        initialReconnectDelay: const Duration(milliseconds: 50),
+        maxReconnectDelay: const Duration(milliseconds: 200),
+      );
+      expect(await client.connect(wsUrl), isTrue);
+
+      // Fire the claim, then sever the tunnel from the hub side without
+      // ever awaiting in between -- claimUsername()'s own synchronous
+      // prefix (setting _pendingClaim, writing the message to the socket)
+      // and hub.disconnect()'s own synchronous prefix (removing the
+      // tunnel) both run to completion before either yields to the event
+      // loop, so the drop is guaranteed to land while this claim is still
+      // genuinely in flight, exactly like a real network blip mid-claim.
+      final claimFuture = client.claimUsername('mid-flight');
+      await hub.disconnect(identity.nodeId);
+
+      final stopwatch = Stopwatch()..start();
+      final result = await claimFuture;
+      stopwatch.stop();
+
+      expect(result.success, isFalse);
+      expect(result.error, 'Connection to the relay was lost, try again');
+      // The crux of the regression: without the fix, nothing completes
+      // _pendingClaim on a drop, so this sits until claimUsername()'s own
+      // hardcoded 10-second internal timeout finally fires. With the fix,
+      // it fails as soon as _serve()'s cleanup runs -- well under a
+      // second on a local loopback connection.
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
+
+      // The automatic reconnect (ADR 0036) should re-establish a healthy
+      // tunnel shortly after.
+      await _waitUntil(
+        () => hub.isConnected(identity.nodeId),
+        timeout: const Duration(seconds: 5),
+      );
+      expect(client.isConnected, isTrue);
+
+      // A fresh claim on the now-healthy tunnel must succeed immediately --
+      // not get rejected with "Another username claim is already in
+      // progress" because of a stale _pendingClaim left over from the
+      // dropped one.
+      final freshResult = await client.claimUsername('mid-flight');
+      expect(freshResult.success, isTrue);
+      expect(freshResult.error, isNull);
+      expect(await hub.usernames.lookup('mid-flight'), identity.nodeId);
+    });
   });
 }
 

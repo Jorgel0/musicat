@@ -77,6 +77,64 @@ instead of ever typing an IP address.
   not oversights, worth revisiting if they turn out to matter in
   practice.
 - With this, Fase 4.6's three items (crossed-name fix, embedded server,
-  username directory) are all complete. Next: a `/dev-team` QA pass
-  (`bug-hunter` + `feedback-critic`) on the whole item, per Jorge's
-  explicit request — not yet run as of this commit.
+  username directory) are all complete.
+
+## QA pass (bug-hunter + feedback-critic), two real bugs found and fixed
+Run per Jorge's explicit request, the first QA pass in this whole Fase
+4.6 arc (items 1/2 and the security fix shipped without one — see the
+Consequences note below).
+- **`UsernameDirectoryStore.claim()` had a real race**: its load-mutate-
+  save cycle had no locking, so two different nodes claiming the same
+  username at nearly the same moment could both read the file before
+  either wrote it back — both got `success: true`, but only one actually
+  ended up owning it afterward, silently breaking the documented
+  first-come-first-served invariant. Fixed with a plain `Future`-chaining
+  mutex serializing `claim()` calls within one process (not a
+  multi-process concern — a real deployment only ever runs one relay
+  process against a given data directory).
+- **`RelayClient.claimUsername`'s pending claim wasn't cleared on a
+  tunnel drop**: if the connection dropped mid-claim, the existing
+  auto-reconnect (ADR 0036) could re-establish a healthy tunnel within
+  milliseconds, but a *new* claim on that healthy tunnel still got
+  rejected with a misleading "already in progress" error for up to the
+  full 10-second internal timeout, because nothing told the stale claim
+  it was already dead. Fixed by having the same drop-detection that
+  already clears `_channel` and schedules reconnection also fail any
+  pending claim immediately — mirroring `RelayHub.disconnect()`'s
+  existing precedent of not making callers wait out a timeout for
+  something already known to be gone.
+- Both confirmed with real repros before fixing (concurrent `claim()`
+  calls on a real `UsernameDirectoryStore`; a real `RelayClient`/
+  `RelayHub` pair with a tunnel dropped mid-claim), and regression tests
+  added proving each fails pre-fix and passes post-fix. Server test count
+  223 → 228.
+- feedback-critic independently flagged the same disconnect-handling gap
+  from reading the code alone (before bug-hunter's repro confirmed it) —
+  a good sign the QA process is catching real things, not just agreeing
+  with itself.
+- feedback-critic also raised two things not fixed in this pass, worth a
+  conscious decision rather than silent scope creep: (1) `addFriend()`
+  has always hardcoded `http://` regardless of whether a relay is
+  `ws://` or `wss://` (pre-existing since ADR 0032/0033, not introduced
+  here) — this commit is what turns that from a rare fallback path into
+  the routine "add a friend" flow, so a `wss://`-fronted relay's traffic
+  would silently downgrade to plaintext; (2) there is no way in the app
+  for a user to see their own currently-claimed username before
+  overwriting it by claiming a new one (`MyNodeInfo` has no `username`
+  field, and the relay has no reverse-lookup-by-nodeId route). Neither
+  is fixed here — flagged for a decision on prioritization.
+
+## Consequences (QA scope)
+This QA pass covered only this item (commit `84a1ed2`). The three prior
+Fase 4.6 commits — the crossed-name fix, the embedded server on both
+platforms, and the loopback-restriction security fix — shipped without
+a bug-hunter/feedback-critic pass. feedback-critic explicitly pushed
+back on treating this item's clean result as reassurance about those:
+the embedded-server work touches exactly the kind of process-lifecycle/
+platform-specific-startup territory this project's own history (the
+`IOWebSocketChannel` double-error bug, two separate Riverpod-lifecycle
+crashes) says tends to hide bugs until poked at adversarially, and the
+loopback-restriction fix is a security control whose failure mode is
+silent by nature — a bypass wouldn't crash, it would just quietly work.
+Not addressed in this ADR; a decision for Jorge on whether/when to run
+that QA retroactively.

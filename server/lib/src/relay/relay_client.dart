@@ -98,7 +98,11 @@ class RelayClient {
   /// realistically only ever one claim happening at a time (driven by the
   /// app's own UI), so a single field is enough; no need for the
   /// [RelayRequestMessage.requestId]-keyed correlation [RelayHub]'s HTTP
-  /// forwarding needs to juggle many requests at once.
+  /// forwarding needs to juggle many requests at once. If the tunnel it was
+  /// sent on drops before a result arrives, [_serve]'s `finally` fails it
+  /// immediately and clears this field, rather than leaving it to expire on
+  /// [claimUsername]'s own internal timeout -- see that method's doc
+  /// comment.
   Completer<RelayClaimUsernameResult>? _pendingClaim;
 
   bool get isConnected => _channel != null;
@@ -229,7 +233,13 @@ class RelayClient {
   /// [_serve]) -- fine as long as only one claim is ever in flight at a
   /// time, which holds here since this is only ever driven by the app's own
   /// UI, never something needing the general per-request correlation
-  /// [RelayHub]'s HTTP forwarding uses `requestId`s for.
+  /// [RelayHub]'s HTTP forwarding uses `requestId`s for. If the tunnel this
+  /// claim was sent on drops before a result arrives, [_serve]'s cleanup
+  /// fails it promptly with a clear error (rather than this call sitting
+  /// idle until its own internal timeout below fires) *and* clears
+  /// [_pendingClaim], so a fresh call made right after a successful
+  /// automatic reconnect (ADR 0036) is never blocked by a stale, doomed
+  /// claim from the dead connection.
   Future<RelayClaimUsernameResult> claimUsername(String username) async {
     final channel = _channel;
     if (channel == null) {
@@ -284,8 +294,37 @@ class RelayClient {
     } catch (_) {
       // Tunnel dropped -- handled below, same as a clean stream end.
     } finally {
-      if (_channel == channel) {
+      // Whether *this* connection was still the one _channel pointed to --
+      // used below to decide whether a pending claim belongs to this
+      // (now-dead) connection or, in the rare case a newer connect()
+      // already replaced it before this cleanup ran, to a different,
+      // still-healthy one that must be left alone.
+      final wasActiveChannel = _channel == channel;
+      if (wasActiveChannel) {
         _channel = null;
+      }
+      // Mirrors RelayHub.disconnect()'s own precedent
+      // (_TunnelDisconnectedException, relay_hub.dart): fail a claim still
+      // waiting on this tunnel immediately instead of leaving it to expire
+      // on claimUsername()'s own 10s internal timeout -- otherwise a claim
+      // genuinely in flight when the tunnel drops leaves _pendingClaim set
+      // for up to that whole timeout, and claimUsername() unconditionally
+      // rejects any *new* claim while it's set, even once the automatic
+      // reconnect below has already re-established a perfectly healthy
+      // tunnel (often within milliseconds).
+      if (wasActiveChannel) {
+        final pendingClaim = _pendingClaim;
+        if (pendingClaim != null) {
+          _pendingClaim = null;
+          if (!pendingClaim.isCompleted) {
+            pendingClaim.complete(
+              const RelayClaimUsernameResult(
+                success: false,
+                error: 'Connection to the relay was lost, try again',
+              ),
+            );
+          }
+        }
       }
       // Only reconnect if this drop wasn't the result of an intentional
       // close() (which clears _relayUrl first, see its doc comment) *and*

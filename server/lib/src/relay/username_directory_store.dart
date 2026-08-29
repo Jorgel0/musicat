@@ -95,6 +95,25 @@ class UsernameDirectoryStore implements UsernameDirectory {
 
   final Directory dataDirectory;
 
+  /// Serializes [claim] calls on *this* store instance so one call's
+  /// load-mutate-save sequence can never interleave with another's --
+  /// without this, two concurrent claims for the *same* username by two
+  /// *different* nodeIds could both read the file before either writes it
+  /// back, both see it as unclaimed, and both report `success: true` even
+  /// though only one of them ends up actually owning it (see the regression
+  /// test for the confirmed repro). Each call chains onto whatever the
+  /// previous one already scheduled, so only one load-mutate-save cycle is
+  /// ever in flight at a time no matter how many callers call [claim]
+  /// concurrently -- a plain `Future`-chaining mutex is enough here since
+  /// this only needs to serialize concurrent *async calls within this one
+  /// running process*, not coordinate multiple OS processes sharing one
+  /// file (a real deployment only ever runs one relay process against a
+  /// given data directory). `catchError` on the chained link (not on what
+  /// callers see) keeps a failed claim from poisoning the lock forever --
+  /// the caller of the failing claim still sees its real error via [claim]'s
+  /// own returned `Future`.
+  Future<void> _claimLock = Future<void>.value();
+
   File get _file => File(p.join(dataDirectory.path, 'usernames.json'));
 
   Future<Map<String, String>> _loadAll() async {
@@ -110,7 +129,17 @@ class UsernameDirectoryStore implements UsernameDirectory {
   }
 
   @override
-  Future<UsernameClaimResult> claim(String username, String nodeId) async {
+  Future<UsernameClaimResult> claim(String username, String nodeId) {
+    final previous = _claimLock;
+    final result = previous.then((_) => _claimLocked(username, nodeId));
+    _claimLock = result.then((_) {}, onError: (_) {});
+    return result;
+  }
+
+  Future<UsernameClaimResult> _claimLocked(
+    String username,
+    String nodeId,
+  ) async {
     final usernames = await _loadAll();
     final result = _claimIn(usernames, username, nodeId);
     if (result.success) await _save(usernames);
