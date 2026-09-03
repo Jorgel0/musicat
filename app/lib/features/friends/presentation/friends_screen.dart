@@ -254,6 +254,7 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
   late final TextEditingController _myAddressController;
   late final TextEditingController _myDisplayNameController;
   late final TextEditingController _apiKeyController;
+  late final TextEditingController _relayUrlController;
   final _usernameController = TextEditingController();
   late bool _useEmbeddedServer;
   bool _claimingUsername = false;
@@ -270,6 +271,7 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
       text: config.myDisplayName,
     );
     _apiKeyController = TextEditingController(text: config.apiKey);
+    _relayUrlController = TextEditingController(text: config.relayUrl);
     _useEmbeddedServer = config.useEmbeddedServer;
   }
 
@@ -280,6 +282,7 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
     _myAddressController.dispose();
     _myDisplayNameController.dispose();
     _apiKeyController.dispose();
+    _relayUrlController.dispose();
     _usernameController.dispose();
     super.dispose();
   }
@@ -321,6 +324,7 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
   Future<void> _save() async {
     final myDisplayName = _myDisplayNameController.text.trim();
     final apiKey = _apiKeyController.text.trim();
+    final relayUrl = _relayUrlController.text.trim();
     final config = MusicatServerConfig(
       host: _hostController.text.trim(),
       port: int.tryParse(_portController.text.trim()) ?? 8080,
@@ -328,6 +332,7 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
       myDisplayName: myDisplayName.isEmpty ? null : myDisplayName,
       useEmbeddedServer: _useEmbeddedServer,
       apiKey: apiKey.isEmpty ? null : apiKey,
+      relayUrl: relayUrl.isEmpty ? null : relayUrl,
     );
     await ref.read(musicatServerConfigControllerProvider.notifier).save(config);
     if (mounted) Navigator.of(context).pop();
@@ -396,6 +401,17 @@ class _ServerConfigSheetState extends ConsumerState<_ServerConfigSheet> {
             if (_useEmbeddedServer && embeddedServerSupported) ...[
               _EmbeddedServerStatusRow(
                 embeddedAsync: ref.watch(embeddedServerProvider),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _relayUrlController,
+                decoration: const InputDecoration(
+                  labelText: 'Relay URL (optional)',
+                  hintText:
+                      'Lets this device stay reachable by friends on a '
+                      'different network, not just this one. Takes effect '
+                      'the next time you restart the app.',
+                ),
               ),
               const SizedBox(height: 12),
               // Android only: on Linux/Windows this app runs full-time

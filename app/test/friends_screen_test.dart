@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:musicat/core/embedded_server/embedded_server.dart';
 import 'package:musicat/core/invite/invite_uri.dart';
 import 'package:musicat/core/invite/pending_invite.dart';
 import 'package:musicat/core/network/federation/federation_client.dart';
@@ -243,6 +244,227 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Relay: not connected'), findsOneWidget);
+    });
+  });
+
+  group('_ServerConfigSheet "Relay URL (optional)" field', () {
+    testWidgets('is shown when using the built-in server, with hint text about '
+        'cross-network reachability and needing a restart to take effect', (
+      tester,
+    ) async {
+      final client = _clientWith((options) {
+        if (options.path == '/api/v1/node') {
+          return const FakeHttpResponse(200, {
+            'nodeId': 'my-node',
+            'publicKeyBase64': 'pk',
+          });
+        }
+        throw StateError('Unexpected request: ${options.path}');
+      });
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(
+              const MusicatServerConfig(
+                host: '',
+                port: 8080,
+                myPublicAddress: 'me.example:8080',
+                useEmbeddedServer: true,
+              ),
+            ),
+          ),
+          federationClientProvider.overrideWithValue(client),
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(const FriendsState()),
+          ),
+          embeddedServerProvider.overrideWith(
+            (ref) async => const EmbeddedServerInfo(port: 12345),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Musicat Server settings'));
+      await tester.pumpAndSettle();
+
+      final field = tester.widget<TextField>(
+        find.widgetWithText(TextField, 'Relay URL (optional)'),
+      );
+      expect(field.decoration?.hintText, contains('different network'));
+      expect(field.decoration?.hintText, contains('restart'));
+    });
+
+    testWidgets('is hidden when not using the built-in server (a manually '
+        'self-hosted server sets its own relay independently, through its '
+        'own environment, not through this app)', (tester) async {
+      final client = _clientWith((options) {
+        if (options.path == '/api/v1/node') {
+          return const FakeHttpResponse(200, {
+            'nodeId': 'my-node',
+            'publicKeyBase64': 'pk',
+          });
+        }
+        throw StateError('Unexpected request: ${options.path}');
+      });
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(_configured),
+          ),
+          federationClientProvider.overrideWithValue(client),
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(const FriendsState()),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Musicat Server settings'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.widgetWithText(TextField, 'Relay URL (optional)'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('pre-fills from the current config, and saving persists it', (
+      tester,
+    ) async {
+      final client = _clientWith((options) {
+        if (options.path == '/api/v1/node') {
+          return const FakeHttpResponse(200, {
+            'nodeId': 'my-node',
+            'publicKeyBase64': 'pk',
+          });
+        }
+        throw StateError('Unexpected request: ${options.path}');
+      });
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(
+              const MusicatServerConfig(
+                host: '',
+                port: 8080,
+                myPublicAddress: 'me.example:8080',
+                useEmbeddedServer: true,
+                relayUrl: 'wss://old-relay.example/connect',
+              ),
+            ),
+          ),
+          federationClientProvider.overrideWithValue(client),
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(const FriendsState()),
+          ),
+          embeddedServerProvider.overrideWith(
+            (ref) async => const EmbeddedServerInfo(port: 12345),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Musicat Server settings'));
+      await tester.pumpAndSettle();
+
+      final relayField = tester.widget<TextField>(
+        find.widgetWithText(TextField, 'Relay URL (optional)'),
+      );
+      expect(relayField.controller!.text, 'wss://old-relay.example/connect');
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Relay URL (optional)'),
+        'wss://new-relay.example/connect',
+      );
+      await tester.ensureVisible(find.widgetWithText(FilledButton, 'Save'));
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      expect(
+        container.read(musicatServerConfigControllerProvider).relayUrl,
+        'wss://new-relay.example/connect',
+      );
+    });
+
+    testWidgets('saving an empty relay URL clears it (stores null)', (
+      tester,
+    ) async {
+      final client = _clientWith((options) {
+        if (options.path == '/api/v1/node') {
+          return const FakeHttpResponse(200, {
+            'nodeId': 'my-node',
+            'publicKeyBase64': 'pk',
+          });
+        }
+        throw StateError('Unexpected request: ${options.path}');
+      });
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(
+              const MusicatServerConfig(
+                host: '',
+                port: 8080,
+                myPublicAddress: 'me.example:8080',
+                useEmbeddedServer: true,
+                relayUrl: 'wss://old-relay.example/connect',
+              ),
+            ),
+          ),
+          federationClientProvider.overrideWithValue(client),
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(const FriendsState()),
+          ),
+          embeddedServerProvider.overrideWith(
+            (ref) async => const EmbeddedServerInfo(port: 12345),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Musicat Server settings'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Relay URL (optional)'),
+        '',
+      );
+      await tester.ensureVisible(find.widgetWithText(FilledButton, 'Save'));
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      expect(
+        container.read(musicatServerConfigControllerProvider).relayUrl,
+        isNull,
+      );
     });
   });
 

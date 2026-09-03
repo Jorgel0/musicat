@@ -13,6 +13,7 @@ const _myPublicAddressKey = 'musicatServerMyPublicAddress';
 const _myDisplayNameKey = 'musicatServerMyDisplayName';
 const _useEmbeddedServerKey = 'musicatServerUseEmbeddedServer';
 const _apiKeyKey = 'musicatServerApiKey';
+const _relayUrlKey = 'musicatServerRelayUrl';
 
 class MusicatServerConfigController extends Notifier<MusicatServerConfig> {
   MusicatServerConfigController([this._initial]);
@@ -31,6 +32,7 @@ class MusicatServerConfigController extends Notifier<MusicatServerConfig> {
     await prefs.setString(_myDisplayNameKey, config.myDisplayName ?? '');
     await prefs.setBool(_useEmbeddedServerKey, config.useEmbeddedServer);
     await prefs.setString(_apiKeyKey, config.apiKey ?? '');
+    await prefs.setString(_relayUrlKey, config.relayUrl ?? '');
   }
 }
 
@@ -134,6 +136,7 @@ Future<MusicatServerConfig> loadMusicatServerConfigPreference() async {
   // then on, regardless of platform.
   final persistedUseEmbeddedServer = prefs.getBool(_useEmbeddedServerKey);
   final apiKey = prefs.getString(_apiKeyKey);
+  final relayUrl = prefs.getString(_relayUrlKey);
   return MusicatServerConfig(
     host: prefs.getString(_hostKey) ?? '',
     port: prefs.getInt(_portKey) ?? 8080,
@@ -143,5 +146,6 @@ Future<MusicatServerConfig> loadMusicatServerConfigPreference() async {
         : myDisplayName,
     useEmbeddedServer: persistedUseEmbeddedServer ?? embeddedServerSupported,
     apiKey: (apiKey == null || apiKey.isEmpty) ? null : apiKey,
+    relayUrl: (relayUrl == null || relayUrl.isEmpty) ? null : relayUrl,
   );
 }

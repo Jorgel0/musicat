@@ -10,6 +10,9 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../features/friends/presentation/musicat_server_config_controller.dart'
+    show loadMusicatServerConfigPreference;
+
 /// Whether this platform can safely run a full HTTP server in-process
 /// alongside the Flutter app for the whole app lifetime — Linux, Windows,
 /// and (as of this round) Android. On Linux/Windows this runs directly in
@@ -40,13 +43,17 @@ bool get embeddedServerSupported =>
 /// Soulseek ([SlskdConfig]) is deliberately left unconfigured (the
 /// `musicat_server` default): wiring the embedded server to this app's own
 /// separately-configured Soulseek backend is out of scope for this round.
-/// No relay fallback ([relayUrl]) is configured either — there's no UI yet
-/// for a desktop user to set one for *this* (embedded) server specifically
-/// (a manually self-hosted server's relay is set via an environment
-/// variable the CLI reads, which doesn't apply here); flagged as an open
-/// question for a future round rather than guessed at.
+///
+/// [relayUrl] is this device's own configured relay fallback (see
+/// `MusicatServerConfig.relayUrl`) — `null`/empty (the default) runs
+/// without one, same as omitting `MUSICAT_RELAY_URL` does for the CLI
+/// path. Callers should pass whatever was last persisted, not something
+/// reactively re-read later: see [embeddedServerProvider]'s own doc
+/// comment for why this whole server is only ever started once per app
+/// run.
 Future<MusicatServerHandle?> startEmbeddedServerIfSupported({
   required Directory dataDir,
+  String? relayUrl,
 }) async {
   if (!(Platform.isLinux || Platform.isWindows)) return null;
 
@@ -61,6 +68,7 @@ Future<MusicatServerHandle?> startEmbeddedServerIfSupported({
     // assign a free port instead; the real one is read back from
     // `MusicatServerHandle.port`.
     port: 0,
+    relayUrl: relayUrl,
     // Same operator-facing status lines `bin/server.dart` prints (identity,
     // NAT candidate, relay status, listening port) — routed through
     // `debugPrint` (stripped from release builds) rather than bare `print`,
@@ -140,6 +148,15 @@ const androidBackgroundReachabilityOverrideKey =
 const androidLastKnownHasFriendsKey = 'androidLastKnownHasFriends';
 
 const _androidServerDataDirPrefsKey = 'embeddedServerAndroidDataDirPath';
+
+/// Mirrors [_androidServerDataDirPrefsKey]'s own cross-isolate pattern for
+/// `MusicatServerConfig.relayUrl`: resolved on the main isolate (from
+/// `loadMusicatServerConfigPreference()`, see [embeddedServerProvider])
+/// and hand-carried into the background-service isolate via
+/// [SharedPreferences] rather than a second, different cross-isolate
+/// mechanism — see [_startAndroidEmbeddedServer] (writer) and
+/// [_androidEmbeddedServerOnStart] (reader).
+const _androidServerRelayUrlPrefsKey = 'embeddedServerAndroidRelayUrl';
 const _embeddedServerStartedEvent = 'musicatEmbeddedServerStarted';
 const _embeddedServerFailedEvent = 'musicatEmbeddedServerFailed';
 const _setForegroundEvent = 'musicatSetAsForeground';
@@ -185,6 +202,13 @@ void _androidEmbeddedServerOnStart(ServiceInstance service) async {
     });
     return;
   }
+  // Same cross-isolate handoff as dataDirPath just above — resolved on the
+  // main isolate (see _startAndroidEmbeddedServer) since plugin channels
+  // (SharedPreferences included) are the only thing safely shared between
+  // it and this background isolate. An absent/empty value here means "no
+  // relay configured", same as passing null/empty straight through to
+  // startMusicatServer already means on the desktop path.
+  final relayUrl = prefs.getString(_androidServerRelayUrlPrefsKey);
 
   try {
     final handle = await startMusicatServer(
@@ -192,6 +216,7 @@ void _androidEmbeddedServerOnStart(ServiceInstance service) async {
       // Same reasoning as the desktop path: 0 lets the OS assign a free
       // port, read back below.
       port: 0,
+      relayUrl: relayUrl,
       onLog: (message) => debugPrint('[MusicatServer/bg] $message'),
     );
     service.invoke(_embeddedServerStartedEvent, {'port': handle.port});
@@ -238,9 +263,13 @@ void _androidEmbeddedServerOnStart(ServiceInstance service) async {
 /// in the resolved flutter_background_service_android 6.3.1 source).
 Future<EmbeddedServerInfo?> _startAndroidEmbeddedServer({
   required Directory dataDir,
+  String? relayUrl,
 }) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setString(_androidServerDataDirPrefsKey, dataDir.path);
+  // See _androidServerRelayUrlPrefsKey's own doc comment: handed across
+  // the isolate boundary the same way dataDir.path is, just above.
+  await prefs.setString(_androidServerRelayUrlPrefsKey, relayUrl ?? '');
 
   // The very first foreground/background mode this service starts in,
   // decided *before* it even exists: an explicit manual override always
@@ -349,11 +378,34 @@ void setAndroidBackgroundReachable(bool reachable) {
 /// (`effectiveMusicatServerConfigProvider`) just observes the same
 /// [AsyncValue] progress from `loading` to `data`, the normal way any
 /// [FutureProvider] is consumed.
+///
+/// Reads this device's configured relay URL
+/// (`MusicatServerConfig.relayUrl`) via `loadMusicatServerConfigPreference()`
+/// — a direct, one-shot [SharedPreferences] read, the exact same function
+/// `bootstrap()` itself already calls once before the [ProviderContainer]
+/// even exists — rather than `ref.watch(musicatServerConfigControllerProvider)`.
+/// This is deliberate, not an oversight: `ref.watch`ing the live, editable
+/// config here would make Riverpod re-run this `build()` — restarting the
+/// whole embedded server, generating a new port, and dropping any live
+/// connections — every time the user edited *any* field in server
+/// settings, including unrelated ones (see `_ServerConfigSheet`). Because
+/// nothing here ever calls `ref.watch`/`ref.listen` on that provider,
+/// there is no dependency edge for Riverpod to invalidate this provider
+/// over in the first place — editing and saving the relay URL (or
+/// anything else) only ever takes effect on the *next* app restart, the
+/// same way the CLI's own `MUSICAT_RELAY_URL` environment variable already
+/// only takes effect on process restart. See
+/// `embedded_server_test.dart`'s "does not rebuild" test for a
+/// [ProviderContainer]-level proof of this.
 final embeddedServerProvider = FutureProvider<EmbeddedServerInfo?>((ref) async {
   final dataDir = await embeddedServerDataDir();
+  final relayUrl = (await loadMusicatServerConfigPreference()).relayUrl;
   if (Platform.isAndroid) {
-    return _startAndroidEmbeddedServer(dataDir: dataDir);
+    return _startAndroidEmbeddedServer(dataDir: dataDir, relayUrl: relayUrl);
   }
-  final handle = await startEmbeddedServerIfSupported(dataDir: dataDir);
+  final handle = await startEmbeddedServerIfSupported(
+    dataDir: dataDir,
+    relayUrl: relayUrl,
+  );
   return handle == null ? null : EmbeddedServerInfo(port: handle.port);
 });

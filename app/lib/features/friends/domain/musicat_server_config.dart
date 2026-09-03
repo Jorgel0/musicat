@@ -23,6 +23,7 @@ class MusicatServerConfig {
     this.myDisplayName,
     this.useEmbeddedServer = false,
     this.apiKey,
+    this.relayUrl,
   });
 
   /// How this app reaches its own Musicat Server (e.g. `localhost`) when
@@ -67,6 +68,25 @@ class MusicatServerConfig {
   /// server that hasn't opted into requiring the key.
   final String? apiKey;
 
+  /// A self-hosted relay fallback (server ADR 0032/0033) for this device's
+  /// own *embedded* server to connect out to at startup, so it stays
+  /// reachable by a friend on a genuinely different network (not just this
+  /// device's own LAN) when direct NAT hole-punching doesn't work for that
+  /// pair of networks -- the same role the CLI/self-hosting path's own
+  /// `MUSICAT_RELAY_URL` environment variable already plays (ADR 0035).
+  /// `null`/empty (the default) means no relay is configured; this project
+  /// has no baked-in default relay of its own to point at -- self-hosting
+  /// one is on the user, same as for a manually self-hosted server.
+  /// Ignored (but preserved) when [useEmbeddedServer] is `false`: a
+  /// manually-configured remote server sets its own relay independently,
+  /// through its own environment, not through this app.
+  ///
+  /// Only takes effect the *next* time the embedded server starts (i.e.
+  /// after restarting the app) -- see `embeddedServerProvider`'s own doc
+  /// comment (`core/embedded_server/embedded_server.dart`) for why editing
+  /// this deliberately never restarts an already-running embedded server.
+  final String? relayUrl;
+
   bool get isConfigured => host.isNotEmpty;
 
   String get baseUrl => 'http://$host:$port';
@@ -78,6 +98,7 @@ class MusicatServerConfig {
     String? myDisplayName,
     bool? useEmbeddedServer,
     String? apiKey,
+    String? relayUrl,
   }) => MusicatServerConfig(
     host: host ?? this.host,
     port: port ?? this.port,
@@ -85,6 +106,7 @@ class MusicatServerConfig {
     myDisplayName: myDisplayName ?? this.myDisplayName,
     useEmbeddedServer: useEmbeddedServer ?? this.useEmbeddedServer,
     apiKey: apiKey ?? this.apiKey,
+    relayUrl: relayUrl ?? this.relayUrl,
   );
 
   static const empty = MusicatServerConfig(
