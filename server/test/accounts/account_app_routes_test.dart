@@ -47,6 +47,18 @@ void main() {
 
   String nodeUrl(String path) => 'http://localhost:${node!.port}$path';
 
+  /// This machine's first non-loopback address, or `null` in a sandbox with
+  /// none -- the only way to exercise [requireLocal]'s *rejection* path for
+  /// real, rather than by faking a header.
+  Future<String?> findLanAddress() async {
+    for (final interface in await NetworkInterface.list()) {
+      for (final address in interface.addresses) {
+        if (!address.isLoopback) return address.address;
+      }
+    }
+    return null;
+  }
+
   Future<http.Response> logIn({
     required String username,
     required String password,
@@ -438,16 +450,448 @@ void main() {
     });
   });
 
-  group('requireLocal', () {
-    Future<String?> findLanAddress() async {
-      for (final interface in await NetworkInterface.list()) {
-        for (final address in interface.addresses) {
-          if (!address.isLoopback) return address.address;
-        }
-      }
-      return null;
+  group('friend requests', () {
+    late NodeIdentity aliceDevice;
+    late String aliceAccountId;
+    late String myAccountId;
+
+    /// Sets this node up logged in as `jorge`, with `alice` existing as a
+    /// separate account on the same service.
+    Future<void> withTwoAccounts() async {
+      aliceDevice = await newIdentity('alice');
+      aliceAccountId = await _signUpDirect(
+        accountServiceUrl,
+        'alice',
+        'hunter2-ok',
+        aliceDevice,
+      );
+      await startNode(withAccountService: accountServiceUrl);
+      final login = await logIn(username: 'jorge', password: 'hunter2-ok');
+      expect(login.statusCode, 200);
+      myAccountId =
+          (jsonDecode(login.body) as Map<String, dynamic>)['accountId']
+              as String;
     }
 
+    Future<http.Response> aliceSendsMeARequest() async {
+      final path = '/accounts/$aliceAccountId/friend-requests';
+      final body = jsonEncode({'toUsername': 'jorge'});
+      final uri = Uri.parse(
+        '${accountServiceUrl.replaceAll('/accounts', '')}$path',
+      );
+      final headers = await RequestSigner(
+        aliceDevice,
+      ).sign(method: 'POST', path: path, body: body);
+      final response = await http.post(uri, headers: headers, body: body);
+      expect(response.statusCode, 201);
+      return response;
+    }
+
+    group('with no session', () {
+      test('every route answers 409 -- a conflict with this node\'s state, '
+          'not a missing credential from the caller', () async {
+        await startNode(withAccountService: accountServiceUrl);
+
+        final listed = await http.get(
+          Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+        );
+        expect(listed.statusCode, 409);
+        expect(
+          (jsonDecode(listed.body) as Map<String, dynamic>)['error'],
+          contains('not logged in'),
+        );
+
+        final sent = await http.post(
+          Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+          body: jsonEncode({'toUsername': 'alice'}),
+        );
+        expect(sent.statusCode, 409);
+
+        final accepted = await http.post(
+          Uri.parse(nodeUrl('/api/v1/account/friend-requests/abc/accept')),
+        );
+        expect(accepted.statusCode, 409);
+
+        final declined = await http.post(
+          Uri.parse(nodeUrl('/api/v1/account/friend-requests/abc/decline')),
+        );
+        expect(declined.statusCode, 409);
+      });
+    });
+
+    test('503s every route on a node with no account service configured, '
+        'rather than crashing on a null', () async {
+      await startNode();
+
+      expect(
+        (await http.get(
+          Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+        )).statusCode,
+        503,
+      );
+      expect(
+        (await http.post(
+          Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+          body: jsonEncode({'toUsername': 'alice'}),
+        )).statusCode,
+        503,
+      );
+      expect(
+        (await http.post(
+          Uri.parse(nodeUrl('/api/v1/account/friend-requests/abc/accept')),
+        )).statusCode,
+        503,
+      );
+    });
+
+    test('sends one by username, and it really lands in the other account\'s '
+        'pending list', () async {
+      await withTwoAccounts();
+
+      final response = await http.post(
+        Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+        body: jsonEncode({'toUsername': 'alice'}),
+      );
+
+      expect(response.statusCode, 201);
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      expect(body['fromAccountId'], myAccountId);
+      expect(body['fromUsername'], 'jorge');
+      expect(body['toUsername'], 'alice');
+      expect(body['status'], 'pending');
+
+      final stored = await friendRequestStore.listAddressedTo(aliceAccountId);
+      expect(stored.single.id, body['id']);
+    });
+
+    test('404s an unknown username, with the service\'s own wording', () async {
+      await withTwoAccounts();
+
+      final response = await http.post(
+        Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+        body: jsonEncode({'toUsername': 'nobody-here'}),
+      );
+
+      expect(response.statusCode, 404);
+      expect(
+        (jsonDecode(response.body) as Map<String, dynamic>)['error'],
+        'Unknown username',
+      );
+    });
+
+    test('400s a missing toUsername before calling anything', () async {
+      await withTwoAccounts();
+      accountServiceCalls.clear();
+
+      final response = await http.post(
+        Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+        body: jsonEncode({}),
+      );
+
+      expect(response.statusCode, 400);
+      expect(accountServiceCalls, isEmpty);
+    });
+
+    test('lists incoming pending requests with the sender\'s username, live '
+        'from the account service', () async {
+      await withTwoAccounts();
+      final sent = await aliceSendsMeARequest();
+
+      final response = await http.get(
+        Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+      );
+
+      expect(response.statusCode, 200);
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      expect(body['live'], isTrue);
+      expect(body['fetchedAt'], isNotEmpty);
+      final requests = body['requests'] as List<dynamic>;
+      expect(requests, hasLength(1));
+      final request = requests.single as Map<String, dynamic>;
+      expect(
+        request['id'],
+        (jsonDecode(sent.body) as Map<String, dynamic>)['id'],
+      );
+      // The whole reason this projection exists: a human-readable sender.
+      expect(request['fromUsername'], 'alice');
+      expect(request['fromAccountId'], aliceAccountId);
+    });
+
+    test('falls back to the last known list, marked not live, when the '
+        'account service is unreachable', () async {
+      await withTwoAccounts();
+      await aliceSendsMeARequest();
+      // One good fetch, so this node has something cached.
+      expect(
+        (await http.get(
+          Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+        )).statusCode,
+        200,
+      );
+
+      await accountServer.close(force: true);
+      final response = await http
+          .get(Uri.parse(nodeUrl('/api/v1/account/friend-requests')))
+          .timeout(const Duration(seconds: 20));
+
+      // A dead relay degrades to a slightly stale list, not a broken screen.
+      expect(response.statusCode, 200);
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      expect(body['live'], isFalse);
+      expect(body['fetchedAt'], isNotEmpty);
+      expect(
+        ((body['requests'] as List<dynamic>).single
+            as Map<String, dynamic>)['fromUsername'],
+        'alice',
+      );
+    });
+
+    test('reports fetchedAt: null when it has never managed a fetch -- an '
+        'empty list this node cannot vouch for', () async {
+      // A session restored from an earlier run: `POST /login` would have
+      // fetched on its way past, and an empty list *with* a fetchedAt is a
+      // real answer -- this is the genuinely-never-fetched state.
+      await startNode(withAccountService: accountServiceUrl);
+      await AccountSessionStore(
+        nodeDir,
+      ).save(accountId: 'acc-from-an-earlier-run', username: 'jorge');
+      await accountServer.close(force: true);
+
+      final response = await http
+          .get(Uri.parse(nodeUrl('/api/v1/account/friend-requests')))
+          .timeout(const Duration(seconds: 20));
+
+      expect(response.statusCode, 200);
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      expect(body['live'], isFalse);
+      // The distinction an app must not flatten: "nobody has asked to be
+      // your friend" versus "this node has never been able to find out".
+      expect(body['fetchedAt'], isNull);
+      expect(body['requests'], isEmpty);
+    });
+
+    test('an empty list that really was fetched is reported as live, with a '
+        'fetchedAt -- the other half of that distinction', () async {
+      await withTwoAccounts();
+
+      final body =
+          jsonDecode(
+                (await http.get(
+                  Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+                )).body,
+              )
+              as Map<String, dynamic>;
+
+      expect(body['requests'], isEmpty);
+      expect(body['live'], isTrue);
+      expect(body['fetchedAt'], isNotEmpty);
+    });
+
+    test('accepting makes the sender a real local friend before the call '
+        'even returns', () async {
+      await withTwoAccounts();
+      final sent = await aliceSendsMeARequest();
+      final requestId =
+          (jsonDecode(sent.body) as Map<String, dynamic>)['id'] as String;
+
+      final response = await http.post(
+        Uri.parse(nodeUrl('/api/v1/account/friend-requests/$requestId/accept')),
+      );
+
+      expect(response.statusCode, 200);
+      expect(
+        (jsonDecode(response.body) as Map<String, dynamic>)['status'],
+        'accepted',
+      );
+      // The point of awaiting the refresh: no polling for the UI to do.
+      final friends =
+          jsonDecode(
+                (await http.get(
+                  Uri.parse(nodeUrl('/api/v1/federation/friends')),
+                )).body,
+              )
+              as List<dynamic>;
+      expect(friends, hasLength(1));
+      expect(
+        (friends.single as Map<String, dynamic>)['accountId'],
+        aliceAccountId,
+      );
+      expect((friends.single as Map<String, dynamic>)['displayName'], 'alice');
+    });
+
+    test('accepting cannot resurrect an account this device deliberately '
+        'removed -- Rule 2 has no exception here', () async {
+      await withTwoAccounts();
+      // The user unfriended Alice at some point. A tombstone says so.
+      await FriendStore(nodeDir).remove(aliceAccountId);
+      expect(await FriendStore(nodeDir).isRemoved(aliceAccountId), isTrue);
+
+      final sent = await aliceSendsMeARequest();
+      final requestId =
+          (jsonDecode(sent.body) as Map<String, dynamic>)['id'] as String;
+
+      final response = await http.post(
+        Uri.parse(nodeUrl('/api/v1/account/friend-requests/$requestId/accept')),
+      );
+
+      // The accept itself succeeds -- it is a fact about the *account*, and
+      // this device does not get to veto it on the service.
+      expect(response.statusCode, 200);
+      // ...but this device still refuses to trust her locally, and only an
+      // explicit local re-add can change that.
+      expect(
+        await FriendStore(nodeDir).findByAccountId(aliceAccountId),
+        isNull,
+      );
+      expect(
+        jsonDecode(
+          (await http.get(
+            Uri.parse(nodeUrl('/api/v1/federation/friends')),
+          )).body,
+        ),
+        isEmpty,
+      );
+    });
+
+    test(
+      'declining answers the request and drops it from the cached list',
+      () async {
+        await withTwoAccounts();
+        final sent = await aliceSendsMeARequest();
+        final requestId =
+            (jsonDecode(sent.body) as Map<String, dynamic>)['id'] as String;
+
+        final response = await http.post(
+          Uri.parse(
+            nodeUrl('/api/v1/account/friend-requests/$requestId/decline'),
+          ),
+        );
+
+        expect(response.statusCode, 200);
+        expect(
+          (jsonDecode(response.body) as Map<String, dynamic>)['status'],
+          'declined',
+        );
+        // No friend was created, and the pending list is empty again.
+        expect(await FriendStore(nodeDir).loadAll(), isEmpty);
+        final listed =
+            jsonDecode(
+                  (await http.get(
+                    Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+                  )).body,
+                )
+                as Map<String, dynamic>;
+        expect(listed['requests'], isEmpty);
+      },
+    );
+
+    test('404s an unknown request id, and 409s one already answered', () async {
+      await withTwoAccounts();
+      final sent = await aliceSendsMeARequest();
+      final requestId =
+          (jsonDecode(sent.body) as Map<String, dynamic>)['id'] as String;
+
+      expect(
+        (await http.post(
+          Uri.parse(
+            nodeUrl('/api/v1/account/friend-requests/no-such-id/accept'),
+          ),
+        )).statusCode,
+        404,
+      );
+
+      expect(
+        (await http.post(
+          Uri.parse(
+            nodeUrl('/api/v1/account/friend-requests/$requestId/accept'),
+          ),
+        )).statusCode,
+        200,
+      );
+      final again = await http.post(
+        Uri.parse(
+          nodeUrl('/api/v1/account/friend-requests/$requestId/decline'),
+        ),
+      );
+      expect(again.statusCode, 409);
+    });
+
+    test('logging out forgets the cached requests -- the next user of this '
+        'node never sees the previous one\'s prompts', () async {
+      await withTwoAccounts();
+      await aliceSendsMeARequest();
+      expect(
+        ((jsonDecode(
+                  (await http.get(
+                    Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+                  )).body,
+                )
+                as Map<String, dynamic>)['requests']
+            as List<dynamic>),
+        hasLength(1),
+      );
+
+      expect(
+        (await http.delete(Uri.parse(nodeUrl('/api/v1/account')))).statusCode,
+        204,
+      );
+      await accountServer.close(force: true);
+
+      // No session now, so this is a 409 -- but the point is that nothing
+      // was left in memory for a later session to inherit.
+      final listed = await http
+          .get(Uri.parse(nodeUrl('/api/v1/account/friend-requests')))
+          .timeout(const Duration(seconds: 5));
+      expect(listed.statusCode, 409);
+    });
+
+    test('requireLocal covers all four of them, not just the routes that '
+        'existed before', () async {
+      await withTwoAccounts();
+      final lanAddress = await findLanAddress();
+      if (lanAddress == null) {
+        markTestSkipped('No non-loopback network interface in this sandbox');
+        return;
+      }
+      final base =
+          'http://$lanAddress:${node!.port}/api/v1/account/friend-requests';
+      accountServiceCalls.clear();
+
+      expect(
+        (await http.get(Uri.parse(base)).timeout(const Duration(seconds: 5)))
+            .statusCode,
+        403,
+      );
+      expect(
+        (await http
+                .post(
+                  Uri.parse(base),
+                  body: jsonEncode({'toUsername': 'alice'}),
+                )
+                .timeout(const Duration(seconds: 5)))
+            .statusCode,
+        403,
+      );
+      expect(
+        (await http
+                .post(Uri.parse('$base/x/accept'))
+                .timeout(const Duration(seconds: 5)))
+            .statusCode,
+        403,
+      );
+      expect(
+        (await http
+                .post(Uri.parse('$base/x/decline'))
+                .timeout(const Duration(seconds: 5)))
+            .statusCode,
+        403,
+      );
+      // The 403 came from requireLocal, not from anything downstream.
+      expect(accountServiceCalls, isEmpty);
+    });
+  });
+
+  group('requireLocal', () {
     test('a non-loopback caller gets 403 on every account route, including '
         'the one that takes a password', () async {
       await startNode(withAccountService: accountServiceUrl);

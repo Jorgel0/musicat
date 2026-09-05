@@ -88,15 +88,21 @@ void main() {
       dataDir: aliceDir,
       port: 0,
       accountServiceUrl: accountServiceUrl,
-      // Long enough that the scheduled refresh can never fire during a
-      // test -- the point here is the *absence* of account-service traffic.
+      // Long enough that neither scheduled background job can fire during a
+      // test -- the point here is the *absence* of account-service traffic,
+      // and a tick landing mid-test would make that unfalsifiable. The
+      // poller's own "no session means no traffic at all" promise gets its
+      // own tests at the bottom of this file, with a deliberately tiny
+      // interval.
       friendDeviceRefreshInterval: const Duration(hours: 12),
+      accountPollInterval: const Duration(hours: 12),
     );
     bob = await startMusicatServer(
       dataDir: bobDir,
       port: 0,
       accountServiceUrl: accountServiceUrl,
       friendDeviceRefreshInterval: const Duration(hours: 12),
+      accountPollInterval: const Duration(hours: 12),
     );
     bobSecondDevice = await NodeIdentityStore(
       Directory('${bobDir.path}/second_device')..createSync(),
@@ -327,6 +333,7 @@ void main() {
       port: 0,
       accountServiceUrl: accountServiceUrl,
       friendDeviceRefreshInterval: const Duration(hours: 12),
+      accountPollInterval: const Duration(hours: 12),
     );
     addTearDown(relogged.close);
     accountServiceCalls.clear();
@@ -411,5 +418,67 @@ void main() {
     // Removal is local disk and nothing else -- a tombstoned account is
     // refused before any lookup, so not even the rejection costs a call.
     expectAccountServiceUntouched();
+  });
+
+  group('the background poller, against the same blackhole', () {
+    test('a node that has never logged in makes zero account-service calls, '
+        'however long it runs', () async {
+      final dir = Directory.systemTemp.createTempSync('musicat_offline_poll_');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final node = await startMusicatServer(
+        dataDir: dir,
+        port: 0,
+        accountServiceUrl: accountServiceUrl,
+        friendDeviceRefreshInterval: const Duration(hours: 12),
+        // Deliberately tiny: ~12 ticks fit in the wait below, so a tick that
+        // did anything at all would be impossible to miss.
+        accountPollInterval: const Duration(milliseconds: 40),
+      );
+      addTearDown(node.close);
+      accountServiceCalls.clear();
+
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+
+      // The strongest form of the promise, and the reason it is tested
+      // *here*, against a blackhole rather than a closed port: a call that
+      // shouldn't happen would cost 5s and be unmissable, and a recorded one
+      // proves it happened at all. Accounts are opt-in; a node that never
+      // opts in must cost this service nothing, forever.
+      expectAccountServiceUntouched();
+    });
+
+    test('a logged-in node *does* poll -- so the assertion above is about no '
+        'session, not about a poller that never runs', () async {
+      final dir = Directory.systemTemp.createTempSync('musicat_offline_poll2_');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      await AccountSessionStore(
+        dir,
+      ).save(accountId: aliceAccountId, username: 'alice');
+      final node = await startMusicatServer(
+        dataDir: dir,
+        port: 0,
+        accountServiceUrl: accountServiceUrl,
+        friendDeviceRefreshInterval: const Duration(hours: 12),
+        accountPollInterval: const Duration(milliseconds: 40),
+      );
+      addTearDown(node.close);
+      accountServiceCalls.clear();
+
+      // The inverse assertion, in the same spirit as the stranger test
+      // above: if this ever stops being true, the zero-call assertion in the
+      // previous test is vacuous.
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (accountServiceCalls.isEmpty && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(
+        accountServiceCalls,
+        isNotEmpty,
+        reason:
+            'A logged-in node is supposed to poll; if it no longer does, the '
+            'no-session test proves nothing.',
+      );
+      expect(accountServiceCalls.first, contains('/friends'));
+    });
   });
 }

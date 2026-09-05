@@ -16,22 +16,60 @@ class DeviceLink {
     required this.nodeId,
     required this.publicKeyBase64,
     required this.linkedAt,
+    this.relayUrl,
   });
 
   final String nodeId;
   final String publicKeyBase64;
   final DateTime linkedAt;
 
+  /// This device's own relay WebSocket endpoint (e.g.
+  /// `ws://relay.example.com:8090/connect`) as it reported at its last
+  /// login, or `null` if it has no relay configured -- **the only piece of
+  /// reachability this service records about a device**, and the one that
+  /// makes an account-only friendship usable at all.
+  ///
+  /// Without it, two people who become friends purely through this service
+  /// have zero candidates for each other: each can *verify* the other's
+  /// signed requests, neither can *initiate* one (see ADR 0050, which named
+  /// the gap, and `federation/friend_reachability.dart`, which turns this
+  /// into `<relay http origin>/<nodeId>/<path>` -- the ADR 0033 mechanism
+  /// already proven across real networks). No address and no UDP candidate
+  /// are recorded here, deliberately: those are learned by pairing with a
+  /// specific device on a specific network and are nobody else's business,
+  /// whereas a relay endpoint is a public host that already forwards to this
+  /// nodeId for anyone who asks.
+  ///
+  /// **Privacy: this discloses which relay you use to your mutual friends**
+  /// -- they are the only callers `GET /<accountId>/devices` and
+  /// `GET /<me>/friends` ever answer with a device list. That is not a new
+  /// disclosure (`relayUrl` is already exchanged at pairing time today, see
+  /// `POST /api/v1/federation/friends`), but it is a deliberate choice
+  /// rather than an accident: a friend learning "Jorge relays through
+  /// relay.example.com" is the price of being reachable through it at all.
+  ///
+  /// Refreshed on every login (see [AccountStore.loginOrSignup]), including
+  /// back to `null` for a device that no longer has a relay -- a stale entry
+  /// would only send friends to a relay this device is no longer connected
+  /// to, which costs them a wasted `502` per attempt.
+  final String? relayUrl;
+
   Map<String, dynamic> toJson() => {
     'nodeId': nodeId,
     'publicKeyBase64': publicKeyBase64,
     'linkedAt': linkedAt.toIso8601String(),
+    'relayUrl': relayUrl,
   };
 
+  /// Reads either shape: a row written by this version, or one written
+  /// before [relayUrl] existed (every `accounts.json` on disk today), which
+  /// simply has no such key and loads with a `null` relay -- the same
+  /// nullable-field-defaulting pattern `Friend.fromJson` already relies on.
   factory DeviceLink.fromJson(Map<String, dynamic> json) => DeviceLink(
     nodeId: json['nodeId'] as String,
     publicKeyBase64: json['publicKeyBase64'] as String,
     linkedAt: DateTime.parse(json['linkedAt'] as String),
+    relayUrl: json['relayUrl'] as String?,
   );
 }
 
@@ -152,4 +190,81 @@ class AccountFriend {
         DeviceLink.fromJson(device as Map<String, dynamic>),
     ],
   );
+}
+
+/// One entry of `GET /accounts/<me>/friend-requests`: a [FriendRequest] with
+/// **both sides' usernames resolved**, which is the whole reason this
+/// projection exists.
+///
+/// A [FriendRequest] on its own carries only accountIds, and an accountId is
+/// a 32-hex-character random string -- an app cannot show that to a human
+/// and ask "do you want to be friends with this?". Resolving the username
+/// here, on the service that already holds both accounts, costs one file
+/// read per response; resolving it node-side would cost the node one
+/// authenticated round trip per pending request, for data this service could
+/// simply have included.
+///
+/// Discloses nothing new: this shape is only ever returned by
+/// `GET /<me>/friend-requests`, which lists exactly the requests addressed
+/// *to* the authenticated caller, plus the send/accept/decline responses for
+/// a request that caller is one side of. Knowing who sent you a friend
+/// request is the point of being told about it at all.
+///
+/// Deliberately *not* a [FriendRequest]: that class is the persisted record
+/// (`friend_request_store.dart`), this one is the wire shape, and keeping
+/// them separate is what stops a later field on the record from leaking out
+/// of the API by default.
+class AccountFriendRequest {
+  const AccountFriendRequest({
+    required this.id,
+    required this.fromAccountId,
+    required this.toAccountId,
+    required this.status,
+    required this.createdAt,
+    this.fromUsername,
+    this.toUsername,
+  });
+
+  final String id;
+  final String fromAccountId;
+  final String toAccountId;
+
+  /// [fromAccountId]/[toAccountId]'s current usernames, or `null` in the
+  /// (unreachable in practice -- accounts are never deleted) case of a
+  /// request naming an account that no longer exists. Nullable rather than
+  /// defaulted to some placeholder so a caller can tell "this person is
+  /// called X" from "this service could not say", and never renders a
+  /// made-up name.
+  final String? fromUsername;
+  final String? toUsername;
+
+  /// `pending`/`accepted`/`declined`, as [FriendRequestStatus.name].
+  final String status;
+
+  final DateTime createdAt;
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'fromAccountId': fromAccountId,
+    'fromUsername': fromUsername,
+    'toAccountId': toAccountId,
+    'toUsername': toUsername,
+    'status': status,
+    'createdAt': createdAt.toIso8601String(),
+  };
+
+  /// Tolerates a response written before the username fields existed (they
+  /// simply read back as `null`), so a node talking to an older account
+  /// service still parses its friend requests rather than failing the whole
+  /// list.
+  factory AccountFriendRequest.fromJson(Map<String, dynamic> json) =>
+      AccountFriendRequest(
+        id: json['id'] as String,
+        fromAccountId: json['fromAccountId'] as String,
+        fromUsername: json['fromUsername'] as String?,
+        toAccountId: json['toAccountId'] as String,
+        toUsername: json['toUsername'] as String?,
+        status: json['status'] as String,
+        createdAt: DateTime.parse(json['createdAt'] as String),
+      );
 }

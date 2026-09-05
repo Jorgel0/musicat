@@ -8,12 +8,17 @@
 /// desktop, ADR 0048), so trust is a property of the account and
 /// reachability a property of each device.
 ///
-/// [address]/[relayUrl] are nullable because the account service records
-/// neither: a device learned from `GET /accounts/<accountId>/devices`
-/// arrives with only its key material and [linkedAt]. Such a device can
-/// still *verify* incoming requests (which is the whole point of learning
-/// about it — the friend's new phone calling this node), it just isn't
-/// outbound-reachable until it pairs an address of its own.
+/// [address] and [udpCandidate] are nullable because the account service
+/// records neither, and never will: a device learned from
+/// `GET /accounts/<accountId>/devices` arrives with its key material,
+/// [linkedAt], and at most a [relayUrl]. Such a device can always *verify*
+/// incoming requests (the whole point of learning about it — the friend's
+/// new phone calling this node); whether it can be *reached* depends on it
+/// having reported a relay, which is what makes an account-only friendship
+/// usable at all (ADR 0050 named the gap; `mergeFriendDevices` is where the
+/// two sources of [relayUrl] meet). A device with neither an address nor a
+/// relay contributes no reachability candidate whatsoever, and
+/// `friend_reachability.dart` fails fast rather than hanging on it.
 class FriendDevice {
   const FriendDevice({
     required this.nodeId,
@@ -38,11 +43,12 @@ class FriendDevice {
   final String? udpCandidate;
 
   /// This device's own relay WebSocket endpoint (e.g.
-  /// `ws://relay.example.com/connect`), if it reported one at pairing
-  /// time — the fallback address for reaching it when [address] itself
+  /// `ws://relay.example.com/connect`), learned either at pairing time or
+  /// from the account service (see `mergeFriendDevices`, which prefers the
+  /// former) — the fallback address for reaching it when [address] itself
   /// isn't (ADR 0032/0033): a request to it becomes
   /// `<relayUrl's http(s) origin>/<nodeId>/<path>` instead of
-  /// `http://$address/<path>`. `null` if it didn't report a relay.
+  /// `http://$address/<path>`. `null` if neither source reported a relay.
   final String? relayUrl;
 
   /// When the account service says this device was linked to its account —

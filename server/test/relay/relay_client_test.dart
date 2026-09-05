@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:musicat_server/src/accounts/device_notifier.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
 import 'package:musicat_server/src/relay/relay_client.dart';
 import 'package:musicat_server/src/relay/relay_hub.dart';
@@ -32,6 +33,75 @@ void main() {
     await client.close();
     await server.close(force: true);
     identityDir.deleteSync(recursive: true);
+  });
+
+  group('a push from the hub', () {
+    test('is surfaced to onNotify as a bare event kind, and answered with '
+        'nothing at all', () async {
+      final received = <String>[];
+      client = RelayClient(
+        identity: identity,
+        localHandler: (request) async => Response.ok('unused'),
+        onNotify: received.add,
+      );
+      expect(await client.connect(wsUrl), isTrue);
+
+      expect(hub.notify(identity.nodeId, AccountEvent.friendRequests), isTrue);
+      await _waitUntil(() => received.isNotEmpty);
+
+      expect(received, ['friendRequests']);
+      // The tunnel is still perfectly healthy afterwards: a notify expects no
+      // response, and sending none must not desynchronize anything.
+      expect(client.isConnected, isTrue);
+      final stillWorks = await http.get(
+        Uri.parse('$httpUrl/${identity.nodeId}/anything'),
+      );
+      expect(stillWorks.statusCode, 200);
+    });
+
+    test('with no onNotify configured is simply ignored, and the tunnel keeps '
+        'serving requests', () async {
+      client = RelayClient(
+        identity: identity,
+        localHandler: (request) async => Response.ok('still here'),
+      );
+      await client.connect(wsUrl);
+
+      hub.notify(identity.nodeId, AccountEvent.friendRequests);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(client.isConnected, isTrue);
+      final response = await http.get(
+        Uri.parse('$httpUrl/${identity.nodeId}/anything'),
+      );
+      expect(response.body, 'still here');
+    });
+
+    test('does not take the tunnel down when the callback throws', () async {
+      var calls = 0;
+      client = RelayClient(
+        identity: identity,
+        localHandler: (request) async => Response.ok('alive'),
+        onNotify: (_) {
+          calls++;
+          throw StateError('the app blew up');
+        },
+      );
+      await client.connect(wsUrl);
+
+      hub.notify(identity.nodeId, AccountEvent.friendRequests);
+      await _waitUntil(() => calls == 1);
+      // A second one still gets through, which it wouldn't if the read loop
+      // had exited on the first.
+      hub.notify(identity.nodeId, AccountEvent.friendRequests);
+      await _waitUntil(() => calls == 2);
+
+      expect(client.isConnected, isTrue);
+      expect(
+        (await http.get(Uri.parse('$httpUrl/${identity.nodeId}/x'))).body,
+        'alive',
+      );
+    });
   });
 
   test('a real request forwarded through the relay reaches the local handler '

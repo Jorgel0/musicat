@@ -5,6 +5,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:http/http.dart' as http;
 import 'package:musicat_server/src/accounts/account_routes.dart';
 import 'package:musicat_server/src/accounts/account_store.dart';
+import 'package:musicat_server/src/accounts/device_notifier.dart';
 import 'package:musicat_server/src/accounts/friend_request_store.dart';
 import 'package:musicat_server/src/accounts/login_nonce_store.dart';
 import 'package:musicat_server/src/accounts/login_rate_limiter.dart';
@@ -20,6 +21,7 @@ void main() {
   late AccountStore accountStore;
   late FriendRequestStore friendRequestStore;
   late LoginRateLimiter rateLimiter;
+  late _RecordingNotifier notifier;
   late HttpServer server;
   late String baseUrl;
   final identityDirs = <Directory>[];
@@ -41,11 +43,17 @@ void main() {
       lockoutDuration: const Duration(milliseconds: 300),
     );
 
+    // Always present, so the push side is exercised by every friend-request
+    // test in this file rather than only the group that asserts on it -- a
+    // notifier that throws or blocks would then show up as a failure
+    // wherever it happened, not just where it was expected.
+    notifier = _RecordingNotifier();
     final router = buildAccountRouter(
       accountStore,
       friendRequestStore,
       loginNonceStore: LoginNonceStore(),
       loginRateLimiter: rateLimiter,
+      deviceNotifier: notifier,
     );
     server = await shelf_io.serve(router.call, 'localhost', 0);
     baseUrl = 'http://localhost:${server.port}';
@@ -119,6 +127,55 @@ void main() {
     required String path,
     String body = '',
   }) => RequestSigner(identity).sign(method: method, path: path, body: body);
+
+  /// Runs the full send + accept handshake so the two accounts are mutual
+  /// friends -- the state `GET /<me>/friends` and `GET /<id>/devices` are
+  /// both gated on.
+  Future<void> befriend({
+    required NodeIdentity fromIdentity,
+    required String fromId,
+    required String toUsername,
+    required NodeIdentity toIdentity,
+    required String toId,
+  }) async {
+    final sendPath = '/$fromId/friend-requests';
+    final sendBody = jsonEncode({'toUsername': toUsername});
+    final sent = await http.post(
+      Uri.parse('$baseUrl$sendPath'),
+      headers: await RequestSigner(
+        fromIdentity,
+      ).sign(method: 'POST', path: sendPath, body: sendBody),
+      body: sendBody,
+    );
+    expect(sent.statusCode, 201);
+    final requestId =
+        (jsonDecode(sent.body) as Map<String, dynamic>)['id'] as String;
+
+    final acceptPath = '/$toId/friend-requests/$requestId/accept';
+    final accepted = await http.post(
+      Uri.parse('$baseUrl$acceptPath'),
+      headers: await RequestSigner(
+        toIdentity,
+      ).sign(method: 'POST', path: acceptPath),
+    );
+    expect(accepted.statusCode, 200);
+  }
+
+  /// Pushes are deliberately fire-and-forget (`unawaited`, see
+  /// `_notifyAccountDevices`), so they are *not* guaranteed to have happened
+  /// by the time the HTTP response arrives -- that is the property being
+  /// tested, not a flake. Wait for them explicitly instead of sleeping a
+  /// fixed amount.
+  Future<void> settlePushes({int atLeast = 1}) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (notifier.pushes.length < atLeast &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    // One more turn, so a test asserting "exactly these" catches a stray
+    // extra push that was already queued.
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  }
 
   group('POST /login/start', () {
     test('returns a nonce', () async {
@@ -1066,4 +1123,350 @@ void main() {
       },
     );
   });
+
+  group("a device's relayUrl -- the one piece of reachability this service "
+      'records', () {
+    test('login/complete records it, and both device-listing routes return '
+        'it', () async {
+      final aliceIdentity = await newIdentity();
+      final nonce = await startLogin('alice');
+      final signature = await Ed25519().sign(
+        nonce,
+        keyPair: aliceIdentity.keyPair,
+      );
+      final response = await http.post(
+        Uri.parse('$baseUrl/login/complete'),
+        body: jsonEncode({
+          'username': 'alice',
+          'password': 'pw-alice',
+          'nodeId': aliceIdentity.nodeId,
+          'publicKeyBase64': await aliceIdentity.publicKeyBase64(),
+          'signatureOverNonce': base64Encode(signature.bytes),
+          'relayUrl': 'ws://relay.example:8090/connect',
+        }),
+      );
+      expect(response.statusCode, 201);
+      final aliceId =
+          (jsonDecode(response.body) as Map<String, dynamic>)['accountId']
+              as String;
+      expect(
+        ((jsonDecode(response.body) as Map<String, dynamic>)['devices']
+                as List<dynamic>)
+            .single['relayUrl'],
+        'ws://relay.example:8090/connect',
+      );
+
+      // Her own device list...
+      final devicesPath = '/$aliceId/devices';
+      final devices = await http.get(
+        Uri.parse('$baseUrl$devicesPath'),
+        headers: await signedHeaders(
+          aliceIdentity,
+          method: 'GET',
+          path: devicesPath,
+        ),
+      );
+      expect(
+        ((jsonDecode(devices.body) as Map<String, dynamic>)['devices']
+                as List<dynamic>)
+            .single['relayUrl'],
+        'ws://relay.example:8090/connect',
+      );
+
+      // ...and what a mutual friend sees, which is the disclosure that
+      // actually matters and the one that makes this friendship usable.
+      final bobIdentity = await newIdentity();
+      final bobId = await signUp('bob', 'pw-bob', bobIdentity);
+      await befriend(
+        fromIdentity: aliceIdentity,
+        fromId: aliceId,
+        toUsername: 'bob',
+        toIdentity: bobIdentity,
+        toId: bobId,
+      );
+
+      final friendsPath = '/$bobId/friends';
+      final friends = await http.get(
+        Uri.parse('$baseUrl$friendsPath'),
+        headers: await signedHeaders(
+          bobIdentity,
+          method: 'GET',
+          path: friendsPath,
+        ),
+      );
+      expect(friends.statusCode, 200);
+      final alice =
+          (jsonDecode(friends.body) as List<dynamic>).single
+              as Map<String, dynamic>;
+      expect(
+        (alice['devices'] as List<dynamic>).single['relayUrl'],
+        'ws://relay.example:8090/connect',
+      );
+    });
+
+    test('an accounts.json written before this field existed still loads, '
+        'and its devices simply have no relay', () async {
+      final aliceIdentity = await newIdentity();
+      final aliceId = await signUp('alice', 'pw-alice', aliceIdentity);
+
+      // Rewrite the file exactly as an older version wrote it: no `relayUrl`
+      // key on the device rows at all.
+      final file = File('${accountsDataDir.path}/accounts.json');
+      final rows = jsonDecode(await file.readAsString()) as List<dynamic>;
+      for (final row in rows) {
+        for (final device
+            in (row as Map<String, dynamic>)['devices'] as List<dynamic>) {
+          (device as Map<String, dynamic>).remove('relayUrl');
+        }
+      }
+      await file.writeAsString(jsonEncode(rows));
+      expect(await file.readAsString(), isNot(contains('relayUrl')));
+
+      final devicesPath = '/$aliceId/devices';
+      final devices = await http.get(
+        Uri.parse('$baseUrl$devicesPath'),
+        headers: await signedHeaders(
+          aliceIdentity,
+          method: 'GET',
+          path: devicesPath,
+        ),
+      );
+
+      expect(devices.statusCode, 200);
+      final device =
+          ((jsonDecode(devices.body) as Map<String, dynamic>)['devices']
+                      as List<dynamic>)
+                  .single
+              as Map<String, dynamic>;
+      expect(device['nodeId'], aliceIdentity.nodeId);
+      expect(device['relayUrl'], isNull);
+    });
+
+    test(
+      'a non-string relayUrl is rejected, without creating an account',
+      () async {
+        final aliceIdentity = await newIdentity();
+        final nonce = await startLogin('alice');
+        final signature = await Ed25519().sign(
+          nonce,
+          keyPair: aliceIdentity.keyPair,
+        );
+        final response = await http.post(
+          Uri.parse('$baseUrl/login/complete'),
+          body: jsonEncode({
+            'username': 'alice',
+            'password': 'pw-alice',
+            'nodeId': aliceIdentity.nodeId,
+            'publicKeyBase64': await aliceIdentity.publicKeyBase64(),
+            'signatureOverNonce': base64Encode(signature.bytes),
+            'relayUrl': 42,
+          }),
+        );
+
+        expect(response.statusCode, 400);
+        expect(await accountStore.loadAll(), isEmpty);
+      },
+    );
+  });
+
+  group('friend requests carry usernames', () {
+    test("every friend-request response names the other side, because an "
+        'accountId is not something an app can show a human', () async {
+      final aliceIdentity = await newIdentity();
+      final aliceId = await signUp('alice', 'pw-alice', aliceIdentity);
+      final bobIdentity = await newIdentity();
+      final bobId = await signUp('bob', 'pw-bob', bobIdentity);
+
+      final sendPath = '/$aliceId/friend-requests';
+      final sendBody = jsonEncode({'toUsername': 'bob'});
+      final sent = await http.post(
+        Uri.parse('$baseUrl$sendPath'),
+        headers: await signedHeaders(
+          aliceIdentity,
+          method: 'POST',
+          path: sendPath,
+          body: sendBody,
+        ),
+        body: sendBody,
+      );
+      expect(sent.statusCode, 201);
+      final sentBody = jsonDecode(sent.body) as Map<String, dynamic>;
+      expect(sentBody['fromUsername'], 'alice');
+      expect(sentBody['toUsername'], 'bob');
+
+      final listPath = '/$bobId/friend-requests';
+      final listed = await http.get(
+        Uri.parse('$baseUrl$listPath?status=pending'),
+        headers: await signedHeaders(
+          bobIdentity,
+          method: 'GET',
+          path: listPath,
+        ),
+      );
+      final pending =
+          (jsonDecode(listed.body) as List<dynamic>).single
+              as Map<String, dynamic>;
+      expect(pending['fromUsername'], 'alice');
+      expect(pending['fromAccountId'], aliceId);
+
+      final acceptPath = '/$bobId/friend-requests/${sentBody['id']}/accept';
+      final accepted = await http.post(
+        Uri.parse('$baseUrl$acceptPath'),
+        headers: await signedHeaders(
+          bobIdentity,
+          method: 'POST',
+          path: acceptPath,
+        ),
+      );
+      expect(
+        (jsonDecode(accepted.body) as Map<String, dynamic>)['fromUsername'],
+        'alice',
+      );
+    });
+  });
+
+  /// The push is a nudge and nothing else: these assert *who* is told, and
+  /// `relay_hub_test.dart`/`relay_client_test.dart` assert *what* is sent
+  /// (an opaque event kind, no payload).
+  group('pushing over the relay tunnel', () {
+    late NodeIdentity alicePhone;
+    late NodeIdentity aliceDesktop;
+    late NodeIdentity bobPhone;
+    late String aliceId;
+    late String bobId;
+
+    setUp(() async {
+      alicePhone = await newIdentity();
+      aliceDesktop = await newIdentity();
+      bobPhone = await newIdentity();
+      aliceId = await signUp('alice', 'pw-alice', alicePhone);
+      // Alice's second device, on the same account -- the multi-device case
+      // this service exists for.
+      await completeLogin(
+        username: 'alice',
+        password: 'pw-alice',
+        identity: aliceDesktop,
+      );
+      bobId = await signUp('bob', 'pw-bob', bobPhone);
+      notifier.pushes.clear();
+    });
+
+    Future<String> sendRequestFromAliceToBob() async {
+      final path = '/$aliceId/friend-requests';
+      final body = jsonEncode({'toUsername': 'bob'});
+      final response = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(
+          alicePhone,
+          method: 'POST',
+          path: path,
+          body: body,
+        ),
+        body: body,
+      );
+      expect(response.statusCode, 201);
+      return (jsonDecode(response.body) as Map<String, dynamic>)['id']
+          as String;
+    }
+
+    test('sending nudges the recipient, and only the recipient', () async {
+      await sendRequestFromAliceToBob();
+      await settlePushes();
+
+      expect(notifier.pushes.map((p) => p.nodeId), [bobPhone.nodeId]);
+      expect(notifier.pushes.single.event, AccountEvent.friendRequests);
+    });
+
+    test('accepting nudges every device of both accounts -- the sender is '
+        'the one who would otherwise never find out', () async {
+      final requestId = await sendRequestFromAliceToBob();
+      notifier.pushes.clear();
+
+      final path = '/$bobId/friend-requests/$requestId/accept';
+      final accepted = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(bobPhone, method: 'POST', path: path),
+      );
+      expect(accepted.statusCode, 200);
+      await settlePushes(atLeast: 3);
+
+      expect(notifier.pushes.map((p) => p.nodeId).toSet(), {
+        alicePhone.nodeId,
+        aliceDesktop.nodeId,
+        bobPhone.nodeId,
+      });
+    });
+
+    test("declining nudges only the decliner's own devices -- the sender "
+        'has nothing they could fetch, and is not told', () async {
+      final requestId = await sendRequestFromAliceToBob();
+      notifier.pushes.clear();
+
+      final path = '/$bobId/friend-requests/$requestId/decline';
+      final declined = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(bobPhone, method: 'POST', path: path),
+      );
+      expect(declined.statusCode, 200);
+      await settlePushes();
+
+      expect(notifier.pushes.map((p) => p.nodeId), [bobPhone.nodeId]);
+    });
+
+    test('a refused action nudges nobody', () async {
+      final requestId = await sendRequestFromAliceToBob();
+      notifier.pushes.clear();
+
+      // Alice tries to accept her own outgoing request: 403, no state
+      // change, so nothing to tell anyone about.
+      final path = '/$aliceId/friend-requests/$requestId/accept';
+      final refused = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(alicePhone, method: 'POST', path: path),
+      );
+      expect(refused.statusCode, 403);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(notifier.pushes, isEmpty);
+    });
+
+    test('a notifier that throws never turns a successful accept into an '
+        'error -- a push is best-effort by definition', () async {
+      final requestId = await sendRequestFromAliceToBob();
+      notifier
+        ..pushes.clear()
+        ..throwOnNotify = true;
+
+      final path = '/$bobId/friend-requests/$requestId/accept';
+      final accepted = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(bobPhone, method: 'POST', path: path),
+      );
+
+      expect(accepted.statusCode, 200);
+      expect(
+        (jsonDecode(accepted.body) as Map<String, dynamic>)['status'],
+        'accepted',
+      );
+      // And the friendship really did take effect, despite the failed push.
+      expect(await friendRequestStore.areMutualFriends(aliceId, bobId), isTrue);
+    });
+  });
+}
+
+/// A [DeviceNotifier] that writes down what it was asked to push instead of
+/// sending anything -- the account service must not need a relay, or any
+/// network at all, for these routes to work.
+class _RecordingNotifier implements DeviceNotifier {
+  final List<({String nodeId, AccountEvent event})> pushes = [];
+
+  /// Simulates the one thing a real notifier promises never to do, so the
+  /// "best-effort" claim is tested rather than asserted.
+  bool throwOnNotify = false;
+
+  @override
+  void notifyDevice(String nodeId, AccountEvent event) {
+    pushes.add((nodeId: nodeId, event: event));
+    if (throwOnNotify) throw StateError('the relay exploded');
+  }
 }

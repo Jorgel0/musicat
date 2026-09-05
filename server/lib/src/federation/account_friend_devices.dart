@@ -12,10 +12,40 @@ import 'unknown_device_resolver.dart';
 ///
 /// The account service is authoritative about which keys currently speak
 /// for an account (so a device it no longer lists is dropped — that's how
-/// unlinking a stolen phone eventually propagates to friends), but it
-/// records no addresses at all: `address`/`udpCandidate`/`relayUrl` only
-/// ever come from pairing with that specific device, so they're carried
-/// over from [cached] whenever the same nodeId is still listed.
+/// unlinking a stolen phone eventually propagates to friends). Reachability
+/// is split, and the split is the whole subtlety of this function:
+///
+/// - **`address`/`udpCandidate` are local-only.** The account service does
+///   not record them and never will (see [DeviceLink]): they are learned by
+///   pairing with that specific device on a specific network, and they are
+///   carried over from [cached] whenever the same nodeId is still listed, or
+///   left `null` if this node never learned one.
+/// - **`relayUrl` is recorded by the account service too** (as of round B of
+///   Fase 5 — before it, this function's doc comment stated flatly that the
+///   service records no reachability at all, which is no longer true), so it
+///   has two possible sources. **The locally-learned one wins**, and the
+///   authoritative one is the fallback for a device this node has no cached
+///   relay for — which is every device of a friend it never paired with, and
+///   exactly the case that used to leave such a friend with no way to be
+///   reached at all (ADR 0050).
+///
+/// Preferring the local value is the deliberate half. A cached relay was
+/// established by really pairing with that device (`POST
+/// /api/v1/federation/friends` exchanges `relayUrl` directly between the two
+/// nodes, with no third party in the middle), whereas the authoritative one
+/// is a claim relayed through the account service. Both point at a relay
+/// that still has to prove control of the target nodeId before it can
+/// forward anything — a wrong relay can misroute or drop a request, never
+/// read or forge one — so this is a robustness preference, not a trust
+/// boundary: first-hand knowledge beats second-hand when there is a
+/// disagreement, and second-hand is infinitely better than nothing.
+///
+/// A device this node *has* paired with, whose relay has since changed, is
+/// therefore refreshed by re-pairing rather than by the account service. That
+/// is a real (if narrow) staleness cost, accepted knowingly: the stale relay
+/// simply answers `502` and reachability falls through to the next candidate
+/// (`friend_reachability.dart` tries every direct address before any relay,
+/// and bounds each relay attempt separately).
 List<FriendDevice> mergeFriendDevices(
   List<FriendDevice> cached,
   List<DeviceLink> authoritative,
@@ -28,7 +58,10 @@ List<FriendDevice> mergeFriendDevices(
         publicKeyBase64: device.publicKeyBase64,
         address: byNodeId[device.nodeId]?.address,
         udpCandidate: byNodeId[device.nodeId]?.udpCandidate,
-        relayUrl: byNodeId[device.nodeId]?.relayUrl,
+        // `??` on the *whole* cached relay, so an explicitly-cleared local
+        // relay (null) still falls back to the authoritative one rather than
+        // staying null forever.
+        relayUrl: byNodeId[device.nodeId]?.relayUrl ?? device.relayUrl,
         linkedAt: device.linkedAt,
       ),
   ];

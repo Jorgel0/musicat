@@ -141,17 +141,28 @@ class AccountStore {
   /// signed-nonce check, see `account_routes.dart`'s `POST
   /// /login/complete`) *before* calling this -- this method itself trusts
   /// them as given.
+  ///
+  /// [relayUrl] is the logging-in device's own relay endpoint (see
+  /// [DeviceLink.relayUrl]) and **every login is a full refresh of it**,
+  /// including the already-linked, otherwise-idempotent case: a device that
+  /// changed relays, or stopped using one, says so by logging in again, and
+  /// `null` therefore means "I have no relay right now", not "leave whatever
+  /// you had". Keeping a stale endpoint would send this device's friends to
+  /// a relay it is no longer connected to, which costs them a wasted
+  /// reachability attempt each time and can never succeed.
   Future<LoginResult> loginOrSignup({
     required String username,
     required String password,
     required String nodeId,
     required String publicKeyBase64,
+    String? relayUrl,
   }) => _locked(
     () => _loginOrSignupLocked(
       username: username,
       password: password,
       nodeId: nodeId,
       publicKeyBase64: publicKeyBase64,
+      relayUrl: relayUrl,
     ),
   );
 
@@ -160,6 +171,7 @@ class AccountStore {
     required String password,
     required String nodeId,
     required String publicKeyBase64,
+    String? relayUrl,
   }) async {
     if (!usernamePattern.hasMatch(username)) {
       return const LoginResult.invalidUsername();
@@ -184,6 +196,7 @@ class AccountStore {
             nodeId: nodeId,
             publicKeyBase64: publicKeyBase64,
             linkedAt: now,
+            relayUrl: relayUrl,
           ),
         ],
         createdAt: now,
@@ -200,8 +213,30 @@ class AccountStore {
     );
     if (!passwordIsValid) return const LoginResult.wrongPassword();
 
-    if (account.devices.any((device) => device.nodeId == nodeId)) {
-      return LoginResult.linked(account); // already linked -- idempotent
+    final existingIndex = account.devices.indexWhere(
+      (device) => device.nodeId == nodeId,
+    );
+    if (existingIndex != -1) {
+      final existing = account.devices[existingIndex];
+      // Still idempotent in the sense that matters -- no second device row,
+      // and [DeviceLink.linkedAt] keeps its original value, so re-logging in
+      // never reshuffles a friend's reachability preference order
+      // (`Friend.devicesByPreference`). What a re-login *does* refresh is
+      // [DeviceLink.relayUrl]; if that hasn't changed either, nothing is
+      // written at all.
+      if (existing.relayUrl == relayUrl) return LoginResult.linked(account);
+
+      final devices = [...account.devices];
+      devices[existingIndex] = DeviceLink(
+        nodeId: existing.nodeId,
+        publicKeyBase64: existing.publicKeyBase64,
+        linkedAt: existing.linkedAt,
+        relayUrl: relayUrl,
+      );
+      final refreshed = account.copyWith(devices: devices);
+      accounts[index] = refreshed;
+      await _save(accounts);
+      return LoginResult.linked(refreshed);
     }
 
     final updated = account.copyWith(
@@ -211,6 +246,7 @@ class AccountStore {
           nodeId: nodeId,
           publicKeyBase64: publicKeyBase64,
           linkedAt: now,
+          relayUrl: relayUrl,
         ),
       ],
     );

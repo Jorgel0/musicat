@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:http/http.dart' as http;
+import 'package:musicat_server/src/accounts/account.dart';
 import 'package:musicat_server/src/accounts/account_routes.dart';
 import 'package:musicat_server/src/accounts/account_service_client.dart';
 import 'package:musicat_server/src/accounts/account_store.dart';
@@ -78,8 +79,9 @@ void main() {
   Future<String> login(
     String username,
     String password,
-    NodeIdentity identity,
-  ) async {
+    NodeIdentity identity, {
+    String? relayUrl,
+  }) async {
     final start = await http.post(
       Uri.parse('$accountServiceUrl/accounts/login/start'),
       body: jsonEncode({'username': username}),
@@ -96,6 +98,7 @@ void main() {
         'nodeId': identity.nodeId,
         'publicKeyBase64': await identity.publicKeyBase64(),
         'signatureOverNonce': base64Encode(signature.bytes),
+        'relayUrl': ?relayUrl,
       }),
     );
     expect(response.statusCode, anyOf(200, 201));
@@ -559,6 +562,161 @@ void main() {
         expect(cached!.devices, hasLength(2));
       },
     );
+  });
+
+  /// The reachability gap ADR 0050 named, closed. These are the pure-function
+  /// half; the end-to-end half (two real servers reaching each other over a
+  /// real relay, with no address anywhere) is
+  /// `account_relay_reachability_test.dart`.
+  group('mergeFriendDevices -- the two sources of relayUrl', () {
+    DeviceLink authoritative({String? relayUrl}) => DeviceLink(
+      nodeId: 'node-1',
+      publicKeyBase64: 'key-1',
+      linkedAt: DateTime.utc(2026, 1, 1),
+      relayUrl: relayUrl,
+    );
+
+    test("adopts the account service's relayUrl for a device this node has "
+        'never paired with -- the whole point of round B', () {
+      final merged = mergeFriendDevices(const <FriendDevice>[], [
+        authoritative(relayUrl: 'ws://relay.example:8090/connect'),
+      ]);
+
+      expect(merged.single.relayUrl, 'ws://relay.example:8090/connect');
+      // ...and still nothing the account service does not record.
+      expect(merged.single.address, isNull);
+      expect(merged.single.udpCandidate, isNull);
+    });
+
+    test('prefers a locally-learned relay over the authoritative one', () {
+      final merged = mergeFriendDevices(
+        const [
+          FriendDevice(
+            nodeId: 'node-1',
+            publicKeyBase64: 'key-1',
+            relayUrl: 'ws://paired-relay.example/connect',
+          ),
+        ],
+        [authoritative(relayUrl: 'ws://account-service-says.example/connect')],
+      );
+
+      expect(merged.single.relayUrl, 'ws://paired-relay.example/connect');
+    });
+
+    test('falls back to the authoritative relay when the cached device has '
+        'none, rather than leaving the device unreachable forever', () {
+      final merged = mergeFriendDevices(
+        const [
+          FriendDevice(
+            nodeId: 'node-1',
+            publicKeyBase64: 'key-1',
+            address: 'paired.example:8080',
+          ),
+        ],
+        [authoritative(relayUrl: 'ws://account-service-says.example/connect')],
+      );
+
+      expect(
+        merged.single.relayUrl,
+        'ws://account-service-says.example/connect',
+      );
+      // The locally-learned address is untouched -- that half is still
+      // local-only, and it still comes first in reachability order.
+      expect(merged.single.address, 'paired.example:8080');
+    });
+
+    test('leaves address and udpCandidate strictly local -- an authoritative '
+        'device can never introduce either', () {
+      final merged = mergeFriendDevices(
+        const [
+          FriendDevice(
+            nodeId: 'node-1',
+            publicKeyBase64: 'key-1',
+            address: '192.168.1.5:8080',
+            udpCandidate: '203.0.113.7:41234',
+          ),
+        ],
+        [authoritative()],
+      );
+
+      expect(merged.single.address, '192.168.1.5:8080');
+      expect(merged.single.udpCandidate, '203.0.113.7:41234');
+      expect(merged.single.relayUrl, isNull);
+    });
+  });
+
+  group("a friend's relay, learned from the account service", () {
+    test('arrives on the periodic device refresh, so an account-only friend '
+        'becomes reachable without ever pairing', () async {
+      // Alice's *new* device publishes a relay when it logs in. This node has
+      // never paired with it and knows no address for it.
+      await login(
+        'alice',
+        'hunter2-correct',
+        aliceDesktop,
+        relayUrl: 'ws://alice-relay.example:8090/connect',
+      );
+
+      expect(await refresher.refreshAll(), 1);
+
+      final cached = await friendStore.findByAccountId(aliceAccountId);
+      final desktop = cached!.deviceFor(aliceDesktop.nodeId)!;
+      expect(desktop.address, isNull);
+      expect(desktop.relayUrl, 'ws://alice-relay.example:8090/connect');
+    });
+
+    test('does not overwrite the relay this node learned by pairing with '
+        'that same device', () async {
+      // The locally-cached phone was paired with, and reported a relay then.
+      await friendStore.updateDevices(aliceAccountId, [
+        FriendDevice(
+          nodeId: alicePhone.nodeId,
+          publicKeyBase64: await alicePhone.publicKeyBase64(),
+          address: 'alice.example:8080',
+          relayUrl: 'ws://paired-relay.example:8090/connect',
+        ),
+      ]);
+      // Alice re-logs in from that same phone, now publishing a different one.
+      await login(
+        'alice',
+        'hunter2-correct',
+        alicePhone,
+        relayUrl: 'ws://account-service-relay.example:8090/connect',
+      );
+
+      await refresher.refreshAll();
+
+      final cached = await friendStore.findByAccountId(aliceAccountId);
+      expect(
+        cached!.deviceFor(alicePhone.nodeId)!.relayUrl,
+        'ws://paired-relay.example:8090/connect',
+      );
+    });
+
+    test('a re-login with no relay clears it on the account service, so a '
+        'stale endpoint is never served to friends', () async {
+      await login(
+        'alice',
+        'hunter2-correct',
+        aliceDesktop,
+        relayUrl: 'ws://alice-relay.example:8090/connect',
+      );
+      expect(
+        (await accountStore.findById(
+          aliceAccountId,
+        ))!.devices.firstWhere((d) => d.nodeId == aliceDesktop.nodeId).relayUrl,
+        'ws://alice-relay.example:8090/connect',
+      );
+
+      await login('alice', 'hunter2-correct', aliceDesktop);
+
+      expect(
+        (await accountStore.findById(
+          aliceAccountId,
+        ))!.devices.firstWhere((d) => d.nodeId == aliceDesktop.nodeId).relayUrl,
+        isNull,
+      );
+    });
   });
 
   group('POST /friends with a claimed accountId', () {

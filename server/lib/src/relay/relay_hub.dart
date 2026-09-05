@@ -9,6 +9,7 @@ import 'package:shelf_router/shelf_router.dart';
 import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../accounts/device_notifier.dart';
 import '../identity/node_identity.dart';
 import 'relay_protocol.dart';
 import 'username_directory_store.dart';
@@ -67,7 +68,14 @@ class _TunnelDisconnectedException implements Exception {
 /// codes/links. A username is never a new form of trust or authentication;
 /// the nodeId/keypair stays the real trust anchor, exactly as before this
 /// existed.
-class RelayHub {
+///
+/// Finally, it implements [DeviceNotifier] ([notify]) so the account service
+/// deployed in this same process (`bin/relay.dart`) can nudge a node over
+/// the tunnel it already holds open. That is the *only* thing the hub
+/// originates rather than forwards, and it is deliberately contentless --
+/// see [RelayNotify] for why a dumb pipe is allowed to say "go look" but
+/// never "here is what changed".
+class RelayHub implements DeviceNotifier {
   /// [dataDir], if given, is where the `username -> nodeId` directory (see
   /// [usernames]) is persisted across restarts -- a real deployment should
   /// always pass one (see `bin/relay.dart`'s `MUSICAT_RELAY_DATA_DIR`).
@@ -91,6 +99,35 @@ class RelayHub {
 
   bool isConnected(String nodeId) => _tunnels.containsKey(nodeId);
   int get connectedCount => _tunnels.length;
+
+  /// Pushes a contentless [RelayNotify] to [nodeId]'s tunnel, if it has one
+  /// open right now. Returns whether anything was actually sent -- `false`
+  /// for a node that isn't currently connected here, which is an ordinary,
+  /// expected outcome and not an error: that node's own periodic poll
+  /// (`federation/account_update_poller.dart`) is what guarantees it finds
+  /// out eventually. Nothing is queued for later delivery, deliberately; a
+  /// stored nudge that arrives an hour late is strictly worse than a poll,
+  /// and it would give the hub durable per-node state it currently has none
+  /// of.
+  ///
+  /// **Never throws.** The caller is an HTTP handler on the account service
+  /// that has already decided its response ([DeviceNotifier.notifyDevice]),
+  /// and a failing push must not turn a successful accept into a `500`. A
+  /// sink that has just died (the tunnel dropped between the lookup and the
+  /// write) is exactly the not-connected case, one moment later.
+  bool notify(String nodeId, AccountEvent event) {
+    final tunnel = _tunnels[nodeId];
+    if (tunnel == null) return false;
+    try {
+      tunnel.channel.sink.add(RelayNotify(event.name).encode());
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  void notifyDevice(String nodeId, AccountEvent event) => notify(nodeId, event);
 
   /// Forcibly closes [nodeId]'s tunnel from this side, if one is currently
   /// open -- a no-op otherwise. Useful operationally (e.g. kicking a

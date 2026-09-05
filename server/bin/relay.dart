@@ -33,6 +33,15 @@ import 'package:shelf_router/shelf_router.dart';
 /// account service is its own module (`AccountStore`/`FriendRequestStore`)
 /// rather than folded into [RelayHub] itself, even though it shares a data
 /// directory and an HTTP port with it.
+///
+/// Because the two *are* in one process, the account service is handed the
+/// hub as its [DeviceNotifier] -- a one-method capability, not the hub
+/// itself in any broader sense (see that interface's doc comment) -- so
+/// accepting a friend request can nudge the other side's devices over the
+/// tunnels they already hold open, instead of leaving them to find out on
+/// their next poll. That nudge deliberately carries no data at all: see
+/// [RelayNotify]. This is the only wire between the two modules, and it
+/// points one way.
 void main(List<String> args) async {
   final ip = InternetAddress.anyIPv4;
   final port = int.parse(Platform.environment['PORT'] ?? '8090');
@@ -43,7 +52,11 @@ void main(List<String> args) async {
   final hub = RelayHub(dataDir: dataDir);
   final accountStore = AccountStore(dataDir);
   final friendRequestStore = FriendRequestStore(dataDir);
-  final accountRouter = buildAccountRouter(accountStore, friendRequestStore);
+  final accountRouter = buildAccountRouter(
+    accountStore,
+    friendRequestStore,
+    deviceNotifier: hub,
+  );
 
   final router = Router()
     ..mount('/accounts/', accountRouter.call)

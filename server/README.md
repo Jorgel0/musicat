@@ -88,6 +88,24 @@ Endpoints so far:
 - `DELETE /api/v1/account` — logs out (`204`, idempotent). Clears the
   session only — friends are local trust and are deliberately left
   untouched
+- `GET /api/v1/account/friend-requests` — the friend requests currently
+  addressed to this account and still pending: `{"requests": [{"id",
+  "fromAccountId", "fromUsername", "toAccountId", "toUsername", "status",
+  "createdAt"}], "fetchedAt": "...ISO..." | null, "live": bool}`. Fetched
+  live when the account service is reachable (`"live": true`); otherwise
+  the last list this node saw, with `"live": false`. A `null` `fetchedAt`
+  means this node has never managed a fetch — an empty list it cannot
+  vouch for, as opposed to a confirmed empty one
+- `POST /api/v1/account/friend-requests` (`{"toUsername"}`) — sends a
+  friend request by username; `201` with the created request. Sending
+  again while one is still pending returns the existing one rather than
+  creating a second. `404` if that username has no account
+- `POST /api/v1/account/friend-requests/<id>/accept` and `.../decline` —
+  answers one; `200` with the updated request. Accepting immediately syncs
+  the new friendship into the local friend list before answering, so
+  `GET /api/v1/federation/friends` already reflects it. `403` if this
+  account isn't the request's recipient, `404` for an unknown id, `409` if
+  it was already answered
 - `POST /api/v1/library/shared-tracks` (`{"filePath", "title", "artist",
   "album"?, "coverArtPath"?, "visibility": {"type": "friends", "nodeIds"} |
   {"type": "allFriends"}}`) — shares a local file's metadata
@@ -157,11 +175,23 @@ Configuration is via environment variables:
   the path of a normal request between two already-established friends —
   it is consulted only when an incoming request comes from a device this
   server has never heard of (rate-limited), on the periodic refresh of a
-  friend account's device list (every 30 minutes), when a peer redeeming a
-  pairing code claims to belong to an account, and when this node's own
-  user logs in (`POST /api/v1/account/login`, which also pulls that
-  account's accepted friendships in once). Two friends on the same network
-  can always share with it down, logged in or not.
+  friend account's device list (every 30 minutes), on the periodic refresh
+  of this account's own friends and pending friend requests (every 5
+  minutes), when a peer redeeming a pairing code claims to belong to an
+  account, when this node's own user logs in or answers a friend request,
+  and when the relay nudges this node that something changed. Two friends
+  on the same network can always share with it down, logged in or not, and
+  **a node that never logs in never contacts it at all** — the periodic
+  refreshes do nothing without a session.
+
+  Logging in also publishes this node's own relay URL (`MUSICAT_RELAY_URL`,
+  if it connected to one) to the account service, so that people who become
+  friends purely through a friend request — with no pairing and therefore no
+  address for each other — can still reach each other through it. That
+  discloses which relay you use to your mutual friends, and to nobody else;
+  it is the same thing already exchanged when pairing directly. A node with
+  no relay configured publishes nothing and stays reachable only at whatever
+  address a friend already has for it.
 
 ## Running with Docker
 

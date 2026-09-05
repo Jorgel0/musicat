@@ -119,20 +119,26 @@ class FriendSyncResult {
 ///
 /// Locally-learned reachability survives a sync: devices are merged with
 /// [mergeFriendDevices], the same helper [FriendDeviceRefresher] uses, so
-/// `address`/`udpCandidate`/`relayUrl` — none of which the account service
-/// records — are carried over per nodeId rather than blanked.
+/// `address`/`udpCandidate` — which the account service does not record —
+/// are carried over per nodeId rather than blanked, and a locally-learned
+/// `relayUrl` wins over the account service's own.
 ///
-/// **A friend learned here has no address for any device**, because the
-/// account service stores keys and not addresses. Such a friend can already
-/// *verify* — their signed requests to this node are accepted the moment
-/// they arrive — but this node cannot *initiate* to them: browsing them
-/// fails fast and cleanly with `FriendUnreachableException`
+/// **A friend learned here has no *address* for any device**, because the
+/// account service stores keys and not addresses. What it does store is each
+/// device's `relayUrl`, and that is what makes such a friend usable:
+/// `reachFriend` routes `<relay http origin>/<nodeId>/<path>` (ADR 0033, the
+/// mechanism proven across real networks in ADR 0035/0047), so two people who
+/// become friends purely through the account service can browse and download
+/// from each other without ever exchanging an address. ADR 0050 shipped
+/// without this and said so plainly; round B closed it.
+///
+/// A friend whose devices report *no* relay either (nobody has one
+/// configured) still can't be initiated to. They can always *verify* — their
+/// signed requests to this node are accepted the moment they arrive — but
+/// browsing them fails fast and cleanly with `FriendUnreachableException`
 /// (`friend_reachability.dart` finds no candidates at all, so it throws
 /// immediately rather than timing out), which the sharing routes turn into a
-/// `502 {"error": "Friend unreachable: ..."}`. That is a real product gap,
-/// not an implementation detail: two people who become friends purely
-/// through the account service still need some way to exchange an address
-/// before either can browse the other. Closing it is a later item's job.
+/// `502 {"error": "Friend unreachable: ..."}`.
 class FriendSyncService {
   FriendSyncService({
     required this.friendStore,

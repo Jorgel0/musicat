@@ -107,6 +107,60 @@ class AccountLoginResult {
   bool get created => outcome == AccountLoginOutcome.created;
 }
 
+/// How a friend-request *action* against the account service ended --
+/// [AccountServiceClient.sendFriendRequest] and
+/// [AccountServiceClient.respondToFriendRequest].
+///
+/// Not collapsed to a nullable result, unlike [AccountServiceClient.devicesOf]
+/// and friends, and for the same reason [AccountLoginOutcome] isn't: a person
+/// is waiting. "There is nobody with that username", "that request is already
+/// accepted" and "the account service is down" ask three different things of
+/// them, and one `null` would force the route above to invent a single wrong
+/// message for all three.
+enum FriendRequestActionOutcome {
+  ok,
+
+  /// `404`: no such username (when sending), or no such friend request (when
+  /// responding).
+  notFound,
+
+  /// `403`: the account service refused this account the action -- notably,
+  /// only a request's *recipient* may accept or decline it.
+  forbidden,
+
+  /// `409`: the request has already been accepted or declined the other way.
+  conflict,
+
+  /// `400`: the service rejected the request itself (e.g. befriending
+  /// yourself). [FriendRequestActionResult.error] carries its own wording.
+  invalid,
+
+  /// Never answered at all: connection refused, DNS failure, or
+  /// [AccountServiceClient.timeout] elapsed.
+  serviceUnreachable,
+
+  /// Answered with something unusable -- a `5xx`, an unexpected status, or a
+  /// body this client couldn't parse.
+  failed,
+}
+
+/// The outcome of one friend-request action. [request] is non-null exactly
+/// when [outcome] is [FriendRequestActionOutcome.ok] *and* the service
+/// returned a request body (both `send` and `accept`/`decline` do).
+class FriendRequestActionResult {
+  const FriendRequestActionResult(this.outcome, {this.request, this.error});
+
+  final FriendRequestActionOutcome outcome;
+  final AccountFriendRequest? request;
+
+  /// The account service's own `{"error": ...}` message, when it sent one --
+  /// safe to forward to the app: it never echoes anything the caller
+  /// submitted beyond a username the caller typed itself.
+  final String? error;
+
+  bool get isSuccess => outcome == FriendRequestActionOutcome.ok;
+}
+
 /// A Musicat Server's *client* for the account service (`account_routes.dart`,
 /// hosted on the relay process, ADR 0048) — the only code in a node that
 /// talks to it.
@@ -169,6 +223,16 @@ class AccountServiceClient {
   /// `logRequests()` and every proxy in between record paths and query
   /// strings but not bodies).
   ///
+  /// [relayUrl] is this node's own currently-connected relay endpoint, if it
+  /// has one, and login is the *only* place it is ever published: the account
+  /// service records it against this device (see [DeviceLink.relayUrl]) so
+  /// that friends made purely through friend requests have some way to reach
+  /// this node at all. Omitting it means "I have no relay", and clears any
+  /// endpoint previously recorded for this device. It is deliberately not
+  /// something this client refreshes on its own schedule — a node that
+  /// changes relays publishes that by logging in again, which is also the
+  /// only moment its user is present to consent to the disclosure.
+  ///
   /// **Unlike [accountIdForDevice] and [devicesOf], this does not collapse
   /// its failures into `null`, and that inconsistency is deliberate.** Those
   /// two exist to *refresh a cache*, and every way they can fail has the
@@ -182,6 +246,7 @@ class AccountServiceClient {
   Future<AccountLoginResult> login({
     required String username,
     required String password,
+    String? relayUrl,
   }) async {
     final List<int> nonce;
     try {
@@ -226,6 +291,10 @@ class AccountServiceClient {
               'nodeId': identity.nodeId,
               'publicKeyBase64': await identity.publicKeyBase64(),
               'signatureOverNonce': base64Encode(signature),
+              // Omitted entirely (not sent as null) when this node has no
+              // relay, so an older account service that doesn't know this
+              // field sees the exact request it always did.
+              if (relayUrl != null && relayUrl.isNotEmpty) 'relayUrl': relayUrl,
             }),
           )
           .timeout(timeout);
@@ -405,6 +474,149 @@ class AccountServiceClient {
     } catch (_) {
       return (devices: null, reachable: true);
     }
+  }
+
+  /// Every friend request currently *pending* and addressed to [accountId] --
+  /// `GET <baseUrl>/<accountId>/friend-requests?status=pending`, signed as
+  /// this node's own device.
+  ///
+  /// `null` on any failure at all (unreachable service, `401`/`403`, an
+  /// unparseable body), collapsed exactly like [devicesOf] and [friendsOf]:
+  /// every caller does the same thing with all of them, which is to keep
+  /// whatever it already had. An empty list, by contrast, is a real answer
+  /// ("nobody has asked to be your friend") and is distinct from `null` --
+  /// [PendingFriendRequestCache] stores the former and ignores the latter,
+  /// which is what stops a moment of downtime from silently emptying the
+  /// app's list.
+  ///
+  /// Only *incoming* requests exist to be listed: the account service has
+  /// never had a way to see your own outgoing ones (see
+  /// `account_routes.dart`), so neither does this.
+  Future<List<AccountFriendRequest>?> pendingFriendRequestsOf(
+    String accountId,
+  ) async {
+    final uri = Uri.parse(
+      '$baseUrl/${Uri.encodeComponent(accountId)}/friend-requests',
+    ).replace(queryParameters: {'status': 'pending'});
+    try {
+      // Signed over the *path only*, matching `RequestSigner`'s canonical
+      // string and the account service's own `request.requestedUri.path`:
+      // the query string is deliberately outside the signature on both
+      // sides, so it must not be included here either.
+      final headers = await RequestSigner(
+        identity,
+      ).sign(method: 'GET', path: uri.path);
+      final response = await _client
+          .get(uri, headers: headers)
+          .timeout(timeout);
+      if (response.statusCode != 200) return null;
+      final body = jsonDecode(response.body) as List<dynamic>;
+      return [
+        for (final entry in body)
+          AccountFriendRequest.fromJson(entry as Map<String, dynamic>),
+      ];
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Sends a friend request from [accountId] to whoever currently holds
+  /// [toUsername] -- `POST <baseUrl>/<accountId>/friend-requests`
+  /// `{toUsername}`, signed as this node's own device.
+  ///
+  /// Idempotent on the service's side: a second send while one is still
+  /// pending in the same direction returns the existing request rather than
+  /// creating a second (see `account_routes.dart`), so a user pressing the
+  /// button twice is harmless.
+  Future<FriendRequestActionResult> sendFriendRequest({
+    required String accountId,
+    required String toUsername,
+  }) async {
+    final uri = Uri.parse(
+      '$baseUrl/${Uri.encodeComponent(accountId)}/friend-requests',
+    );
+    final body = jsonEncode({'toUsername': toUsername});
+    return _friendRequestAction(() async {
+      final headers = await RequestSigner(
+        identity,
+      ).sign(method: 'POST', path: uri.path, body: body);
+      return _client.post(
+        uri,
+        headers: {...headers, 'content-type': 'application/json'},
+        body: body,
+      );
+    }, successStatus: 201);
+  }
+
+  /// Accepts or declines the friend request [requestId] as [accountId] --
+  /// `POST <baseUrl>/<accountId>/friend-requests/<requestId>/accept` (or
+  /// `/decline`), signed as this node's own device.
+  ///
+  /// The service only lets a request's *recipient* respond
+  /// ([FriendRequestActionOutcome.forbidden] otherwise), and only while it is
+  /// still pending ([FriendRequestActionOutcome.conflict] once it isn't).
+  Future<FriendRequestActionResult> respondToFriendRequest({
+    required String accountId,
+    required String requestId,
+    required bool accept,
+  }) async {
+    final uri = Uri.parse(
+      '$baseUrl/${Uri.encodeComponent(accountId)}/friend-requests/'
+      '${Uri.encodeComponent(requestId)}/${accept ? 'accept' : 'decline'}',
+    );
+    return _friendRequestAction(() async {
+      final headers = await RequestSigner(
+        identity,
+      ).sign(method: 'POST', path: uri.path);
+      return _client.post(uri, headers: headers);
+    }, successStatus: 200);
+  }
+
+  /// The shared status-to-outcome mapping for the two actions above --
+  /// written once because they answer with the same statuses and the same
+  /// body, and two copies would be free to disagree about what a `409` means.
+  Future<FriendRequestActionResult> _friendRequestAction(
+    Future<http.Response> Function() send, {
+    required int successStatus,
+  }) async {
+    final http.Response response;
+    try {
+      response = await send();
+    } catch (_) {
+      return const FriendRequestActionResult(
+        FriendRequestActionOutcome.serviceUnreachable,
+        error: 'Could not reach the account service',
+      );
+    }
+
+    // Everything from here on is the service having answered, so a refusal is
+    // never reported as it being down.
+    final message = _errorMessageOf(response);
+    if (response.statusCode == successStatus) {
+      try {
+        return FriendRequestActionResult(
+          FriendRequestActionOutcome.ok,
+          request: AccountFriendRequest.fromJson(
+            jsonDecode(response.body) as Map<String, dynamic>,
+          ),
+        );
+      } catch (_) {
+        return const FriendRequestActionResult(
+          FriendRequestActionOutcome.failed,
+          error: 'The account service returned a malformed friend request',
+        );
+      }
+    }
+    return FriendRequestActionResult(switch (response.statusCode) {
+      400 => FriendRequestActionOutcome.invalid,
+      403 => FriendRequestActionOutcome.forbidden,
+      404 => FriendRequestActionOutcome.notFound,
+      409 => FriendRequestActionOutcome.conflict,
+      // A `401` here means this node's own device isn't linked to the account
+      // it claims to be -- a broken local session, not something the user can
+      // fix by retrying, and not a reason to say the service is down.
+      _ => FriendRequestActionOutcome.failed,
+    }, error: message);
   }
 
   /// Closes the underlying HTTP client, if this instance created it (an

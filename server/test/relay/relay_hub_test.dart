@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:http/http.dart' as http;
+import 'package:musicat_server/src/accounts/device_notifier.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
 import 'package:musicat_server/src/relay/relay_hub.dart';
 import 'package:musicat_server/src/relay/relay_protocol.dart';
@@ -368,5 +369,45 @@ void main() {
         expect(await reloadedHub.usernames.lookup('alice'), identity.nodeId);
       },
     );
+  });
+
+  group('notify -- the contentless push', () {
+    test('reaches a connected node as a plain "go look", with no payload of '
+        'any kind', () async {
+      final (channel, messages) = await authenticate(identity);
+      addTearDown(() => channel.sink.close());
+
+      expect(hub.notify(identity.nodeId, AccountEvent.friendRequests), isTrue);
+
+      await messages.moveNext();
+      final raw =
+          jsonDecode(messages.current as String) as Map<String, dynamic>;
+      // The load-bearing assertion of this whole mechanism: the wire message
+      // has room for a kind and nothing else. If it ever grows a field, a
+      // hostile relay has gained the ability to tell a node something.
+      expect(raw.keys.toSet(), {'type', 'event'});
+      expect(raw['type'], 'notify');
+      expect(raw['event'], 'friendRequests');
+    });
+
+    test('is a silent no-op for a node that is not connected -- that is what '
+        "the node's own poll is for", () {
+      expect(
+        hub.notify('not-a-connected-node', AccountEvent.friendRequests),
+        isFalse,
+      );
+    });
+
+    test('notifyDevice never throws, whatever it is handed', () {
+      // The DeviceNotifier contract the account service relies on: it calls
+      // this from inside a handler that has already decided its response.
+      expect(
+        () => (hub as DeviceNotifier).notifyDevice(
+          'not-a-connected-node',
+          AccountEvent.friendRequests,
+        ),
+        returnsNormally,
+      );
+    });
   });
 }

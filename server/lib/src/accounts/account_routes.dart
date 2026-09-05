@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cryptography/cryptography.dart';
@@ -9,6 +10,7 @@ import '../relay/username_directory_store.dart' show invalidUsernameFormatError;
 import 'account.dart';
 import 'account_request_auth.dart';
 import 'account_store.dart';
+import 'device_notifier.dart';
 import 'friend_request.dart';
 import 'friend_request_store.dart';
 import 'login_nonce_store.dart';
@@ -25,13 +27,66 @@ Response _error(String message, {int status = 400}) =>
 
 Map<String, dynamic> _deviceJson(DeviceLink device) => device.toJson();
 
-Map<String, dynamic> _friendRequestJson(FriendRequest request) => {
-  'id': request.id,
-  'fromAccountId': request.fromAccountId,
-  'toAccountId': request.toAccountId,
-  'status': request.status.name,
-  'createdAt': request.createdAt.toIso8601String(),
+/// Every account's current username, by accountId -- one file read, reused
+/// for every request in a response, instead of one [AccountStore.findById]
+/// (and therefore one full read of `accounts.json`) per side of per request.
+Future<Map<String, String>> _usernamesById(AccountStore accountStore) async => {
+  for (final account in await accountStore.loadAll())
+    account.accountId: account.username,
 };
+
+/// [request] as the wire shape [AccountFriendRequest] documents, with both
+/// sides' usernames resolved from [usernames] (see [_usernamesById]) -- an
+/// accountId is not something an app can show a human, which is the entire
+/// reason this projection exists.
+Map<String, dynamic> _friendRequestJson(
+  FriendRequest request,
+  Map<String, String> usernames,
+) => AccountFriendRequest(
+  id: request.id,
+  fromAccountId: request.fromAccountId,
+  fromUsername: usernames[request.fromAccountId],
+  toAccountId: request.toAccountId,
+  toUsername: usernames[request.toAccountId],
+  status: request.status.name,
+  createdAt: request.createdAt,
+).toJson();
+
+/// Nudges every currently-connected device of [accountId] with
+/// [AccountEvent.friendRequests] -- the push half of "push for convenience,
+/// poll for correctness" (see [DeviceNotifier] and [RelayNotify]).
+///
+/// **Fire-and-forget, and it must stay that way.** Every caller wraps this
+/// in `unawaited`, so the HTTP response is already on its way before the
+/// device list is even read: a push is best-effort by definition, and a slow
+/// or failing one must never delay, let alone fail, the accept/decline/send
+/// it is announcing. Every failure mode -- no notifier configured, an
+/// account that vanished, a device with no tunnel, a tunnel that just died
+/// -- is silent and equivalent, because the receiving node's own poll makes
+/// all of them converge anyway.
+///
+/// Notifies *every* device of the account, including the one that made the
+/// call. Excluding the caller would be a special case worth exactly one
+/// redundant re-fetch, and getting it wrong (excluding a device that is
+/// merely on the same account) would silently break the multi-device case
+/// this service exists for.
+Future<void> _notifyAccountDevices(
+  AccountStore accountStore,
+  DeviceNotifier? notifier,
+  String accountId,
+) async {
+  if (notifier == null) return;
+  try {
+    final account = await accountStore.findById(accountId);
+    if (account == null) return;
+    for (final device in account.devices) {
+      notifier.notifyDevice(device.nodeId, AccountEvent.friendRequests);
+    }
+  } catch (_) {
+    // Deliberately silent: see this function's own doc comment. There is no
+    // caller that could do anything useful with a failed push.
+  }
+}
 
 Map<String, dynamic> _loginResponseJson(
   Account account, {
@@ -83,10 +138,11 @@ Future<Account?> _authenticateCaller(
   return result == AccountRequestVerificationResult.valid ? account : null;
 }
 
-Response _respondOutcomeResponse(
+Future<Response> _respondOutcomeResponse(
   RespondOutcome outcome,
   FriendRequest? request,
-) {
+  AccountStore accountStore,
+) async {
   switch (outcome) {
     case RespondOutcome.notFound:
       return _error('Unknown friend request', status: 404);
@@ -102,7 +158,9 @@ Response _respondOutcomeResponse(
       );
     case RespondOutcome.updated:
     case RespondOutcome.alreadyInThatState:
-      return _json(_friendRequestJson(request!));
+      return _json(
+        _friendRequestJson(request!, await _usernamesById(accountStore)),
+      );
   }
 }
 
@@ -122,7 +180,7 @@ Response _respondOutcomeResponse(
 /// repeatable query.)
 ///
 /// `POST /login/complete` `{username, password, nodeId, publicKeyBase64,
-/// signatureOverNonce}` -- verifies, in order: [loginRateLimiter] isn't
+/// signatureOverNonce, relayUrl?}` -- verifies, in order: [loginRateLimiter] isn't
 /// currently locking this username out (`429`); a pending nonce from
 /// `login/start` exists for this exact username and hasn't expired or
 /// already been consumed (`401`, single-use exactly like
@@ -136,6 +194,14 @@ Response _respondOutcomeResponse(
 /// which also feeds [loginRateLimiter]). Never creates a second,
 /// conflicting account on a race (see `AccountStore._mutationLock`).
 ///
+/// The optional `relayUrl` is the logging-in device's own relay endpoint,
+/// and **every login refreshes it**, including a re-login from an
+/// already-linked device (sending none clears it). It is the one piece of
+/// reachability this service records, and it exists so two people who become
+/// friends purely here can actually reach each other -- see
+/// [DeviceLink.relayUrl] for the full rationale, including what it discloses
+/// to whom.
+///
 /// `DELETE /<accountId>/devices/<nodeId>` -- authenticated as a signed
 /// request from a device already linked to *that same* `accountId` (see
 /// [_authenticateCaller]); `401` if not authenticated at all, `403` if
@@ -147,7 +213,8 @@ Response _respondOutcomeResponse(
 /// `404`.
 ///
 /// `GET /<accountId>/devices` -- the full device list
-/// (`{accountId, devices: [{nodeId, publicKeyBase64, linkedAt}, ...]}`).
+/// (`{accountId, devices: [{nodeId, publicKeyBase64, linkedAt, relayUrl},
+/// ...]}`).
 /// Always allowed for `accountId` looking up its own devices; otherwise
 /// gated on an `accepted` friend request existing between the caller's own
 /// authenticated account and `accountId`, in either direction (`403` if
@@ -163,11 +230,15 @@ Response _respondOutcomeResponse(
 /// `GET /<me>/friend-requests?status=` -- authenticated as `<me>`; lists
 /// every request currently addressed *to* `<me>`, optionally narrowed to a
 /// single `status` (`pending`/`accepted`/`declined`; `400` for anything
-/// else).
+/// else). Every friend-request response here (this one, `send`, `accept`
+/// and `decline`) carries both sides' **usernames** alongside their
+/// accountIds -- see [AccountFriendRequest].
 ///
 /// `GET /<me>/friends` -- authenticated as `<me>`; every account `<me>`
 /// has an *accepted* friend request with, in either direction, as
-/// `[{accountId, username, devices: [...]}, ...]` (a bare JSON array, like
+/// `[{accountId, username, devices: [...]}, ...]` (each device including
+/// its [DeviceLink.relayUrl], which is what makes a friend learned here
+/// reachable at all) (a bare JSON array, like
 /// its `GET /<me>/friend-requests` sibling). This is the endpoint a node's
 /// own `FriendSyncService` polls to learn who it is friends with; see
 /// [AccountFriend] for why each friend's device list is inlined rather than
@@ -179,11 +250,20 @@ Response _respondOutcomeResponse(
 /// request); `404` if `requestId` doesn't exist; `409` if it's already
 /// been accepted/declined the *other* way; a no-op success if it's already
 /// in the exact state being requested.
+///
+/// [deviceNotifier] is optional and defaults to `null` -- with none, this
+/// service works exactly as it did before push existed, and every existing
+/// caller (and every node whose relay hosts no account service) keeps
+/// working unchanged. When one *is* given, `POST /<me>/friend-requests` and
+/// its `accept`/`decline` siblings nudge the affected account's devices
+/// afterwards; see [_notifyAccountDevices] for who is notified and why that
+/// push can never carry data.
 Router buildAccountRouter(
   AccountStore accountStore,
   FriendRequestStore friendRequestStore, {
   LoginNonceStore? loginNonceStore,
   LoginRateLimiter? loginRateLimiter,
+  DeviceNotifier? deviceNotifier,
 }) {
   final nonces = loginNonceStore ?? LoginNonceStore();
   final rateLimiter = loginRateLimiter ?? LoginRateLimiter();
@@ -219,6 +299,7 @@ Router buildAccountRouter(
     final nodeId = body['nodeId'];
     final publicKeyBase64 = body['publicKeyBase64'];
     final signatureOverNonce = body['signatureOverNonce'];
+    final relayUrl = body['relayUrl'];
     if (username is! String || username.isEmpty) {
       return _error('"username" is required');
     }
@@ -233,6 +314,13 @@ Router buildAccountRouter(
     }
     if (signatureOverNonce is! String || signatureOverNonce.isEmpty) {
       return _error('"signatureOverNonce" is required');
+    }
+    // Optional, and the *only* reachability this service ever records (see
+    // [DeviceLink.relayUrl]). An empty string is normalized to null rather
+    // than rejected: it means the same thing a node with no relay means, and
+    // failing a login over it would be an absurd way to find out.
+    if (relayUrl != null && relayUrl is! String) {
+      return _error('"relayUrl" must be a string if present');
     }
 
     if (rateLimiter.isLockedOut(username)) {
@@ -284,6 +372,7 @@ Router buildAccountRouter(
       password: password,
       nodeId: nodeId,
       publicKeyBase64: publicKeyBase64,
+      relayUrl: (relayUrl is String && relayUrl.isNotEmpty) ? relayUrl : null,
     );
 
     switch (result.outcome) {
@@ -383,7 +472,15 @@ Router buildAccountRouter(
     }
 
     final friendRequest = await friendRequestStore.send(me, target.accountId);
-    return _json(_friendRequestJson(friendRequest), status: 201);
+    // The recipient is the only account whose view actually changed (a new
+    // pending request); the sender is right here holding the response.
+    unawaited(
+      _notifyAccountDevices(accountStore, deviceNotifier, target.accountId),
+    );
+    return _json(
+      _friendRequestJson(friendRequest, await _usernamesById(accountStore)),
+      status: 201,
+    );
   });
 
   router.get('/<me>/friend-requests', (Request request, String me) async {
@@ -411,8 +508,10 @@ Router buildAccountRouter(
       me,
       status: status,
     );
+    final usernames = await _usernamesById(accountStore);
     return _json([
-      for (final friendRequest in requests) _friendRequestJson(friendRequest),
+      for (final friendRequest in requests)
+        _friendRequestJson(friendRequest, usernames),
     ]);
   });
 
@@ -474,7 +573,22 @@ Router buildAccountRouter(
     }
 
     final (outcome, updated) = await friendRequestStore.accept(requestId, me);
-    return _respondOutcomeResponse(outcome, updated);
+    if (outcome == RespondOutcome.updated) {
+      // Both sides' views changed, and for different reasons: the sender has
+      // gained a friend (the important one -- nothing else would ever tell
+      // them), and `<me>`'s *other* devices have lost a pending request and
+      // gained the same friend. The accepting device is notified too; see
+      // [_notifyAccountDevices].
+      unawaited(
+        _notifyAccountDevices(
+          accountStore,
+          deviceNotifier,
+          updated!.fromAccountId,
+        ),
+      );
+      unawaited(_notifyAccountDevices(accountStore, deviceNotifier, me));
+    }
+    return _respondOutcomeResponse(outcome, updated, accountStore);
   });
 
   router.post('/<me>/friend-requests/<requestId>/decline', (
@@ -492,7 +606,16 @@ Router buildAccountRouter(
     }
 
     final (outcome, updated) = await friendRequestStore.decline(requestId, me);
-    return _respondOutcomeResponse(outcome, updated);
+    if (outcome == RespondOutcome.updated) {
+      // Only `<me>`'s own devices: their pending list just shrank. The
+      // *sender* is deliberately not told -- there is nothing they could
+      // fetch (`GET /<me>/friend-requests` only ever lists requests
+      // addressed *to* the caller, so a declined outgoing request is not
+      // visible to them at all), so a push would be a pure "you were
+      // declined, right now" side channel in exchange for nothing.
+      unawaited(_notifyAccountDevices(accountStore, deviceNotifier, me));
+    }
+    return _respondOutcomeResponse(outcome, updated, accountStore);
   });
 
   return router;

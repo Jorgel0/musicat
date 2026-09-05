@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -8,8 +9,11 @@ import 'package:shelf_router/shelf_router.dart';
 import 'src/accounts/account_app_routes.dart';
 import 'src/accounts/account_service_client.dart';
 import 'src/accounts/account_session_store.dart';
+import 'src/accounts/device_notifier.dart';
+import 'src/accounts/pending_friend_request_cache.dart';
 import 'src/federation/account_friend_devices.dart';
 import 'src/federation/account_friend_sync.dart';
+import 'src/federation/account_update_poller.dart';
 import 'src/federation/federation_routes.dart';
 import 'src/federation/friend_store.dart';
 import 'src/federation/pairing_code_store.dart';
@@ -44,6 +48,7 @@ class MusicatServerHandle {
     required this._relayClient,
     required this._puncher,
     required this._deviceRefresher,
+    required this._accountUpdates,
     required this._accountService,
   });
 
@@ -70,6 +75,7 @@ class MusicatServerHandle {
   final RelayClient? _relayClient;
   final UdpPuncher _puncher;
   final FriendDeviceRefresher? _deviceRefresher;
+  final AccountUpdatePoller? _accountUpdates;
   final AccountServiceClient? _accountService;
 
   /// Shuts down everything [startMusicatServer] started: the relay tunnel
@@ -79,6 +85,7 @@ class MusicatServerHandle {
   /// connect.
   Future<void> close() async {
     _deviceRefresher?.stop();
+    _accountUpdates?.stop();
     _accountService?.close();
     await _relayClient?.close();
     await _puncher.close();
@@ -196,16 +203,25 @@ Router _buildRouter(
 /// When it *is* configured it is still never on that path — it is only
 /// reached when an incoming nodeId matches no known friend's cached device
 /// set (a rate-limited lookup, see [AccountFriendDeviceResolver]), on the
-/// periodic device refresh below, when a pairing caller claims an
-/// accountId, and when this node's own user logs in (`POST
-/// /api/v1/account/login`, which also runs one [FriendSyncService] pass).
-/// Two established friends can always share with it down, and nothing here
-/// starts a background friend sync on its own: [FriendSyncService] only
-/// ever runs when something asks it to.
+/// two periodic background jobs below, when a pairing caller claims an
+/// accountId, when this node's own user acts on an account (logging in, or
+/// any `/api/v1/account/friend-requests` route), and when the relay pushes a
+/// contentless "go look" nudge down the tunnel (`RelayNotify`), which makes
+/// this node do the poll's work immediately instead of at the next tick.
+/// Two established friends can always share with it down, and a node that
+/// never logs in never touches it at all.
 /// [friendDeviceRefreshInterval]: how often each account-based friend's
 /// cached device list is refreshed from that service (default 30 minutes;
 /// ignored entirely when [accountServiceUrl] is omitted). This is the
 /// bound on how long a friend's unlinked/stolen device stays trusted here.
+/// [accountPollInterval]: how often this node re-reads its own friend list
+/// and pending friend requests from that service (default 5 minutes; also
+/// ignored entirely when [accountServiceUrl] is omitted) — the
+/// guaranteed-eventually-correct fallback behind the relay push, see
+/// [AccountUpdatePoller] for the cost of that number and why it is not the
+/// same number as [FriendSyncService.minSyncInterval]. **A node with no
+/// account session makes no account-service call on this schedule at all**,
+/// however long it runs.
 /// [appApiKey]: an operator-configured shared secret (`MUSICAT_APP_API_KEY`)
 /// that lets a non-loopback caller reach the app-facing routes this server
 /// would otherwise restrict to its own device -- the explicit opt-in for
@@ -225,6 +241,7 @@ Future<MusicatServerHandle> startMusicatServer({
   String? appApiKey,
   String? accountServiceUrl,
   Duration friendDeviceRefreshInterval = const Duration(minutes: 30),
+  Duration accountPollInterval = const Duration(minutes: 5),
 }) async {
   final ip = InternetAddress.anyIPv4;
   final log = onLog ?? (String message) {};
@@ -270,12 +287,26 @@ Future<MusicatServerHandle> startMusicatServer({
   Future<Response> forwardToRealHandler(Request request) async =>
       realHandler!(request);
 
+  // Assigned further down, once the account service (and therefore the
+  // poller) exists -- the same shape as `forwardToRealHandler` above and for
+  // the same reason: the relay tunnel is established before the things that
+  // react to what arrives on it. Stays null on a node with no account
+  // service, in which case a push is received and deliberately ignored.
+  Future<void> Function()? onAccountEvent;
+
   String? myRelayUrl;
   RelayClient? relayClient;
   if (relayUrl != null && relayUrl.isNotEmpty) {
     relayClient = RelayClient(
       identity: identity,
       localHandler: forwardToRealHandler,
+      // The push carries no data and is not trusted with any (see
+      // `RelayNotify`): all it does is make this node do, immediately, the
+      // same authenticated re-fetch its own poll would have done later.
+      onNotify: (event) {
+        if (event != AccountEvent.friendRequests.name) return;
+        unawaited(onAccountEvent?.call());
+      },
     );
     final connected = await relayClient.connect(relayUrl);
     if (connected) {
@@ -297,6 +328,11 @@ Future<MusicatServerHandle> startMusicatServer({
   AccountFriendDeviceResolver? deviceResolver;
   FriendDeviceRefresher? deviceRefresher;
   FriendSyncService? friendSync;
+  AccountUpdatePoller? accountUpdates;
+  // In-memory and always constructed, like `sessionStore`: it costs nothing,
+  // and `DELETE /api/v1/account` has to be able to clear it whether or not
+  // this node has an account service configured.
+  final pendingFriendRequests = PendingFriendRequestCache();
   if (accountServiceUrl != null && accountServiceUrl.isNotEmpty) {
     accountService = AccountServiceClient(
       baseUrl: accountServiceUrl,
@@ -316,6 +352,18 @@ Future<MusicatServerHandle> startMusicatServer({
       sessionStore: sessionStore,
       accountService: accountService,
     );
+    accountUpdates = AccountUpdatePoller(
+      sessionStore: sessionStore,
+      friendSync: friendSync,
+      accountService: accountService,
+      pendingRequests: pendingFriendRequests,
+      pollInterval: accountPollInterval,
+    )..start();
+    // What a relay push actually triggers. Forced past `minSyncInterval`
+    // because a push means something *just* changed; still bounded by the
+    // poller's own one-run-at-a-time guard, so a flood of pushes (from a
+    // hostile relay, say) collapses into at most one refresh in flight.
+    onAccountEvent = () => accountUpdates!.refreshNow(force: true);
     log('Account service: $accountServiceUrl');
   }
 
@@ -356,16 +404,16 @@ Future<MusicatServerHandle> startMusicatServer({
     playlistStore,
     verifier,
   );
-  // Mounted unconditionally, with `accountService`/`friendSync` left null
-  // when no account service is configured: the routes then degrade to a
-  // clean 503 on login while still reporting and clearing a session from
-  // local disk. Nothing here starts a timer or a background loop -- the
-  // sync only ever runs when something asks it to -- so there is nothing
-  // new for `close()` to stop.
+  // Mounted unconditionally, with `accountService`/`accountUpdates` left
+  // null when no account service is configured: the routes then degrade to a
+  // clean 503 on login and on every friend-request route, while still
+  // reporting and clearing a session from local disk.
   final accountAppRouter = buildAccountAppRouter(
     sessionStore: sessionStore,
     accountService: accountService,
-    friendSync: friendSync,
+    accountUpdates: accountUpdates,
+    pendingRequests: pendingFriendRequests,
+    myRelayUrl: myRelayUrl,
     appApiKey: appApiKey,
   );
 
@@ -399,6 +447,7 @@ Future<MusicatServerHandle> startMusicatServer({
     relayClient: relayClient,
     puncher: puncher,
     deviceRefresher: deviceRefresher,
+    accountUpdates: accountUpdates,
     accountService: accountService,
   );
 }

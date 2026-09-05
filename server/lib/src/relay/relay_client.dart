@@ -40,12 +40,32 @@ class RelayClient {
   RelayClient({
     required this.identity,
     required this.localHandler,
+    this.onNotify,
     this.initialReconnectDelay = const Duration(seconds: 5),
     this.maxReconnectDelay = const Duration(minutes: 5),
   }) : _reconnectDelay = initialReconnectDelay;
 
   final NodeIdentity identity;
   final Handler localHandler;
+
+  /// Called with [RelayNotify.event] whenever the hub pushes a contentless
+  /// "something changed, go look" nudge (see [RelayNotify]) -- `null`, the
+  /// default, simply ignores them.
+  ///
+  /// **Whatever this does must treat the event as untrusted and carrying no
+  /// information beyond its own arrival.** The only correct reaction is to
+  /// re-fetch the real data from the account service over an authenticated
+  /// request of this node's own (see `musicat_server_runtime.dart`, which
+  /// wires this to a forced friend sync plus a friend-request refresh). A
+  /// relay is a dumb pipe that this node has no reason to trust with
+  /// content, and this is the one message it originates rather than
+  /// forwards.
+  ///
+  /// Invoked synchronously from the tunnel's read loop and wrapped in a
+  /// `try`/`catch` there: a callback that throws must not take the tunnel
+  /// down with it. Anything slow belongs behind an `unawaited` inside the
+  /// callback, not in it.
+  final void Function(String event)? onNotify;
 
   /// How long to wait before the *first* reconnect attempt after a
   /// previously-good connection drops, and what the backoff resets to
@@ -289,6 +309,17 @@ class RelayClient {
           unawaited(_handle(channel, message));
         } else if (message is RelayClaimUsernameResult) {
           _pendingClaim?.complete(message);
+        } else if (message is RelayNotify) {
+          // No response is sent, and none is expected -- see [RelayNotify].
+          // Guarded so a throwing callback can't break out of this read loop
+          // and be mistaken for the tunnel dropping (which would trigger a
+          // pointless reconnect against a perfectly healthy connection).
+          try {
+            onNotify?.call(message.event);
+          } catch (_) {
+            // Deliberately swallowed: a push is best-effort in both
+            // directions, and the poll fallback covers a missed one.
+          }
         }
       }
     } catch (_) {

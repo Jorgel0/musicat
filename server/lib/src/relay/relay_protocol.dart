@@ -62,6 +62,7 @@ abstract class RelayMessage {
           success: json['success'] as bool,
           error: json['error'] as String?,
         ),
+        'notify' => RelayNotify(json['event'] as String),
         _ => throw FormatException(
           'Unknown relay message type: ${json['type']}',
         ),
@@ -213,4 +214,55 @@ class RelayClaimUsernameResult extends RelayMessage {
     'success': success,
     'error': error,
   };
+}
+
+/// Hub -> client: "something you care about changed on the account service
+/// hosted alongside me -- go and look." **No response is expected, and none
+/// is ever sent.**
+///
+/// This is the *push* half of the "push for convenience, poll for
+/// correctness" pair (ADR 0038's pattern, applied to accounts): the
+/// guaranteed-eventually-correct half is the node's own periodic poll
+/// (`federation/account_update_poller.dart`), and this message only ever
+/// makes the node arrive at the same state sooner.
+///
+/// ## It carries no trusted payload, on purpose
+///
+/// [event] is an opaque kind ("friendRequests") and there is deliberately
+/// nowhere to put an accountId, a username, a key, or a device. A node that
+/// receives one does not learn anything from it -- it re-fetches the real
+/// data itself, authenticated, from the account service, over its own signed
+/// request.
+///
+/// That is what bounds the damage a **compromised or malicious relay** can
+/// do here. The relay is a dumb pipe by design (see [RelayMessage]) and is
+/// *not* trusted with content; this message is the one thing it originates
+/// rather than forwards, so it is the one place where "the relay said so"
+/// could have become "the node believed so". It doesn't: the worst a hostile
+/// relay can achieve by spamming these is making a node poll more often than
+/// it meant to. It can never inject a friend, a friend request, or a key,
+/// because none of those can be expressed in this message at all.
+///
+/// The same reasoning covers a forged push from anyone else who can write to
+/// a node's tunnel: a forgery is indistinguishable from a real one *and has
+/// the same effect*, so there is nothing here worth authenticating. All of
+/// the security lives in the re-fetch.
+///
+/// Widening this class to carry data would silently move that trust
+/// boundary. Don't.
+class RelayNotify extends RelayMessage {
+  const RelayNotify(this.event);
+
+  /// The [AccountEvent][]'s name, as an opaque string. Kept a plain
+  /// `String` rather than a decoded enum so an unrecognized kind from a
+  /// newer hub is a value this client can quietly ignore, not a
+  /// [FormatException] -- which, on both sides of this protocol, tears the
+  /// whole tunnel down (see `RelayHub._authenticateAndServe` and
+  /// `RelayClient._serve`).
+  ///
+  /// [AccountEvent]: ../accounts/device_notifier.dart
+  final String event;
+
+  @override
+  Map<String, Object?> toJson() => {'type': 'notify', 'event': event};
 }
