@@ -4,6 +4,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
+import '../identity/node_identity.dart';
 import '../relay/username_directory_store.dart' show invalidUsernameFormatError;
 import 'account.dart';
 import 'account_request_auth.dart';
@@ -21,9 +22,6 @@ Response _json(Object? body, {int status = 200}) => Response(
 
 Response _error(String message, {int status = 400}) =>
     _json({'error': message}, status: status);
-
-String _hex(List<int> bytes) =>
-    bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 Map<String, dynamic> _deviceJson(DeviceLink device) => device.toJson();
 
@@ -256,8 +254,7 @@ Router buildAccountRouter(
       );
     }
 
-    final fingerprint = await Sha256().hash(publicKeyBytes);
-    if (_hex(fingerprint.bytes) != nodeId) {
+    if (await nodeIdForPublicKey(publicKeyBytes) != nodeId) {
       return _error('"nodeId" does not match "publicKeyBase64"', status: 401);
     }
 

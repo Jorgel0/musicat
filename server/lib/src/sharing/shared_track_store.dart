@@ -32,13 +32,14 @@ class SharedTrackStore {
     return null;
   }
 
-  /// Tracks visible to [requestingNodeId] — the object-level authz filter
-  /// (see [SharedTrackVisibility.allows]): only tracks this specific node
-  /// is actually allowed to see, never "every track shared with anyone".
-  Future<List<SharedTrack>> visibleTo(String requestingNodeId) async {
+  /// Tracks visible to the friend account [requestingAccountId] — the
+  /// object-level authz filter (see [SharedTrackVisibility.allows]): only
+  /// tracks this specific friend is actually allowed to see, never "every
+  /// track shared with anyone".
+  Future<List<SharedTrack>> visibleTo(String requestingAccountId) async {
     final tracks = await loadAll();
     return tracks
-        .where((track) => track.visibility.allows(requestingNodeId))
+        .where((track) => track.visibility.allows(requestingAccountId))
         .toList();
   }
 

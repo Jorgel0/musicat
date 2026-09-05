@@ -38,14 +38,14 @@ void main() {
 
   Future<void> mutuallyTrust() async {
     await FriendStore(aliceDir).add(
-      Friend(
+      Friend.devicePinned(
         nodeId: bob.nodeId,
         publicKeyBase64: await bob.publicKeyBase64(),
         address: '127.0.0.1:0',
       ),
     );
     await FriendStore(bobDir).add(
-      Friend(
+      Friend.devicePinned(
         nodeId: alice.nodeId,
         publicKeyBase64: await alice.publicKeyBase64(),
         address: '127.0.0.1:0',

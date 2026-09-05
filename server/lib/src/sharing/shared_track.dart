@@ -5,25 +5,42 @@
 /// friend" check (see `sharing_routes.dart`) — being *a* friend is
 /// necessary but never sufficient; a track must specifically have been
 /// shared with *this* friend (or set of friends), or with all of them.
+///
+/// **What "this friend" means is a friend *account* (`Friend.accountId`),
+/// never one of that account's devices.** A friend who shares a track from
+/// their phone and downloads it on their desktop is one friend, and every
+/// device currently linked to their account is equally them. The persisted
+/// ids therefore have to be account ids — [FriendsVisibility] compares
+/// nothing else — which is exactly why every id entering a visibility rule
+/// is normalized through `FriendStore` at write time (see
+/// `sharing_routes.dart`'s `POST /shared-tracks`).
+///
+/// For a legacy device-pinned friend an account id *is* their nodeId, so
+/// every rule persisted before accounts existed keeps meaning exactly what
+/// it meant. A raw device nodeId of a genuine multi-device account left in
+/// a rule matches nobody at all — deliberately fail-closed: matching it
+/// would mean a device that has since moved to a *different* account could
+/// unlock a track shared with the account it used to belong to.
 abstract class SharedTrackVisibility {
   const SharedTrackVisibility();
 
-  /// Shared with exactly this one friend (e.g. a direct "send to a
-  /// friend") — equivalent to `FriendsVisibility({nodeId})`.
-  factory SharedTrackVisibility.friend(String nodeId) =>
-      FriendsVisibility({nodeId});
+  /// Shared with exactly this one friend account (e.g. a direct "send to a
+  /// friend") — equivalent to `FriendsVisibility({accountId})`.
+  factory SharedTrackVisibility.friend(String accountId) =>
+      FriendsVisibility({accountId});
 
   const factory SharedTrackVisibility.allFriends() = AllFriendsVisibility;
 
-  /// Whether [requestingNodeId] — already confirmed to be a known,
-  /// signed-in friend by the caller — may see/download this track.
-  bool allows(String requestingNodeId);
+  /// Whether [requestingAccountId] — already confirmed to be a known,
+  /// signed-in friend account by the caller (see [verifiedFriendAccountId])
+  /// — may see/download this track.
+  bool allows(String requestingAccountId);
 
   Map<String, Object?> toJson();
 
   factory SharedTrackVisibility.fromJson(Map<String, dynamic> json) {
     return switch (json['type']) {
-      // 'friend' (a single nodeId) is still accepted for backward
+      // 'friend' (a single id) is still accepted for backward
       // compatibility with anything already persisted before
       // FriendsVisibility replaced it.
       'friend' => FriendsVisibility({json['nodeId'] as String}),
@@ -36,22 +53,28 @@ abstract class SharedTrackVisibility {
   }
 }
 
-/// Shared with exactly this set of friends — a direct send is just the
-/// one-element case of this, and a joint playlist with N participants
+/// Shared with exactly this set of friend accounts — a direct send is just
+/// the one-element case of this, and a joint playlist with N participants
 /// (ADR 0027) is the general case: never widened to "all friends" just
 /// because there's more than one other participant.
+///
+/// The JSON keys stay `nodeIds`/`nodeId` (rather than being renamed to
+/// match [accountIds]) so no `shared_tracks.json` written before accounts
+/// existed needs rewriting, and so a file this version writes stays
+/// readable by the previous one.
 class FriendsVisibility extends SharedTrackVisibility {
-  const FriendsVisibility(this.nodeIds);
+  const FriendsVisibility(this.accountIds);
 
-  final Set<String> nodeIds;
+  final Set<String> accountIds;
 
   @override
-  bool allows(String requestingNodeId) => nodeIds.contains(requestingNodeId);
+  bool allows(String requestingAccountId) =>
+      accountIds.contains(requestingAccountId);
 
   @override
   Map<String, Object?> toJson() => {
     'type': 'friends',
-    'nodeIds': nodeIds.toList(),
+    'nodeIds': accountIds.toList(),
   };
 }
 
@@ -60,7 +83,7 @@ class AllFriendsVisibility extends SharedTrackVisibility {
   const AllFriendsVisibility();
 
   @override
-  bool allows(String requestingNodeId) => true;
+  bool allows(String requestingAccountId) => true;
 
   @override
   Map<String, Object?> toJson() => {'type': 'allFriends'};

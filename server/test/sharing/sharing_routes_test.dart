@@ -45,14 +45,14 @@ void main() {
     friend2 = await NodeIdentityStore(friend2Dir).loadOrCreate();
 
     await friendStore.add(
-      Friend(
+      Friend.devicePinned(
         nodeId: friend1.nodeId,
         publicKeyBase64: await friend1.publicKeyBase64(),
         address: 'friend1.example:8080',
       ),
     );
     await friendStore.add(
-      Friend(
+      Friend.devicePinned(
         nodeId: friend2.nodeId,
         publicKeyBase64: await friend2.publicKeyBase64(),
         address: 'friend2.example:8080',
@@ -457,6 +457,267 @@ void main() {
       final headers = await signHeaders(friend1, '/shared-tracks/t1/cover');
       final response = await get('/shared-tracks/t1/cover', headers);
       expect(response.statusCode, 404);
+    });
+  });
+
+  group('object-level authz after the switch to account ids', () {
+    late Directory phoneDir;
+    late Directory desktopDir;
+    late NodeIdentity carolPhone;
+    late NodeIdentity carolDesktop;
+    const carolAccountId = 'account-carol';
+
+    setUp(() async {
+      phoneDir = Directory.systemTemp.createTempSync('musicat_sharing_phone_');
+      desktopDir = Directory.systemTemp.createTempSync('musicat_sharing_desk_');
+      carolPhone = await NodeIdentityStore(phoneDir).loadOrCreate();
+      carolDesktop = await NodeIdentityStore(desktopDir).loadOrCreate();
+
+      await friendStore.add(
+        Friend(
+          accountId: carolAccountId,
+          devices: [
+            FriendDevice(
+              nodeId: carolPhone.nodeId,
+              publicKeyBase64: await carolPhone.publicKeyBase64(),
+              address: 'carol-phone.example:8080',
+            ),
+            FriendDevice(
+              nodeId: carolDesktop.nodeId,
+              publicKeyBase64: await carolDesktop.publicKeyBase64(),
+              address: 'carol-desktop.example:8080',
+            ),
+          ],
+          displayName: 'Carol',
+        ),
+      );
+    });
+
+    tearDown(() {
+      phoneDir.deleteSync(recursive: true);
+      desktopDir.deleteSync(recursive: true);
+    });
+
+    Future<Response> getSignedBy(NodeIdentity identity, String path) async {
+      final headers = await RequestSigner(
+        identity,
+      ).sign(method: 'GET', path: path);
+      return sharingHandler(
+        Request('GET', Uri.parse('http://localhost$path'), headers: headers),
+      );
+    }
+
+    test('POST /shared-tracks normalizes whatever friend id the app sends '
+        "into that friend's account id", () async {
+      // The app sends one of Carol's device nodeIds, which is what it
+      // holds for her today.
+      final response = await libraryHandler(
+        Request(
+          'POST',
+          Uri.parse('http://localhost/shared-tracks'),
+          body: jsonEncode({
+            'filePath': musicFile.path,
+            'title': 'x',
+            'artist': 'y',
+            'visibility': {'type': 'friend', 'nodeId': carolPhone.nodeId},
+          }),
+        ),
+      );
+
+      final id = jsonDecode(await response.readAsString())['id'] as String;
+      final track = await store.findById(id);
+      expect((track!.visibility as FriendsVisibility).accountIds, {
+        carolAccountId,
+      });
+    });
+
+    test('a track shared with an account is downloadable from any of that '
+        "account's devices", () async {
+      await store.add(
+        SharedTrack(
+          id: 't1',
+          filePath: musicFile.path,
+          title: 'x',
+          artist: 'y',
+          visibility: const FriendsVisibility({carolAccountId}),
+        ),
+      );
+
+      expect(
+        (await getSignedBy(carolPhone, '/shared-tracks/t1/file')).statusCode,
+        200,
+      );
+      expect(
+        (await getSignedBy(carolDesktop, '/shared-tracks/t1/file')).statusCode,
+        200,
+      );
+      // And it shows up in the listing for either device, once.
+      final listed =
+          jsonDecode(
+                await (await getSignedBy(
+                  carolDesktop,
+                  '/shared-tracks',
+                )).readAsString(),
+              )
+              as List<dynamic>;
+      expect(listed.map((t) => (t as Map)['id']), ['t1']);
+    });
+
+    test('a different friend account is still rejected', () async {
+      await store.add(
+        SharedTrack(
+          id: 't1',
+          filePath: musicFile.path,
+          title: 'x',
+          artist: 'y',
+          visibility: const FriendsVisibility({carolAccountId}),
+        ),
+      );
+
+      // friend1 is a real, trusted friend -- just a different account.
+      expect(
+        (await getSignedBy(friend1, '/shared-tracks/t1/file')).statusCode,
+        403,
+      );
+    });
+
+    test('a rule naming a raw *device* nodeId of a multi-device account '
+        'matches nobody -- deliberately fail-closed, never widened to that '
+        "device's current account", () async {
+      // This can only be a rule written before ids were normalized (or by
+      // hand). Matching it would mean whichever account a device belongs
+      // to *now* could unlock a track meant for the account it belonged to
+      // *then*, so it matches nothing at all instead.
+      await store.add(
+        SharedTrack(
+          id: 't1',
+          filePath: musicFile.path,
+          title: 'x',
+          artist: 'y',
+          visibility: FriendsVisibility({carolPhone.nodeId}),
+        ),
+      );
+
+      expect(
+        (await getSignedBy(carolPhone, '/shared-tracks/t1/file')).statusCode,
+        403,
+      );
+      expect(
+        (await getSignedBy(carolDesktop, '/shared-tracks/t1/file')).statusCode,
+        403,
+      );
+      expect(
+        jsonDecode(
+              await (await getSignedBy(
+                carolPhone,
+                '/shared-tracks',
+              )).readAsString(),
+            )
+            as List<dynamic>,
+        isEmpty,
+      );
+    });
+
+    test('a device that has since moved to another account does not unlock '
+        "the previous owner's tracks", () async {
+      final movedDir = Directory.systemTemp.createTempSync(
+        'musicat_sharing_moved_',
+      );
+      final movedDevice = await NodeIdentityStore(movedDir).loadOrCreate();
+      addTearDown(() => movedDir.deleteSync(recursive: true));
+
+      // The rule names that device's nodeId (a rule from when it was its
+      // own device-pinned friend), but the device is now listed under
+      // Carol's account -- so signing with it authenticates as Carol, and
+      // Carol is not who the rule names.
+      await store.add(
+        SharedTrack(
+          id: 't1',
+          filePath: musicFile.path,
+          title: 'x',
+          artist: 'y',
+          visibility: FriendsVisibility({movedDevice.nodeId}),
+        ),
+      );
+      await friendStore.updateDevices(carolAccountId, [
+        FriendDevice(
+          nodeId: movedDevice.nodeId,
+          publicKeyBase64: await movedDevice.publicKeyBase64(),
+        ),
+      ]);
+
+      final response = await getSignedBy(movedDevice, '/shared-tracks/t1/file');
+      expect(response.statusCode, 403);
+    });
+
+    test('a device that is *also* still a device-pinned friend of its own '
+        'keeps authenticating as that friend, not as the account that '
+        'later claimed it', () async {
+      // friend2 was paired out-of-band as their own device-pinned friend,
+      // and the account service later says the same device belongs to
+      // Carol. The locally-established entry wins -- which grants what was
+      // shared with friend2, never what was shared with Carol.
+      await store.add(
+        SharedTrack(
+          id: 'for-friend2',
+          filePath: musicFile.path,
+          title: 'x',
+          artist: 'y',
+          visibility: FriendsVisibility({friend2.nodeId}),
+        ),
+      );
+      await store.add(
+        SharedTrack(
+          id: 'for-carol',
+          filePath: musicFile.path,
+          title: 'x',
+          artist: 'y',
+          visibility: const FriendsVisibility({carolAccountId}),
+        ),
+      );
+      await friendStore.updateDevices(carolAccountId, [
+        FriendDevice(
+          nodeId: friend2.nodeId,
+          publicKeyBase64: await friend2.publicKeyBase64(),
+        ),
+      ]);
+
+      expect(
+        (await getSignedBy(
+          friend2,
+          '/shared-tracks/for-friend2/file',
+        )).statusCode,
+        200,
+      );
+      expect(
+        (await getSignedBy(
+          friend2,
+          '/shared-tracks/for-carol/file',
+        )).statusCode,
+        403,
+      );
+    });
+
+    test('an all-friends track is still visible to every friend account, '
+        'from any device', () async {
+      await store.add(
+        SharedTrack(
+          id: 't1',
+          filePath: musicFile.path,
+          title: 'x',
+          artist: 'y',
+          visibility: const AllFriendsVisibility(),
+        ),
+      );
+
+      expect(
+        (await getSignedBy(carolDesktop, '/shared-tracks/t1/file')).statusCode,
+        200,
+      );
+      expect(
+        (await getSignedBy(friend1, '/shared-tracks/t1/file')).statusCode,
+        200,
+      );
     });
   });
 }

@@ -21,6 +21,7 @@ void main(List<String> args) async {
   final relayUrl = Platform.environment['MUSICAT_RELAY_URL'];
   final slskdConfig = SlskdConfig.fromEnvironment(Platform.environment);
   final appApiKey = Platform.environment['MUSICAT_APP_API_KEY'];
+  final accountServiceUrl = Platform.environment['MUSICAT_ACCOUNT_SERVICE_URL'];
 
   await startMusicatServer(
     dataDir: dataDir,
@@ -30,5 +31,6 @@ void main(List<String> args) async {
     slskdConfig: slskdConfig,
     onLog: print,
     appApiKey: appApiKey,
+    accountServiceUrl: accountServiceUrl,
   );
 }

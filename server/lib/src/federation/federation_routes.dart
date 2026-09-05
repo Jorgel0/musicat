@@ -5,7 +5,9 @@ import 'package:http/http.dart' as http;
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
+import '../accounts/account_service_client.dart';
 import '../http/require_local.dart';
+import '../identity/node_identity.dart';
 import '../nat/udp_puncher.dart';
 import '../relay/relay_client.dart';
 import '../relay/username_directory_store.dart';
@@ -68,6 +70,29 @@ Response _verificationErrorResponse(
 /// pairing code and immediately self-registering as a friend possible with
 /// zero involvement from this device's real owner.
 ///
+/// `POST /friends` always checks that the `nodeId` it is handed really is
+/// the SHA-256 fingerprint of the `publicKeyBase64` alongside it
+/// ([nodeIdForPublicKey]), rejecting the pair with `400` otherwise — the
+/// self-certifying-nodeId property is what makes every later signature
+/// check mean anything, and this is the one place a nodeId/key pair enters
+/// this node from the wire without one.
+///
+/// `POST /friends` also accepts an optional `accountId` — the caller
+/// claiming "this device belongs to that portable account" (Fase 5, ADR
+/// 0048). It is only ever believed if [accountService] is configured *and*
+/// confirms it (`GET /accounts/by-device/<nodeId>` must return that exact
+/// accountId): a claim that the account service actively contradicts is
+/// rejected outright (`403`), and one it simply can't confirm right now
+/// (no account service configured, or unreachable) is *ignored*, creating
+/// an ordinary device-pinned friend instead — pairing on a local network
+/// with the relay down has to keep working exactly as it always did. The
+/// response's own `accountId` field reports which of the two happened.
+/// Without this, a peer redeeming a pairing code could name someone else's
+/// accountId and have this node adopt that account's whole device list as
+/// trusted. A confirmed accountId that would displace an *existing*
+/// device-pinned friend (someone else's, i.e. not the device currently
+/// pairing) is refused with `403` rather than silently replacing them.
+///
 /// `POST /friends` also accepts an optional `udpCandidate` (the caller's
 /// own STUN-discovered address, ADR 0022) and returns this node's current
 /// one in the response — and, when a candidate was provided, immediately
@@ -81,6 +106,16 @@ Response _verificationErrorResponse(
 /// and returns this node's own in the response the same way, so a friend
 /// unreachable via [Friend.address] can still be reached as a fallback
 /// through whichever relay they reported.
+///
+/// Every app-facing `/friends/<id>` route accepts either a friend's
+/// `accountId` or any of their devices' nodeIds — an id stored by the app
+/// before Fase 5 is always the latter, and for a device-pinned friend the
+/// two are the same string anyway.
+///
+/// `DELETE /friends/<id>` is instant, local, and permanent: it also writes
+/// a [FriendTombstone] (see `friend_store.dart`), so no later device-list
+/// refresh can bring that friend back. Re-adding them explicitly (another
+/// pairing) clears it.
 ///
 /// `PATCH /friends/<nodeId>` sets [Friend.localNickname] — a purely local
 /// label this device's own user picks for a friend, distinct from
@@ -116,6 +151,7 @@ Router buildFederationRouter(
   String? appApiKey,
   RelayClient? relayClient,
   http.Client? httpClient,
+  AccountServiceClient? accountService,
 }) {
   final client = httpClient ?? http.Client();
   final router = Router();
@@ -141,6 +177,7 @@ Router buildFederationRouter(
     final address = body['address'];
     final udpCandidate = body['udpCandidate'];
     final relayUrl = body['relayUrl'];
+    final claimedAccountId = body['accountId'];
     if (code is! String || code.isEmpty) {
       return _error('"code" is required');
     }
@@ -159,6 +196,34 @@ Router buildFederationRouter(
     if (relayUrl != null && relayUrl is! String) {
       return _error('"relayUrl" must be a string if present');
     }
+    if (claimedAccountId != null &&
+        (claimedAccountId is! String || claimedAccountId.isEmpty)) {
+      return _error('"accountId" must be a non-empty string if present');
+    }
+
+    // The caller says "I am <nodeId>, here is <publicKeyBase64>". A nodeId
+    // is *defined* as the SHA-256 fingerprint of that key
+    // ([nodeIdForPublicKey]), so the pair must be checked against each
+    // other before either value is used for anything -- the same check
+    // `relay_hub.dart` makes of a node connecting to a relay and
+    // `account_routes.dart` of a device logging in. Without it, whoever
+    // holds a pairing code can register *someone else's* nodeId against
+    // *their own* key: this node would then store the attacker's key under
+    // the victim's identity, and (with an accountId claimed alongside, see
+    // below) the account service would happily confirm that the victim's
+    // nodeId really does belong to the victim's account -- so the
+    // attacker's signatures would verify as the victim's whole account.
+    // Deliberately checked before the code is redeemed, so a malformed
+    // request doesn't burn an otherwise-valid single-use code.
+    final List<int> publicKeyBytes;
+    try {
+      publicKeyBytes = base64Decode(publicKeyBase64);
+    } on FormatException {
+      return _error('"publicKeyBase64" must be valid base64');
+    }
+    if (await nodeIdForPublicKey(publicKeyBytes) != nodeId) {
+      return _error('"nodeId" is not the fingerprint of "publicKeyBase64"');
+    }
 
     if (!pairingCodes.redeem(code)) {
       return _error(
@@ -167,15 +232,69 @@ Router buildFederationRouter(
       );
     }
 
+    // Only ever reached with a genuine, just-redeemed pairing code, so an
+    // unauthenticated caller can't use this to make this node hammer the
+    // account service.
+    String? confirmedAccountId;
+    if (claimedAccountId is String && accountService != null) {
+      final resolved = await accountService.accountIdForDevice(nodeId);
+      if (resolved != null && resolved != claimedAccountId) {
+        return _error(
+          '"accountId" is not the account this device belongs to',
+          status: 403,
+        );
+      }
+      confirmedAccountId = resolved;
+    }
+
+    if (confirmedAccountId != null) {
+      // Defence in depth for Rule 2. `FriendStore.add` supersedes whatever
+      // entry already holds this accountId, so an accountId that happens
+      // to collide with an existing *device-pinned* friend's own nodeId
+      // would silently delete that friend and hand the newcomer
+      // everything shared with them. Real ids can't collide (an accountId
+      // is 32 hex characters from `AccountStore`, a nodeId is a 64-hex
+      // SHA-256 fingerprint), so this can only fire for a malicious or
+      // compromised account service -- a trusted component, but the guard
+      // is free, and losing an established friend is not a failure mode
+      // worth leaving to someone else's correctness. A legacy friend
+      // upgrading to *their own* account is unaffected: the colliding
+      // entry is then that same device's, so the check passes and `add`
+      // supersedes it as intended.
+      final colliding = await friendStore.findByAccountId(confirmedAccountId);
+      if (colliding != null &&
+          colliding.isDevicePinned &&
+          colliding.devices.single.nodeId != nodeId) {
+        return _error(
+          'That accountId already identifies a different friend on this '
+          'device',
+          status: 403,
+        );
+      }
+    }
+
+    final device = FriendDevice(
+      nodeId: nodeId,
+      publicKeyBase64: publicKeyBase64,
+      address: address,
+      udpCandidate: udpCandidate as String?,
+      relayUrl: relayUrl as String?,
+    );
     await friendStore.add(
-      Friend(
-        nodeId: nodeId,
-        publicKeyBase64: publicKeyBase64,
-        address: address,
-        displayName: body['displayName'] as String?,
-        udpCandidate: udpCandidate as String?,
-        relayUrl: relayUrl as String?,
-      ),
+      confirmedAccountId == null
+          ? Friend.devicePinned(
+              nodeId: nodeId,
+              publicKeyBase64: publicKeyBase64,
+              address: address,
+              displayName: body['displayName'] as String?,
+              udpCandidate: udpCandidate,
+              relayUrl: relayUrl,
+            )
+          : Friend(
+              accountId: confirmedAccountId,
+              devices: [device],
+              displayName: body['displayName'] as String?,
+            ),
     );
 
     if (udpCandidate != null) {
@@ -198,6 +317,10 @@ Router buildFederationRouter(
       'status': 'ok',
       'udpCandidate': puncher.cachedCandidate?.toString(),
       'relayUrl': myRelayUrl,
+      // Which account, if any, this node actually recorded the caller
+      // under -- null means "recorded as a device-pinned friend", whether
+      // because none was claimed or because it couldn't be confirmed.
+      'accountId': confirmedAccountId,
     }, status: 201);
   });
 
@@ -210,19 +333,26 @@ Router buildFederationRouter(
   );
 
   router.delete(
-    '/friends/<nodeId>',
+    '/friends/<friendId>',
     requireLocal((Request request) async {
-      final nodeId = request.params['nodeId']!;
-      await friendStore.remove(nodeId);
-      puncher.stopKeepalive(nodeId);
+      final friendId = request.params['friendId']!;
+      final friend = await friendStore.findByAccountOrDeviceId(friendId);
+      // Removal itself is local and unconditional -- it never waits on the
+      // account service -- and leaves a tombstone behind so a later
+      // refresh can't undo it (see FriendStore.remove).
+      await friendStore.remove(friendId);
+      for (final device in friend?.devices ?? const <FriendDevice>[]) {
+        puncher.stopKeepalive(device.nodeId);
+      }
+      puncher.stopKeepalive(friendId);
       return Response(204);
     }, appApiKey: appApiKey),
   );
 
   router.patch(
-    '/friends/<nodeId>',
+    '/friends/<friendId>',
     requireLocal((Request request) async {
-      final nodeId = request.params['nodeId']!;
+      final friendId = request.params['friendId']!;
       final Map<String, dynamic> body;
       try {
         final raw = await request.readAsString();
@@ -237,7 +367,7 @@ Router buildFederationRouter(
       }
 
       final updated = await friendStore.setLocalNickname(
-        nodeId,
+        friendId,
         localNickname as String?,
       );
       if (updated == null) {
@@ -248,12 +378,26 @@ Router buildFederationRouter(
   );
 
   router.get(
-    '/friends/<nodeId>/status',
+    '/friends/<friendId>/status',
     requireLocal((Request request) async {
-      final nodeId = request.params['nodeId']!;
-      final lastSeen = puncher.lastSeen(nodeId);
+      final friendId = request.params['friendId']!;
+      final friend = await friendStore.findByAccountOrDeviceId(friendId);
+      // A friend account is "connected" if *any* of its devices' NAT
+      // mappings is currently alive, and last seen whenever the most
+      // recent of them was. An unknown id falls back to treating it as a
+      // bare nodeId, exactly as this route always did.
+      final nodeIds = friend == null
+          ? [friendId]
+          : [for (final device in friend.devices) device.nodeId];
+      DateTime? lastSeen;
+      for (final nodeId in nodeIds) {
+        final seen = puncher.lastSeen(nodeId);
+        if (seen != null && (lastSeen == null || seen.isAfter(lastSeen))) {
+          lastSeen = seen;
+        }
+      }
       return _json({
-        'connected': puncher.isConnected(nodeId),
+        'connected': nodeIds.any(puncher.isConnected),
         'lastSeen': lastSeen?.toIso8601String(),
       });
     }, appApiKey: appApiKey),
@@ -337,7 +481,7 @@ Router buildFederationRouter(
   );
 
   router.get('/ping', (Request request) async {
-    final result = await verifier.verify(
+    final verification = await verifier.verify(
       method: request.method,
       path: request.requestedUri.path,
       body: '',
@@ -345,8 +489,8 @@ Router buildFederationRouter(
       timestamp: request.headers['x-timestamp'],
       signatureBase64: request.headers['x-signature'],
     );
-    if (result != RequestVerificationResult.valid) {
-      return _verificationErrorResponse(result);
+    if (!verification.isValid) {
+      return _verificationErrorResponse(verification.result);
     }
     return _json({'pong': true});
   });

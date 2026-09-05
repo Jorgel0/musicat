@@ -55,7 +55,7 @@ void main() {
 
     for (final f in [friend, friend2, outsider]) {
       await friendStore.add(
-        Friend(
+        Friend.devicePinned(
           nodeId: f.nodeId,
           publicKeyBase64: await f.publicKeyBase64(),
           address: '${f.nodeId}.example:8080',
@@ -247,7 +247,7 @@ void main() {
       final remotePlaylist = JointPlaylist(
         id: 'shared-id',
         name: 'Road trip',
-        participantNodeIds: [identity.nodeId],
+        participantAccountIds: [identity.nodeId],
         items: [
           PlaylistItem(
             id: 'from-friend',
@@ -266,7 +266,7 @@ void main() {
         JointPlaylist(
           id: 'shared-id',
           name: 'Road trip',
-          participantNodeIds: [friend.nodeId],
+          participantAccountIds: [friend.nodeId],
           items: const [],
           updatedAt: DateTime.utc(2025, 1, 1),
         ),
@@ -298,7 +298,7 @@ void main() {
         JointPlaylist(
           id: 'p1',
           name: 'x',
-          participantNodeIds: [friend.nodeId],
+          participantAccountIds: [friend.nodeId],
           items: const [],
           updatedAt: DateTime.utc(2026, 1, 1),
         ),
@@ -326,7 +326,7 @@ void main() {
         JointPlaylist(
           id: 'p1',
           name: 'x',
-          participantNodeIds: const ['someone-else'],
+          participantAccountIds: const ['someone-else'],
           items: const [],
           updatedAt: DateTime.utc(2026, 1, 1),
         ),
@@ -347,6 +347,141 @@ void main() {
       );
 
       expect(response.statusCode, 403);
+    });
+  });
+
+  group('joint playlists with an account-based participant', () {
+    late Directory phoneDir;
+    late Directory desktopDir;
+    late NodeIdentity carolPhone;
+    late NodeIdentity carolDesktop;
+    const carolAccountId = 'account-carol';
+
+    setUp(() async {
+      phoneDir = Directory.systemTemp.createTempSync('musicat_pl_phone_');
+      desktopDir = Directory.systemTemp.createTempSync('musicat_pl_desk_');
+      carolPhone = await NodeIdentityStore(phoneDir).loadOrCreate();
+      carolDesktop = await NodeIdentityStore(desktopDir).loadOrCreate();
+
+      await friendStore.add(
+        Friend(
+          accountId: carolAccountId,
+          devices: [
+            FriendDevice(
+              nodeId: carolPhone.nodeId,
+              publicKeyBase64: await carolPhone.publicKeyBase64(),
+              address: 'carol-phone.example:8080',
+            ),
+            FriendDevice(
+              nodeId: carolDesktop.nodeId,
+              publicKeyBase64: await carolDesktop.publicKeyBase64(),
+              address: 'carol-desktop.example:8080',
+            ),
+          ],
+        ),
+      );
+    });
+
+    tearDown(() {
+      phoneDir.deleteSync(recursive: true);
+      desktopDir.deleteSync(recursive: true);
+    });
+
+    Handler playlistHandler() => buildPlaylistRouter(
+      playlistStore,
+      sharedTrackStore,
+      friendStore,
+      identity,
+      httpClient: MockClient((_) async => http.Response('', 500)),
+    ).call;
+
+    Future<Response> getSignedBy(NodeIdentity signer, String path) async {
+      final headers = await RequestSigner(
+        signer,
+      ).sign(method: 'GET', path: path);
+      return buildSharingFederationRouter(
+        sharedTrackStore,
+        playlistStore,
+        RequestVerifier(friendStore),
+      ).call(
+        Request('GET', Uri.parse('http://localhost$path'), headers: headers),
+      );
+    }
+
+    test('a participant given as a device nodeId is stored as their account '
+        'id', () async {
+      final response = await playlistHandler()(
+        Request(
+          'POST',
+          Uri.parse('http://localhost/'),
+          body: jsonEncode({
+            'name': 'Road trip',
+            'participantNodeIds': [carolPhone.nodeId],
+          }),
+        ),
+      );
+      final id = jsonDecode(await response.readAsString())['id'] as String;
+
+      final playlist = await playlistStore.findById(id);
+      expect(playlist!.participantAccountIds, [carolAccountId]);
+    });
+
+    test('either of that participant\'s devices can fetch the playlist, and '
+        'an outsider still cannot', () async {
+      await playlistStore.save(
+        JointPlaylist(
+          id: 'p1',
+          name: 'x',
+          participantAccountIds: const [carolAccountId],
+          items: const [],
+          updatedAt: DateTime.utc(2026, 1, 1),
+        ),
+      );
+
+      expect((await getSignedBy(carolPhone, '/playlists/p1')).statusCode, 200);
+      expect(
+        (await getSignedBy(carolDesktop, '/playlists/p1')).statusCode,
+        200,
+      );
+      expect((await getSignedBy(outsider, '/playlists/p1')).statusCode, 403);
+    });
+
+    test('a track added to the playlist is downloadable from either of that '
+        "participant's devices, and by nobody else", () async {
+      final createResponse = await playlistHandler()(
+        Request(
+          'POST',
+          Uri.parse('http://localhost/'),
+          body: jsonEncode({
+            'name': 'Road trip',
+            'participantNodeIds': [carolDesktop.nodeId],
+          }),
+        ),
+      );
+      final id =
+          jsonDecode(await createResponse.readAsString())['id'] as String;
+
+      final added = await playlistHandler()(
+        Request(
+          'POST',
+          Uri.parse('http://localhost/$id/items'),
+          body: jsonEncode({
+            'filePath': musicFile.path,
+            'title': 'x',
+            'artist': 'y',
+          }),
+        ),
+      );
+      expect(added.statusCode, 201);
+
+      final playlist = await playlistStore.findById(id);
+      final trackId = playlist!.items.single.sharedTrackId;
+      final path = '/shared-tracks/$trackId/file';
+
+      expect((await getSignedBy(carolPhone, path)).statusCode, 200);
+      expect((await getSignedBy(carolDesktop, path)).statusCode, 200);
+      // Still never widened to every friend (ADR 0027).
+      expect((await getSignedBy(outsider, path)).statusCode, 403);
     });
   });
 }

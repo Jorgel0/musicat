@@ -41,11 +41,31 @@ void main() {
   late UdpPuncher puncher;
   late Handler handler;
 
+  // Two real Ed25519 identities to pair as. `POST /friends` verifies that a
+  // claimed nodeId really is the SHA-256 fingerprint of the public key sent
+  // with it (`nodeIdForPublicKey`), so these have to be genuine keypairs --
+  // a made-up "friend-1"/"key" pair is exactly what that check exists to
+  // reject.
+  late Directory peerDirA;
+  late Directory peerDirB;
+  late String peerA;
+  late String peerAKey;
+  late String peerB;
+  late String peerBKey;
+
   setUp(() async {
     serverDir = Directory.systemTemp.createTempSync('musicat_fed_routes_');
     friendDir = Directory.systemTemp.createTempSync('musicat_fed_friend_');
     friendStore = FriendStore(serverDir);
     friendIdentity = await NodeIdentityStore(friendDir).loadOrCreate();
+    peerDirA = Directory.systemTemp.createTempSync('musicat_fed_peer_a_');
+    peerDirB = Directory.systemTemp.createTempSync('musicat_fed_peer_b_');
+    final peerIdentityA = await NodeIdentityStore(peerDirA).loadOrCreate();
+    final peerIdentityB = await NodeIdentityStore(peerDirB).loadOrCreate();
+    peerA = peerIdentityA.nodeId;
+    peerAKey = await peerIdentityA.publicKeyBase64();
+    peerB = peerIdentityB.nodeId;
+    peerBKey = await peerIdentityB.publicKeyBase64();
     final serverIdentity = await NodeIdentityStore(serverDir).loadOrCreate();
     puncher = UdpPuncher(identity: serverIdentity, friendStore: friendStore);
     await puncher.bind();
@@ -61,6 +81,8 @@ void main() {
     await puncher.close();
     serverDir.deleteSync(recursive: true);
     friendDir.deleteSync(recursive: true);
+    peerDirA.deleteSync(recursive: true);
+    peerDirB.deleteSync(recursive: true);
   });
 
   // Every request built by the helpers below simulates the common case
@@ -144,64 +166,64 @@ void main() {
   group('POST /friends', () {
     test('registers a friend with a valid pairing code', () async {
       final response = await pairAsFriend(
-        nodeId: 'friend-1',
-        publicKeyBase64: 'key',
+        nodeId: peerA,
+        publicKeyBase64: peerAKey,
         address: 'host:8080',
         code: await newPairingCode(),
       );
 
       expect(response.statusCode, 201);
-      final friend = await friendStore.findByNodeId('friend-1');
-      expect(friend?.address, 'host:8080');
+      final friend = await friendStore.findByAccountOrDeviceId(peerA);
+      expect(friend?.primaryDevice?.address, 'host:8080');
     });
 
     test('rejects a missing code', () async {
       final response = await post('/friends', {
-        'nodeId': 'friend-1',
-        'publicKeyBase64': 'key',
+        'nodeId': peerA,
+        'publicKeyBase64': peerAKey,
         'address': 'host:8080',
       });
       expect(response.statusCode, 400);
-      expect(await friendStore.findByNodeId('friend-1'), isNull);
+      expect(await friendStore.findByAccountOrDeviceId(peerA), isNull);
     });
 
     test('rejects an unknown code', () async {
       final response = await pairAsFriend(
-        nodeId: 'friend-1',
-        publicKeyBase64: 'key',
+        nodeId: peerA,
+        publicKeyBase64: peerAKey,
         address: 'host:8080',
         code: 'not-a-real-code',
       );
       expect(response.statusCode, 403);
-      expect(await friendStore.findByNodeId('friend-1'), isNull);
+      expect(await friendStore.findByAccountOrDeviceId(peerA), isNull);
     });
 
     test('a code can only be redeemed once', () async {
       final code = await newPairingCode();
 
       final first = await pairAsFriend(
-        nodeId: 'friend-1',
-        publicKeyBase64: 'key',
+        nodeId: peerA,
+        publicKeyBase64: peerAKey,
         address: 'host:8080',
         code: code,
       );
       final second = await pairAsFriend(
-        nodeId: 'friend-2',
-        publicKeyBase64: 'key',
+        nodeId: peerB,
+        publicKeyBase64: peerBKey,
         address: 'host:8081',
         code: code,
       );
 
       expect(first.statusCode, 201);
       expect(second.statusCode, 403);
-      expect(await friendStore.findByNodeId('friend-2'), isNull);
+      expect(await friendStore.findByAccountOrDeviceId(peerB), isNull);
     });
 
     test('rejects a missing address', () async {
       final response = await post('/friends', {
         'code': await newPairingCode(),
-        'nodeId': 'friend-1',
-        'publicKeyBase64': 'key',
+        'nodeId': peerA,
+        'publicKeyBase64': peerAKey,
       });
       expect(response.statusCode, 400);
     });
@@ -210,8 +232,8 @@ void main() {
       'stores an optional udpCandidate and echoes this node\'s own',
       () async {
         final response = await pairAsFriend(
-          nodeId: 'friend-1',
-          publicKeyBase64: 'key',
+          nodeId: peerA,
+          publicKeyBase64: peerAKey,
           address: 'host:8080',
           code: await newPairingCode(),
           udpCandidate: '203.0.113.5:41234',
@@ -225,16 +247,16 @@ void main() {
         // stun_client_test.dart / ADR 0022 for that).
         expect(body.containsKey('udpCandidate'), isTrue);
 
-        final friend = await friendStore.findByNodeId('friend-1');
-        expect(friend?.udpCandidate, '203.0.113.5:41234');
+        final friend = await friendStore.findByAccountOrDeviceId(peerA);
+        expect(friend?.primaryDevice?.udpCandidate, '203.0.113.5:41234');
       },
     );
 
     test('rejects a non-string udpCandidate', () async {
       final response = await post('/friends', {
         'code': await newPairingCode(),
-        'nodeId': 'friend-1',
-        'publicKeyBase64': 'key',
+        'nodeId': peerA,
+        'publicKeyBase64': peerAKey,
         'address': 'host:8080',
         'udpCandidate': 12345,
       });
@@ -245,8 +267,8 @@ void main() {
   group('GET /friends', () {
     test('lists registered friends', () async {
       await pairAsFriend(
-        nodeId: 'friend-1',
-        publicKeyBase64: 'key',
+        nodeId: peerA,
+        publicKeyBase64: peerAKey,
         address: 'host:8080',
         code: await newPairingCode(),
       );
@@ -260,28 +282,28 @@ void main() {
   group('DELETE /friends/<nodeId>', () {
     test('revokes a friend', () async {
       await pairAsFriend(
-        nodeId: 'friend-1',
-        publicKeyBase64: 'key',
+        nodeId: peerA,
+        publicKeyBase64: peerAKey,
         address: 'host:8080',
         code: await newPairingCode(),
       );
 
-      final response = await delete('/friends/friend-1');
+      final response = await delete('/friends/$peerA');
 
       expect(response.statusCode, 204);
-      expect(await friendStore.findByNodeId('friend-1'), isNull);
+      expect(await friendStore.findByAccountOrDeviceId(peerA), isNull);
     });
 
     test(
       'stops maintaining any active NAT keepalive for that friend',
       () async {
-        puncher.startKeepalive(nodeId: 'friend-1', host: '127.0.0.1', port: 1);
+        puncher.startKeepalive(nodeId: peerA, host: '127.0.0.1', port: 1);
         await Future<void>.delayed(const Duration(milliseconds: 50));
-        expect(puncher.isMaintaining('friend-1'), isTrue);
+        expect(puncher.isMaintaining(peerA), isTrue);
 
-        await delete('/friends/friend-1');
+        await delete('/friends/$peerA');
 
-        expect(puncher.isMaintaining('friend-1'), isFalse);
+        expect(puncher.isMaintaining(peerA), isFalse);
       },
     );
   });
@@ -289,37 +311,35 @@ void main() {
   group('PATCH /friends/<nodeId>', () {
     test('sets a local nickname and returns the updated friend', () async {
       await pairAsFriend(
-        nodeId: 'friend-1',
-        publicKeyBase64: 'key',
+        nodeId: peerA,
+        publicKeyBase64: peerAKey,
         address: 'host:8080',
         code: await newPairingCode(),
       );
 
-      final response = await patch('/friends/friend-1', {
+      final response = await patch('/friends/$peerA', {
         'localNickname': 'Bestie',
       });
 
       expect(response.statusCode, 200);
       final body = jsonDecode(await response.readAsString());
-      expect(body['nodeId'], 'friend-1');
+      expect(body['nodeId'], peerA);
       expect(body['localNickname'], 'Bestie');
 
-      final friend = await friendStore.findByNodeId('friend-1');
+      final friend = await friendStore.findByAccountOrDeviceId(peerA);
       expect(friend?.localNickname, 'Bestie');
     });
 
     test('clears a local nickname when given null', () async {
       await pairAsFriend(
-        nodeId: 'friend-1',
-        publicKeyBase64: 'key',
+        nodeId: peerA,
+        publicKeyBase64: peerAKey,
         address: 'host:8080',
         code: await newPairingCode(),
       );
-      await patch('/friends/friend-1', {'localNickname': 'Bestie'});
+      await patch('/friends/$peerA', {'localNickname': 'Bestie'});
 
-      final response = await patch('/friends/friend-1', {
-        'localNickname': null,
-      });
+      final response = await patch('/friends/$peerA', {'localNickname': null});
 
       expect(response.statusCode, 200);
       final body = jsonDecode(await response.readAsString());
@@ -336,27 +356,25 @@ void main() {
 
     test('rejects a non-string localNickname', () async {
       await pairAsFriend(
-        nodeId: 'friend-1',
-        publicKeyBase64: 'key',
+        nodeId: peerA,
+        publicKeyBase64: peerAKey,
         address: 'host:8080',
         code: await newPairingCode(),
       );
 
-      final response = await patch('/friends/friend-1', {
-        'localNickname': 12345,
-      });
+      final response = await patch('/friends/$peerA', {'localNickname': 12345});
 
       expect(response.statusCode, 400);
     });
 
     test('GET /friends reflects the local nickname afterward', () async {
       await pairAsFriend(
-        nodeId: 'friend-1',
-        publicKeyBase64: 'key',
+        nodeId: peerA,
+        publicKeyBase64: peerAKey,
         address: 'host:8080',
         code: await newPairingCode(),
       );
-      await patch('/friends/friend-1', {'localNickname': 'Bestie'});
+      await patch('/friends/$peerA', {'localNickname': 'Bestie'});
 
       final response = await get('/friends');
       final body = jsonDecode(await response.readAsString()) as List<dynamic>;

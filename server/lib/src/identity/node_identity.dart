@@ -63,12 +63,33 @@ class NodeIdentityStore {
     return _identityOf(keyPair);
   }
 
-  Future<NodeIdentity> _identityOf(SimpleKeyPair keyPair) async {
-    final publicKey = await keyPair.extractPublicKey();
-    final fingerprint = await Sha256().hash(publicKey.bytes);
-    return NodeIdentity(nodeId: _hex(fingerprint.bytes), keyPair: keyPair);
-  }
+  Future<NodeIdentity> _identityOf(SimpleKeyPair keyPair) async => NodeIdentity(
+    nodeId: await nodeIdForPublicKey((await keyPair.extractPublicKey()).bytes),
+    keyPair: keyPair,
+  );
 }
 
-String _hex(List<int> bytes) =>
-    bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+/// The one and only definition of a nodeId: the lowercase hex-encoded
+/// SHA-256 fingerprint of an Ed25519 public key's raw bytes.
+///
+/// This self-certifying property — anyone holding the key can recompute the
+/// id, and nobody can produce a key for an id they don't own — is the trust
+/// anchor of the whole federation model, so every place that accepts a
+/// `nodeId`/`publicKeyBase64` pair from the wire has to check the pair
+/// against *this* function rather than re-deriving the fingerprint itself:
+/// `relay_hub.dart` (a node connecting to a relay), `account_routes.dart`
+/// (a device logging in to an account) and `federation_routes.dart`'s
+/// `POST /friends` (a peer redeeming a pairing code). Three independent
+/// copies of the same three lines is exactly the kind of thing that drifts,
+/// and a nodeId derived even slightly differently in one of them would
+/// silently sever that anchor.
+///
+/// The encoding is load-bearing and must not change: nodeIds are persisted
+/// in `friends.json`, in account device links, and in relay routing, and
+/// they appear in URLs.
+Future<String> nodeIdForPublicKey(List<int> publicKeyBytes) async {
+  final fingerprint = await Sha256().hash(publicKeyBytes);
+  return fingerprint.bytes
+      .map((b) => b.toRadixString(16).padLeft(2, '0'))
+      .join();
+}

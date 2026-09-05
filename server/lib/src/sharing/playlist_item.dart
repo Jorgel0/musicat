@@ -22,6 +22,15 @@ class PlaylistItem {
 
   /// Whose server actually holds the file — download it via that node's
   /// `/api/v1/sharing/shared-tracks/<sharedTrackId>/file`.
+  ///
+  /// Deliberately still a *device* nodeId (the adding node's own), not a
+  /// friend account id: it names the specific machine the bytes live on,
+  /// which is a reachability fact, not an authorization one — and a node
+  /// doesn't necessarily know its own account id at all. The receiving
+  /// side resolves it to a friend account when it needs one
+  /// (`FriendStore.findByAccountOrDeviceId`), and the *authorization* to
+  /// download still happens on the owner's side against the backing
+  /// [SharedTrack]'s account-scoped visibility.
   final String ownerNodeId;
   final String sharedTrackId;
 

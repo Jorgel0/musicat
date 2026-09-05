@@ -5,6 +5,8 @@ import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart';
 import 'package:shelf_router/shelf_router.dart';
 
+import 'src/accounts/account_service_client.dart';
+import 'src/federation/account_friend_devices.dart';
 import 'src/federation/federation_routes.dart';
 import 'src/federation/friend_store.dart';
 import 'src/federation/pairing_code_store.dart';
@@ -38,6 +40,8 @@ class MusicatServerHandle {
     required this._httpServer,
     required this._relayClient,
     required this._puncher,
+    required this._deviceRefresher,
+    required this._accountService,
   });
 
   /// This node's persistent cryptographic identity (ADR 0015: stable across
@@ -62,6 +66,8 @@ class MusicatServerHandle {
   final HttpServer _httpServer;
   final RelayClient? _relayClient;
   final UdpPuncher _puncher;
+  final FriendDeviceRefresher? _deviceRefresher;
+  final AccountServiceClient? _accountService;
 
   /// Shuts down everything [startMusicatServer] started: the relay tunnel
   /// (if one was connected), the UDP hole-punching socket, and the HTTP
@@ -69,6 +75,8 @@ class MusicatServerHandle {
   /// request made against [port] after this completes will fail to
   /// connect.
   Future<void> close() async {
+    _deviceRefresher?.stop();
+    _accountService?.close();
     await _relayClient?.close();
     await _puncher.close();
     await _httpServer.close(force: true);
@@ -164,6 +172,21 @@ Router _buildRouter(
 /// always printed (identity, NAT candidate, relay status, listening port)
 /// -- omit it (the default) to run silently, which is what an in-process
 /// embedding wants; `bin/server.dart` passes `print`.
+/// [accountServiceUrl]: the portable account service (ADR 0048) this node
+/// should consult, e.g. `http://relay.example.com:8090/accounts` — the
+/// same deployed relay process, under its `/accounts` prefix. Entirely
+/// optional, and omitted by default: with no account service configured
+/// this server behaves exactly as it did before Fase 5 (device-pinned
+/// friends only, no network call anywhere in the verify-then-serve path).
+/// When it *is* configured it is still never on that path — it is only
+/// reached when an incoming nodeId matches no known friend's cached device
+/// set (a rate-limited lookup, see [AccountFriendDeviceResolver]), on the
+/// periodic device refresh below, and when a pairing caller claims an
+/// accountId. Two established friends can always share with it down.
+/// [friendDeviceRefreshInterval]: how often each account-based friend's
+/// cached device list is refreshed from that service (default 30 minutes;
+/// ignored entirely when [accountServiceUrl] is omitted). This is the
+/// bound on how long a friend's unlinked/stolen device stays trusted here.
 /// [appApiKey]: an operator-configured shared secret (`MUSICAT_APP_API_KEY`)
 /// that lets a non-loopback caller reach the app-facing routes this server
 /// would otherwise restrict to its own device -- the explicit opt-in for
@@ -181,6 +204,8 @@ Future<MusicatServerHandle> startMusicatServer({
   SlskdConfig? slskdConfig,
   void Function(String message)? onLog,
   String? appApiKey,
+  String? accountServiceUrl,
+  Duration friendDeviceRefreshInterval = const Duration(minutes: 30),
 }) async {
   final ip = InternetAddress.anyIPv4;
   final log = onLog ?? (String message) {};
@@ -238,14 +263,48 @@ Future<MusicatServerHandle> startMusicatServer({
     }
   }
 
+  // The account service, and everything that talks to it, is optional and
+  // deliberately assembled *outside* the request-serving path: the
+  // verifier below is handed only a narrow UnknownDeviceResolver (see
+  // `federation/unknown_device_resolver.dart`), never the HTTP client
+  // itself, and is fully functional with `null` there.
+  AccountServiceClient? accountService;
+  AccountFriendDeviceResolver? deviceResolver;
+  FriendDeviceRefresher? deviceRefresher;
+  if (accountServiceUrl != null && accountServiceUrl.isNotEmpty) {
+    accountService = AccountServiceClient(
+      baseUrl: accountServiceUrl,
+      identity: identity,
+    );
+    deviceResolver = AccountFriendDeviceResolver(
+      friendStore: friendStore,
+      accountService: accountService,
+    );
+    deviceRefresher = FriendDeviceRefresher(
+      friendStore: friendStore,
+      accountService: accountService,
+      refreshInterval: friendDeviceRefreshInterval,
+    )..start();
+    log('Account service: $accountServiceUrl');
+  }
+
+  // One verifier for every router: they answer the same question, and
+  // sharing it also shares the resolver's rate-limiting state instead of
+  // giving each router its own budget.
+  final verifier = RequestVerifier(
+    friendStore,
+    unknownDeviceResolver: deviceResolver,
+  );
+
   final federationRouter = buildFederationRouter(
     friendStore,
-    RequestVerifier(friendStore),
+    verifier,
     PairingCodeStore(),
     puncher,
     myRelayUrl: myRelayUrl,
     appApiKey: appApiKey,
     relayClient: relayClient,
+    accountService: accountService,
   );
 
   final sharedTrackStore = SharedTrackStore(dataDir);
@@ -264,7 +323,7 @@ Future<MusicatServerHandle> startMusicatServer({
   final sharingFederationRouter = buildSharingFederationRouter(
     sharedTrackStore,
     playlistStore,
-    RequestVerifier(friendStore),
+    verifier,
   );
 
   final handler = Pipeline()
@@ -295,5 +354,7 @@ Future<MusicatServerHandle> startMusicatServer({
     httpServer: server,
     relayClient: relayClient,
     puncher: puncher,
+    deviceRefresher: deviceRefresher,
+    accountService: accountService,
   );
 }

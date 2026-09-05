@@ -9,6 +9,7 @@ import 'package:shelf_router/shelf_router.dart';
 import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../identity/node_identity.dart';
 import 'relay_protocol.dart';
 import 'username_directory_store.dart';
 
@@ -17,9 +18,6 @@ Response _json(Object? body, {int status = 200}) => Response(
   body: jsonEncode(body),
   headers: {'content-type': 'application/json'},
 );
-
-String _hex(List<int> bytes) =>
-    bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 String _generateId() {
   final random = Random.secure();
@@ -180,8 +178,7 @@ class RelayHub {
       }
 
       final publicKeyBytes = base64Decode(hello.publicKeyBase64);
-      final fingerprint = await Sha256().hash(publicKeyBytes);
-      if (_hex(fingerprint.bytes) != hello.nodeId) {
+      if (await nodeIdForPublicKey(publicKeyBytes) != hello.nodeId) {
         channel.sink.add(
           const RelayAuthResult(
             success: false,

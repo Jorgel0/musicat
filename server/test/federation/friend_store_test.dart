@@ -1,8 +1,36 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:musicat_server/src/federation/friend.dart';
 import 'package:musicat_server/src/federation/friend_store.dart';
 import 'package:test/test.dart';
+
+/// A `friends.json` in the exact shape written *before* accounts existed —
+/// deliberately hand-written here rather than produced by the current code,
+/// so this stays a real fixture of the old on-disk format even if
+/// [Friend.toJson] changes again later.
+const _legacyFriendsJson = '''
+[
+  {
+    "nodeId": "legacy-node-1",
+    "publicKeyBase64": "legacy-key-1",
+    "address": "legacy.example:8080",
+    "displayName": "Legacy Friend",
+    "udpCandidate": "203.0.113.5:41234",
+    "relayUrl": "ws://relay.example.com:8090/connect",
+    "localNickname": "Bestie"
+  },
+  {
+    "nodeId": "legacy-node-2",
+    "publicKeyBase64": "legacy-key-2",
+    "address": "legacy2.example:8080",
+    "displayName": null,
+    "udpCandidate": null,
+    "relayUrl": null,
+    "localNickname": null
+  }
+]
+''';
 
 void main() {
   late Directory tempDir;
@@ -17,14 +45,20 @@ void main() {
     tempDir.deleteSync(recursive: true);
   });
 
+  void writeRawFriendsFile(String contents) {
+    File('${tempDir.path}/friends.json').writeAsStringSync(contents);
+  }
+
   test('starts empty', () async {
     expect(await store.loadAll(), isEmpty);
-    expect(await store.findByNodeId('unknown'), isNull);
+    expect(await store.findByDeviceNodeId('unknown'), isNull);
+    expect(await store.findByAccountId('unknown'), isNull);
+    expect(await store.findByAccountOrDeviceId('unknown'), isNull);
   });
 
   test('adds and finds a friend, persisted across store instances', () async {
     await store.add(
-      const Friend(
+      Friend.devicePinned(
         nodeId: 'abc',
         publicKeyBase64: 'key',
         address: 'host:8080',
@@ -33,16 +67,19 @@ void main() {
     );
 
     final reloaded = FriendStore(tempDir);
-    final friend = await reloaded.findByNodeId('abc');
+    final friend = await reloaded.findByDeviceNodeId('abc');
 
     expect(friend, isNotNull);
-    expect(friend!.address, 'host:8080');
+    expect(friend!.primaryDevice?.address, 'host:8080');
     expect(friend.displayName, 'Friend A');
+    // A device-pinned friend's synthetic accountId is its own nodeId.
+    expect(friend.accountId, 'abc');
+    expect(friend.isDevicePinned, isTrue);
   });
 
   test('persists relayUrl across store instances', () async {
     await store.add(
-      const Friend(
+      Friend.devicePinned(
         nodeId: 'abc',
         publicKeyBase64: 'key',
         address: 'host:8080',
@@ -51,53 +88,570 @@ void main() {
     );
 
     final reloaded = FriendStore(tempDir);
-    final friend = await reloaded.findByNodeId('abc');
+    final friend = await reloaded.findByDeviceNodeId('abc');
 
-    expect(friend!.relayUrl, 'ws://relay.example.com/connect');
+    expect(friend!.primaryDevice?.relayUrl, 'ws://relay.example.com/connect');
   });
 
   test('relayUrl defaults to null when not provided', () async {
     await store.add(
-      const Friend(nodeId: 'abc', publicKeyBase64: 'key', address: 'a:1'),
+      Friend.devicePinned(
+        nodeId: 'abc',
+        publicKeyBase64: 'key',
+        address: 'a:1',
+      ),
     );
 
-    final friend = await store.findByNodeId('abc');
-    expect(friend!.relayUrl, isNull);
+    final friend = await store.findByDeviceNodeId('abc');
+    expect(friend!.primaryDevice?.relayUrl, isNull);
   });
 
-  test('adding a friend with the same nodeId replaces the old entry', () async {
-    await store.add(
-      const Friend(nodeId: 'abc', publicKeyBase64: 'old', address: 'a:1'),
-    );
-    await store.add(
-      const Friend(nodeId: 'abc', publicKeyBase64: 'new', address: 'b:2'),
-    );
+  test(
+    'adding a friend with the same account replaces the old entry',
+    () async {
+      await store.add(
+        Friend.devicePinned(
+          nodeId: 'abc',
+          publicKeyBase64: 'old',
+          address: 'a:1',
+        ),
+      );
+      await store.add(
+        Friend.devicePinned(
+          nodeId: 'abc',
+          publicKeyBase64: 'new',
+          address: 'b:2',
+        ),
+      );
 
-    final friends = await store.loadAll();
-    expect(friends, hasLength(1));
-    expect(friends.single.publicKeyBase64, 'new');
-  });
+      final friends = await store.loadAll();
+      expect(friends, hasLength(1));
+      expect(friends.single.primaryDevice?.publicKeyBase64, 'new');
+    },
+  );
 
   test('removes a friend', () async {
     await store.add(
-      const Friend(nodeId: 'abc', publicKeyBase64: 'key', address: 'a:1'),
+      Friend.devicePinned(
+        nodeId: 'abc',
+        publicKeyBase64: 'key',
+        address: 'a:1',
+      ),
     );
 
     await store.remove('abc');
 
-    expect(await store.findByNodeId('abc'), isNull);
+    expect(await store.findByDeviceNodeId('abc'), isNull);
     expect(await store.loadAll(), isEmpty);
   });
 
-  test('removing an unknown nodeId is a no-op', () async {
+  test('removing an unknown nodeId is a no-op for the friend list', () async {
     await store.remove('does-not-exist'); // does not throw
     expect(await store.loadAll(), isEmpty);
+  });
+
+  group('a legacy friends.json written before accounts existed', () {
+    test('loads unchanged: accountId == nodeId, exactly one device', () async {
+      writeRawFriendsFile(_legacyFriendsJson);
+
+      final friends = await store.loadAll();
+
+      expect(friends, hasLength(2));
+      final legacy = friends.first;
+      expect(legacy.accountId, 'legacy-node-1');
+      expect(legacy.isDevicePinned, isTrue);
+      expect(legacy.devices, hasLength(1));
+      expect(legacy.devices.single.nodeId, 'legacy-node-1');
+      expect(legacy.devices.single.publicKeyBase64, 'legacy-key-1');
+      expect(legacy.devices.single.address, 'legacy.example:8080');
+      expect(legacy.devices.single.udpCandidate, '203.0.113.5:41234');
+      expect(
+        legacy.devices.single.relayUrl,
+        'ws://relay.example.com:8090/connect',
+      );
+      expect(legacy.displayName, 'Legacy Friend');
+      expect(legacy.localNickname, 'Bestie');
+      expect(legacy.devicesRefreshedAt, isNull);
+    });
+
+    test('is found by its nodeId through every lookup', () async {
+      writeRawFriendsFile(_legacyFriendsJson);
+
+      expect(await store.findByDeviceNodeId('legacy-node-1'), isNotNull);
+      expect(await store.findByAccountId('legacy-node-1'), isNotNull);
+      expect(await store.findByAccountOrDeviceId('legacy-node-1'), isNotNull);
+    });
+
+    test('still exposes the flat legacy fields the app reads', () async {
+      writeRawFriendsFile(_legacyFriendsJson);
+
+      final json = (await store.loadAll()).first.toJson();
+
+      expect(json['nodeId'], 'legacy-node-1');
+      expect(json['publicKeyBase64'], 'legacy-key-1');
+      expect(json['address'], 'legacy.example:8080');
+      expect(json['relayUrl'], 'ws://relay.example.com:8090/connect');
+      expect(json['localNickname'], 'Bestie');
+      // ...alongside the new account view of the same friend.
+      expect(json['accountId'], 'legacy-node-1');
+      expect(json['devices'], hasLength(1));
+    });
+
+    test('survives a rewrite: saving it back and reloading changes nothing '
+        'observable', () async {
+      writeRawFriendsFile(_legacyFriendsJson);
+      final before = (await store.loadAll()).first;
+
+      // Any mutation rewrites the whole file in the new format.
+      await store.setLocalNickname('legacy-node-2', 'Second');
+
+      final after = (await FriendStore(tempDir).loadAll()).first;
+      expect(after.accountId, before.accountId);
+      expect(after.isDevicePinned, isTrue);
+      expect(after.devices.single.nodeId, before.devices.single.nodeId);
+      expect(
+        after.devices.single.publicKeyBase64,
+        before.devices.single.publicKeyBase64,
+      );
+      expect(after.devices.single.address, before.devices.single.address);
+      expect(after.localNickname, 'Bestie');
+    });
+  });
+
+  group('an account-based friend with several devices', () {
+    Friend twoDeviceFriend() => Friend(
+      accountId: 'account-1',
+      devices: [
+        const FriendDevice(
+          nodeId: 'device-a',
+          publicKeyBase64: 'key-a',
+          address: 'a.example:8080',
+        ),
+        const FriendDevice(nodeId: 'device-b', publicKeyBase64: 'key-b'),
+      ],
+      displayName: 'Account Friend',
+    );
+
+    test('is found by its accountId and by either device nodeId', () async {
+      await store.add(twoDeviceFriend());
+
+      expect(
+        (await store.findByAccountId('account-1'))?.accountId,
+        'account-1',
+      );
+      expect(
+        (await store.findByDeviceNodeId('device-a'))?.accountId,
+        'account-1',
+      );
+      expect(
+        (await store.findByDeviceNodeId('device-b'))?.accountId,
+        'account-1',
+      );
+      expect(
+        (await store.findByAccountOrDeviceId('device-b'))?.accountId,
+        'account-1',
+      );
+      expect(await store.findByDeviceNodeId('account-1'), isNull);
+    });
+
+    test('is not device-pinned, and round-trips through the file', () async {
+      await store.add(twoDeviceFriend());
+
+      final reloaded = await FriendStore(tempDir).findByAccountId('account-1');
+
+      expect(reloaded!.isDevicePinned, isFalse);
+      expect(reloaded.devices, hasLength(2));
+      expect(reloaded.deviceFor('device-b')?.publicKeyBase64, 'key-b');
+      // The legacy projection prefers the device that actually has an
+      // address, since an address-less one is useless to a caller.
+      expect(reloaded.primaryDevice?.nodeId, 'device-a');
+      expect(reloaded.toJson()['address'], 'a.example:8080');
+    });
+
+    test('can be removed by any of its device nodeIds', () async {
+      await store.add(twoDeviceFriend());
+
+      await store.remove('device-b');
+
+      expect(await store.loadAll(), isEmpty);
+      expect(await store.isRemoved('account-1'), isTrue);
+    });
+
+    test('updateDevices replaces the set, keeping locally-known addresses '
+        'and dropping devices that are gone', () async {
+      await store.add(twoDeviceFriend());
+
+      final updated = await store.updateDevices('account-1', [
+        // device-a is still linked -- its locally-learned address must
+        // survive, since the account service never knew it.
+        const FriendDevice(
+          nodeId: 'device-a',
+          publicKeyBase64: 'key-a',
+          address: 'a.example:8080',
+        ),
+        const FriendDevice(nodeId: 'device-c', publicKeyBase64: 'key-c'),
+      ]);
+
+      expect(updated!.devices.map((d) => d.nodeId), ['device-a', 'device-c']);
+      expect(updated.deviceFor('device-a')?.address, 'a.example:8080');
+      expect(updated.devicesRefreshedAt, isNotNull);
+      expect(await store.findByDeviceNodeId('device-b'), isNull);
+    });
+
+    test('updateDevices never creates a friend', () async {
+      final updated = await store.updateDevices('never-heard-of-it', [
+        const FriendDevice(nodeId: 'x', publicKeyBase64: 'k'),
+      ]);
+
+      expect(updated, isNull);
+      expect(await store.loadAll(), isEmpty);
+    });
+
+    test('a device claimed by one account is pruned from another '
+        "account-based friend's stale cache", () async {
+      await store.add(twoDeviceFriend());
+      await store.add(
+        Friend(
+          accountId: 'account-2',
+          devices: [
+            const FriendDevice(nodeId: 'device-z', publicKeyBase64: 'key-z'),
+          ],
+        ),
+      );
+
+      // The account service now says device-z belongs to account-1.
+      await store.updateDevices('account-1', [
+        const FriendDevice(nodeId: 'device-z', publicKeyBase64: 'key-z'),
+      ]);
+
+      expect(
+        (await store.findByDeviceNodeId('device-z'))?.accountId,
+        'account-1',
+      );
+      expect((await store.findByAccountId('account-2'))!.devices, isEmpty);
+    });
+
+    test('a legacy device-pinned friend is never pruned this way', () async {
+      await store.add(
+        Friend.devicePinned(
+          nodeId: 'legacy-node',
+          publicKeyBase64: 'legacy-key',
+          address: 'l:1',
+        ),
+      );
+      await store.add(twoDeviceFriend());
+
+      await store.updateDevices('account-1', [
+        const FriendDevice(nodeId: 'legacy-node', publicKeyBase64: 'other'),
+      ]);
+
+      final legacy = await store.findByAccountId('legacy-node');
+      expect(legacy!.devices, hasLength(1));
+    });
+  });
+
+  group('tombstones', () {
+    test('removing a friend records a tombstone', () async {
+      await store.add(
+        Friend(
+          accountId: 'account-1',
+          devices: [
+            const FriendDevice(nodeId: 'device-a', publicKeyBase64: 'key-a'),
+          ],
+        ),
+      );
+
+      await store.remove('account-1');
+
+      expect(await store.isRemoved('account-1'), isTrue);
+      final tombstones = await store.loadTombstones();
+      expect(tombstones.single.accountId, 'account-1');
+      expect(tombstones.single.removedAt.isUtc, isTrue);
+      // Persisted, not just in memory.
+      expect(await FriendStore(tempDir).isRemoved('account-1'), isTrue);
+    });
+
+    test('a tombstoned account cannot be resurrected by updateDevices, even '
+        'though the account service still lists its devices', () async {
+      await store.add(
+        Friend(
+          accountId: 'account-1',
+          devices: [
+            const FriendDevice(nodeId: 'device-a', publicKeyBase64: 'key-a'),
+          ],
+        ),
+      );
+      await store.remove('account-1');
+
+      final updated = await store.updateDevices('account-1', [
+        const FriendDevice(nodeId: 'device-a', publicKeyBase64: 'key-a'),
+      ]);
+
+      expect(updated, isNull);
+      expect(await store.loadAll(), isEmpty);
+      expect(await store.findByDeviceNodeId('device-a'), isNull);
+    });
+
+    test('removing an account this node has never heard of still tombstones '
+        'it, so learning about it later cannot add it', () async {
+      await store.remove('account-not-yet-known');
+
+      expect(await store.isRemoved('account-not-yet-known'), isTrue);
+      expect(
+        await store.updateDevices('account-not-yet-known', [
+          const FriendDevice(nodeId: 'd', publicKeyBase64: 'k'),
+        ]),
+        isNull,
+      );
+    });
+
+    test(
+      'explicitly re-adding a removed friend clears their tombstone',
+      () async {
+        await store.add(
+          Friend(
+            accountId: 'account-1',
+            devices: [
+              const FriendDevice(nodeId: 'device-a', publicKeyBase64: 'key-a'),
+            ],
+          ),
+        );
+        await store.remove('account-1');
+
+        await store.add(
+          Friend(
+            accountId: 'account-1',
+            devices: [
+              const FriendDevice(nodeId: 'device-a', publicKeyBase64: 'key-a'),
+            ],
+          ),
+        );
+
+        expect(await store.isRemoved('account-1'), isFalse);
+        expect(await store.loadTombstones(), isEmpty);
+        expect(
+          await store.updateDevices('account-1', [
+            const FriendDevice(nodeId: 'device-a', publicKeyBase64: 'key-a'),
+            const FriendDevice(nodeId: 'device-b', publicKeyBase64: 'key-b'),
+          ]),
+          isNotNull,
+        );
+      },
+    );
+
+    test('the tombstone file is valid JSON on disk', () async {
+      await store.remove('account-1');
+
+      final raw = File(
+        '${tempDir.path}/removed_friends.json',
+      ).readAsStringSync();
+      final parsed = jsonDecode(raw) as List<dynamic>;
+      expect((parsed.single as Map<String, dynamic>)['accountId'], 'account-1');
+    });
+  });
+
+  group('concurrent mutations (the resurrection race)', () {
+    test(
+      'a remove landing inside an in-flight updateDevices is not undone',
+      () async {
+        await store.add(
+          Friend(
+            accountId: 'account-victim',
+            devices: const [
+              FriendDevice(nodeId: 'victim-device', publicKeyBase64: 'k-v'),
+            ],
+          ),
+        );
+        await store.add(
+          Friend(
+            accountId: 'account-other',
+            devices: const [
+              FriendDevice(nodeId: 'other-device', publicKeyBase64: 'k-o'),
+            ],
+          ),
+        );
+
+        // Both are load-mutate-save cycles over the same file. Started
+        // together and awaited together, they interleave: before the store
+        // serialized its mutations, the refresh wrote back the whole list it
+        // had loaded *before* the removal, silently restoring the removed
+        // friend -- complete with their device keys, so their signed
+        // requests verified again, permanently. The tombstone was written
+        // but nothing on the read path consults it.
+        final refresh = store.updateDevices('account-other', const [
+          FriendDevice(nodeId: 'other-device-2', publicKeyBase64: 'k-o2'),
+        ]);
+        final removal = store.remove('account-victim');
+        await Future.wait<void>([refresh, removal]);
+
+        expect(await store.findByAccountId('account-victim'), isNull);
+        expect(await store.findByDeviceNodeId('victim-device'), isNull);
+        expect(await store.isRemoved('account-victim'), isTrue);
+        // ...and the other friend's refresh still landed.
+        expect(
+          (await store.findByAccountId('account-other'))!.devices.single.nodeId,
+          'other-device-2',
+        );
+      },
+    );
+
+    test(
+      'the same holds in the other order, and across a fresh store',
+      () async {
+        await store.add(
+          Friend(
+            accountId: 'account-victim',
+            devices: const [
+              FriendDevice(nodeId: 'victim-device', publicKeyBase64: 'k-v'),
+            ],
+          ),
+        );
+
+        final removal = store.remove('victim-device');
+        final refresh = store.updateDevices('account-victim', const [
+          FriendDevice(nodeId: 'victim-device', publicKeyBase64: 'k-v'),
+          FriendDevice(nodeId: 'victim-device-2', publicKeyBase64: 'k-v2'),
+        ]);
+        await Future.wait<void>([removal, refresh]);
+
+        final reopened = FriendStore(tempDir);
+        expect(await reopened.loadAll(), isEmpty);
+        expect(await reopened.findByDeviceNodeId('victim-device-2'), isNull);
+      },
+    );
+  });
+
+  group('add supersedes an entry for the same device', () {
+    test('an account-based re-pair replaces the legacy device-pinned entry '
+        'for that same device', () async {
+      // The headline migration path: someone already paired the old way
+      // signs up for an account and pairs again. Deduping on accountId
+      // alone left both entries in place -- two trusted friends for one
+      // human and one device -- so removing the account one still left the
+      // device fully trusted through the legacy one.
+      await store.add(
+        Friend.devicePinned(
+          nodeId: 'bob-device',
+          publicKeyBase64: 'bob-key',
+          address: 'bob:8080',
+        ),
+      );
+      await store.add(
+        Friend(
+          accountId: 'account-bob',
+          devices: const [
+            FriendDevice(
+              nodeId: 'bob-device',
+              publicKeyBase64: 'bob-key',
+              address: 'bob:8080',
+            ),
+          ],
+        ),
+      );
+
+      expect(await store.loadAll(), hasLength(1));
+      expect((await store.loadAll()).single.accountId, 'account-bob');
+
+      await store.remove('account-bob');
+      expect(await store.findByDeviceNodeId('bob-device'), isNull);
+      expect(await store.loadAll(), isEmpty);
+    });
+
+    test('an unrelated friend sharing no device is left alone', () async {
+      await store.add(
+        Friend.devicePinned(
+          nodeId: 'carol-device',
+          publicKeyBase64: 'carol-key',
+          address: 'carol:8080',
+        ),
+      );
+      await store.add(
+        Friend(
+          accountId: 'account-bob',
+          devices: const [
+            FriendDevice(nodeId: 'bob-device', publicKeyBase64: 'bob-key'),
+          ],
+        ),
+      );
+
+      expect(await store.loadAll(), hasLength(2));
+    });
+  });
+
+  group('isRemovedDevice', () {
+    test('a removed account\'s devices are refusable without knowing the '
+        'accountId', () async {
+      await store.add(
+        Friend(
+          accountId: 'account-bob',
+          devices: const [
+            FriendDevice(nodeId: 'bob-phone', publicKeyBase64: 'k1'),
+            FriendDevice(nodeId: 'bob-desktop', publicKeyBase64: 'k2'),
+          ],
+        ),
+      );
+      await store.remove('account-bob');
+
+      // The point of the field: resolving 'bob-phone' to 'account-bob' is
+      // exactly the account-service call this lets the caller skip.
+      expect(await store.isRemovedDevice('bob-phone'), isTrue);
+      expect(await store.isRemovedDevice('bob-desktop'), isTrue);
+      expect(await store.isRemovedDevice('someone-else'), isFalse);
+    });
+
+    test('removing an already-removed account does not wipe the device ids '
+        'recorded the first time', () async {
+      await store.add(
+        Friend(
+          accountId: 'account-bob',
+          devices: const [
+            FriendDevice(nodeId: 'bob-phone', publicKeyBase64: 'k1'),
+          ],
+        ),
+      );
+      await store.remove('account-bob');
+      // The second call finds no friend left, so it has no devices of its
+      // own to record. It must carry forward the ones already tombstoned
+      // rather than replacing them with an empty list -- otherwise a
+      // duplicate DELETE would quietly restore the per-request lookup this
+      // field exists to avoid.
+      await store.remove('account-bob');
+
+      expect(await store.isRemoved('account-bob'), isTrue);
+      expect(await store.isRemovedDevice('bob-phone'), isTrue);
+    });
+
+    test('re-adding clears the account tombstone, and with it the device '
+        'refusals', () async {
+      await store.add(
+        Friend(
+          accountId: 'account-bob',
+          devices: const [
+            FriendDevice(nodeId: 'bob-phone', publicKeyBase64: 'k1'),
+          ],
+        ),
+      );
+      await store.remove('account-bob');
+      expect(await store.isRemovedDevice('bob-phone'), isTrue);
+
+      await store.add(
+        Friend(
+          accountId: 'account-bob',
+          devices: const [
+            FriendDevice(nodeId: 'bob-phone', publicKeyBase64: 'k1'),
+          ],
+        ),
+      );
+
+      expect(await store.isRemoved('account-bob'), isFalse);
+      expect(await store.isRemovedDevice('bob-phone'), isFalse);
+    });
   });
 
   group('setLocalNickname', () {
     test('sets a local nickname and persists it', () async {
       await store.add(
-        const Friend(
+        Friend.devicePinned(
           nodeId: 'abc',
           publicKeyBase64: 'key',
           address: 'host:8080',
@@ -110,13 +664,13 @@ void main() {
       expect(updated?.localNickname, 'Bestie');
 
       final reloaded = FriendStore(tempDir);
-      final friend = await reloaded.findByNodeId('abc');
+      final friend = await reloaded.findByDeviceNodeId('abc');
       expect(friend?.localNickname, 'Bestie');
     });
 
     test('does not clobber the friend\'s other fields', () async {
       await store.add(
-        const Friend(
+        Friend.devicePinned(
           nodeId: 'abc',
           publicKeyBase64: 'key',
           address: 'host:8080',
@@ -128,16 +682,19 @@ void main() {
 
       final updated = await store.setLocalNickname('abc', 'Bestie');
 
-      expect(updated?.publicKeyBase64, 'key');
-      expect(updated?.address, 'host:8080');
+      expect(updated?.primaryDevice?.publicKeyBase64, 'key');
+      expect(updated?.primaryDevice?.address, 'host:8080');
       expect(updated?.displayName, 'Friend A');
-      expect(updated?.udpCandidate, '203.0.113.5:41234');
-      expect(updated?.relayUrl, 'ws://relay.example.com/connect');
+      expect(updated?.primaryDevice?.udpCandidate, '203.0.113.5:41234');
+      expect(
+        updated?.primaryDevice?.relayUrl,
+        'ws://relay.example.com/connect',
+      );
     });
 
     test('clearing it back to null persists', () async {
       await store.add(
-        const Friend(
+        Friend.devicePinned(
           nodeId: 'abc',
           publicKeyBase64: 'key',
           address: 'host:8080',
@@ -148,7 +705,7 @@ void main() {
       final updated = await store.setLocalNickname('abc', null);
 
       expect(updated?.localNickname, isNull);
-      final friend = await store.findByNodeId('abc');
+      final friend = await store.findByDeviceNodeId('abc');
       expect(friend?.localNickname, isNull);
     });
 

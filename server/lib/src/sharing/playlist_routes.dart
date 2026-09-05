@@ -67,6 +67,23 @@ Router buildPlaylistRouter(
       return _error('"id" must be a string if present');
     }
 
+    // Participants are stored as friend *account* ids: whatever the app
+    // passed (an accountId, or -- as every id stored before Fase 5 is -- a
+    // device nodeId) is normalized here, once, at the write boundary, so
+    // the federation-facing membership check and the backing shared
+    // track's visibility can both compare account ids and a participant
+    // stays a participant from any of their devices. An id that resolves
+    // to no known friend is kept as-is and simply never matches.
+    final participantAccountIds = <String>[];
+    for (final participant in participants) {
+      final id = participant as String;
+      final friend = await friendStore.findByAccountOrDeviceId(id);
+      final accountId = friend?.accountId ?? id;
+      if (!participantAccountIds.contains(accountId)) {
+        participantAccountIds.add(accountId);
+      }
+    }
+
     // Accepts a caller-supplied id so a friend can *join* a playlist
     // someone else already created (using the id they were given
     // out-of-band) rather than always minting a new, disconnected one —
@@ -77,7 +94,7 @@ Router buildPlaylistRouter(
     final playlist = JointPlaylist(
       id: (requestedId as String?) ?? _generateId(),
       name: name,
-      participantNodeIds: [for (final id in participants) id as String],
+      participantAccountIds: participantAccountIds,
       items: const [],
       updatedAt: DateTime.now().toUtc(),
     );
@@ -139,7 +156,7 @@ Router buildPlaylistRouter(
       artist: artist,
       album: body['album'] as String?,
       coverArtPath: body['coverArtPath'] as String?,
-      visibility: FriendsVisibility(playlist.participantNodeIds.toSet()),
+      visibility: FriendsVisibility(playlist.participantAccountIds.toSet()),
     );
     await sharedTrackStore.add(sharedTrack);
 
@@ -168,10 +185,12 @@ Router buildPlaylistRouter(
 
     JointPlaylist current = playlist;
     final errors = <String>[];
-    for (final participantNodeId in playlist.participantNodeIds) {
-      final friend = await friendStore.findByNodeId(participantNodeId);
+    for (final participantAccountId in playlist.participantAccountIds) {
+      final friend = await friendStore.findByAccountOrDeviceId(
+        participantAccountId,
+      );
       if (friend == null) {
-        errors.add('$participantNodeId is not a known friend');
+        errors.add('$participantAccountId is not a known friend');
         continue;
       }
       final path = '/api/v1/sharing/playlists/$id';
@@ -189,7 +208,7 @@ Router buildPlaylistRouter(
         );
         if (response.statusCode != 200) {
           errors.add(
-            '$participantNodeId returned ${response.statusCode}: '
+            '$participantAccountId returned ${response.statusCode}: '
             '${response.body}',
           );
           continue;
@@ -197,9 +216,25 @@ Router buildPlaylistRouter(
         final remote = JointPlaylist.fromJson(
           jsonDecode(response.body) as Map<String, dynamic>,
         );
+        // A participant answers about the playlist that was *asked* for,
+        // and nothing else. Without this, a friend's server (or anything
+        // able to answer as one) could return a playlist carrying a
+        // different id and have `mergeRemote` create that entirely
+        // separate playlist here, complete with a participant set of the
+        // responder's choosing -- i.e. conjure a local playlist shared
+        // with third parties this node never agreed to. Reported like the
+        // other per-participant failures rather than failing the whole
+        // sync, since the other participants' answers are still good.
+        if (remote.id != id) {
+          errors.add(
+            '$participantAccountId answered about a different playlist '
+            '(${remote.id}), ignored',
+          );
+          continue;
+        }
         current = await playlistStore.mergeRemote(remote);
       } catch (e) {
-        errors.add('$participantNodeId unreachable: $e');
+        errors.add('$participantAccountId unreachable: $e');
       }
     }
 

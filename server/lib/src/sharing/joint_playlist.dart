@@ -15,7 +15,7 @@ class JointPlaylist {
   const JointPlaylist({
     required this.id,
     required this.name,
-    required this.participantNodeIds,
+    required this.participantAccountIds,
     required this.items,
     required this.updatedAt,
   });
@@ -23,8 +23,19 @@ class JointPlaylist {
   final String id;
   final String name;
 
-  /// The *other* participants — never includes this node's own id.
-  final List<String> participantNodeIds;
+  /// The *other* participants, as friend **account** ids
+  /// (`Friend.accountId`) — never includes this node's own id.
+  ///
+  /// Membership is per account, not per device: a participant who joined
+  /// from their phone is still a participant when they call from their
+  /// desktop, which is why `playlist_routes.dart` normalizes whatever ids
+  /// it is handed through `FriendStore` at creation time, and why the
+  /// federation-facing membership check compares a verified *account* id.
+  /// For a legacy device-pinned friend an account id is their nodeId, so
+  /// every `joint_playlists.json` written before accounts existed keeps
+  /// working untouched — which is also why the JSON key below stays
+  /// `participantNodeIds`.
+  final List<String> participantAccountIds;
   final List<PlaylistItem> items;
   final DateTime updatedAt;
 
@@ -32,7 +43,7 @@ class JointPlaylist {
       JointPlaylist(
         id: id,
         name: name,
-        participantNodeIds: participantNodeIds,
+        participantAccountIds: participantAccountIds,
         items: items ?? this.items,
         updatedAt: updatedAt ?? this.updatedAt,
       );
@@ -40,7 +51,7 @@ class JointPlaylist {
   Map<String, Object?> toJson() => {
     'id': id,
     'name': name,
-    'participantNodeIds': participantNodeIds,
+    'participantNodeIds': participantAccountIds,
     'items': [for (final item in items) item.toJson()],
     'updatedAt': updatedAt.toIso8601String(),
   };
@@ -48,7 +59,7 @@ class JointPlaylist {
   factory JointPlaylist.fromJson(Map<String, dynamic> json) => JointPlaylist(
     id: json['id'] as String,
     name: json['name'] as String,
-    participantNodeIds: [
+    participantAccountIds: [
       for (final id in json['participantNodeIds'] as List<dynamic>)
         id as String,
     ],

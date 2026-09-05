@@ -134,6 +134,17 @@ Configuration is via environment variables:
   always loopback and never needs this. When set, a non-loopback request
   must present the same value in an `X-Api-Key` header, or it gets `403`
   exactly as it would with no key configured at all.
+- `MUSICAT_ACCOUNT_SERVICE_URL` — the portable account service to consult
+  (default: unset), e.g. `http://relay.example.com:8090/accounts` — the
+  same deployed relay process, under its `/accounts` prefix. Entirely
+  optional: unset, this server behaves exactly as it did before accounts
+  existed (device-pinned friends only). When set, it is still never on
+  the path of a normal request between two already-established friends —
+  it is consulted only when an incoming request comes from a device this
+  server has never heard of (rate-limited), on the periodic refresh of a
+  friend account's device list (every 30 minutes), and when a peer
+  redeeming a pairing code claims to belong to an account. Two friends on
+  the same network can always share with it down.
 
 ## Running with Docker
 

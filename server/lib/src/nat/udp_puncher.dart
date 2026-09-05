@@ -48,6 +48,9 @@ class UdpPuncher {
   Future<int> bind({int port = 0}) async {
     final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, port);
     _socket = socket;
+    // Deliberately a bare, local-only verifier (no UnknownDeviceResolver):
+    // an unsigned/unknown UDP packet must never be able to make this node
+    // call the account service -- these arrive unsolicited from anywhere.
     final verifier = RequestVerifier(friendStore);
     _listenerSubscription = socket.listen((event) async {
       if (event != RawSocketEvent.read) return;
@@ -227,7 +230,7 @@ class UdpPuncher {
   ) async {
     try {
       final headers = jsonDecode(utf8.decode(data)) as Map<String, dynamic>;
-      final result = await verifier.verify(
+      final verification = await verifier.verify(
         method: _method,
         path: _path,
         body: '',
@@ -235,9 +238,9 @@ class UdpPuncher {
         timestamp: headers['X-Timestamp'] as String?,
         signatureBase64: headers['X-Signature'] as String?,
       );
-      return result == RequestVerificationResult.valid
-          ? headers['X-Node-Id'] as String?
-          : null;
+      // Keyed by the *device* that sent the packet, not its friend
+      // account: a NAT mapping is per socket, so liveness is per device.
+      return verification.deviceNodeId;
     } catch (_) {
       return null;
     }

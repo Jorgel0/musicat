@@ -39,7 +39,7 @@ void main() {
       final playlist = JointPlaylist(
         id: 'p1',
         name: 'Road trip',
-        participantNodeIds: const ['friend-1'],
+        participantAccountIds: const ['friend-1'],
         items: [_item('i1')],
         updatedAt: DateTime.utc(2026, 1, 1),
       );
@@ -58,7 +58,7 @@ void main() {
       JointPlaylist(
         id: 'p1',
         name: 'x',
-        participantNodeIds: const ['friend-1'],
+        participantAccountIds: const ['friend-1'],
         items: const [],
         updatedAt: DateTime.utc(2026, 1, 1),
       ),
@@ -72,7 +72,7 @@ void main() {
       final remote = JointPlaylist(
         id: 'p1',
         name: 'From a friend',
-        participantNodeIds: const ['friend-1'],
+        participantAccountIds: const ['friend-1'],
         items: [_item('i1')],
         updatedAt: DateTime.utc(2026, 1, 1),
       );
@@ -90,7 +90,7 @@ void main() {
           JointPlaylist(
             id: 'p1',
             name: 'Road trip',
-            participantNodeIds: const ['friend-1'],
+            participantAccountIds: const ['friend-1'],
             items: [_item('local-only')],
             updatedAt: DateTime.utc(2026, 1, 1),
           ),
@@ -99,7 +99,7 @@ void main() {
         final remote = JointPlaylist(
           id: 'p1',
           name: 'Road trip',
-          participantNodeIds: const ['friend-1'],
+          participantAccountIds: const ['friend-1'],
           items: [_item('remote-only')],
           updatedAt: DateTime.utc(2026, 1, 2),
         );
@@ -117,7 +117,7 @@ void main() {
         JointPlaylist(
           id: 'p1',
           name: 'x',
-          participantNodeIds: const ['friend-1'],
+          participantAccountIds: const ['friend-1'],
           items: [_item('shared-item')],
           updatedAt: DateTime.utc(2026, 1, 1),
         ),
@@ -127,7 +127,7 @@ void main() {
         JointPlaylist(
           id: 'p1',
           name: 'x',
-          participantNodeIds: const ['friend-1'],
+          participantAccountIds: const ['friend-1'],
           items: [_item('shared-item')],
           updatedAt: DateTime.utc(2026, 1, 2),
         ),
@@ -141,7 +141,7 @@ void main() {
         JointPlaylist(
           id: 'p1',
           name: 'x',
-          participantNodeIds: const ['friend-1'],
+          participantAccountIds: const ['friend-1'],
           items: const [],
           updatedAt: DateTime.utc(2026, 1, 1),
         ),
@@ -150,7 +150,7 @@ void main() {
       final olderRemote = JointPlaylist(
         id: 'p1',
         name: 'x',
-        participantNodeIds: const ['friend-1'],
+        participantAccountIds: const ['friend-1'],
         items: const [],
         updatedAt: DateTime.utc(2025, 1, 1),
       );
