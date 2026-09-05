@@ -5,8 +5,11 @@ import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart';
 import 'package:shelf_router/shelf_router.dart';
 
+import 'src/accounts/account_app_routes.dart';
 import 'src/accounts/account_service_client.dart';
+import 'src/accounts/account_session_store.dart';
 import 'src/federation/account_friend_devices.dart';
+import 'src/federation/account_friend_sync.dart';
 import 'src/federation/federation_routes.dart';
 import 'src/federation/friend_store.dart';
 import 'src/federation/pairing_code_store.dart';
@@ -96,7 +99,8 @@ Router _buildRouter(
   Router federationRouter,
   Router libraryRouter,
   Router playlistRouter,
-  Router sharingFederationRouter, {
+  Router sharingFederationRouter,
+  Router accountAppRouter, {
   String? appApiKey,
 }) {
   return Router()
@@ -142,7 +146,18 @@ Router _buildRouter(
     ..mount(
       '/api/v1/playlists',
       requireLocal(playlistRouter.call, appApiKey: appApiKey),
-    );
+    )
+    // No trailing slash, for the same reason as /api/v1/playlists above:
+    // `GET`/`DELETE /api/v1/account` (the bare collection, "who am I logged
+    // in as") has to match, and shelf_router's mount() only registers the
+    // bare prefix as a route when the prefix is given without one. Not
+    // nested under any mount above, and not a prefix of any of them, so
+    // registration order is irrelevant here -- unlike the sibling mounts,
+    // which the comment above explains. Each route inside wraps itself in
+    // requireLocal (rather than being wrapped here at the mount site) so
+    // that the one route in this codebase that accepts a password carries
+    // its own visible guard.
+    ..mount('/api/v1/account', accountAppRouter.call);
 }
 
 /// Starts a full Musicat Server: loads/creates this node's identity from
@@ -181,8 +196,12 @@ Router _buildRouter(
 /// When it *is* configured it is still never on that path — it is only
 /// reached when an incoming nodeId matches no known friend's cached device
 /// set (a rate-limited lookup, see [AccountFriendDeviceResolver]), on the
-/// periodic device refresh below, and when a pairing caller claims an
-/// accountId. Two established friends can always share with it down.
+/// periodic device refresh below, when a pairing caller claims an
+/// accountId, and when this node's own user logs in (`POST
+/// /api/v1/account/login`, which also runs one [FriendSyncService] pass).
+/// Two established friends can always share with it down, and nothing here
+/// starts a background friend sync on its own: [FriendSyncService] only
+/// ever runs when something asks it to.
 /// [friendDeviceRefreshInterval]: how often each account-based friend's
 /// cached device list is refreshed from that service (default 30 minutes;
 /// ignored entirely when [accountServiceUrl] is omitted). This is the
@@ -221,6 +240,12 @@ Future<MusicatServerHandle> startMusicatServer({
   );
 
   final friendStore = FriendStore(dataDir);
+  // Always constructed, even with no account service configured: it is pure
+  // local disk, and `GET`/`DELETE /api/v1/account` have to keep answering
+  // for a node that was logged in once and has since been restarted without
+  // `MUSICAT_ACCOUNT_SERVICE_URL` -- reading or clearing who you are must
+  // never depend on that service being configured, let alone reachable.
+  final sessionStore = AccountSessionStore(dataDir);
   final puncher = UdpPuncher(identity: identity, friendStore: friendStore);
   final boundUdpPort = await puncher.bind(port: udpPort);
   final candidate = await puncher.refreshCandidate();
@@ -271,6 +296,7 @@ Future<MusicatServerHandle> startMusicatServer({
   AccountServiceClient? accountService;
   AccountFriendDeviceResolver? deviceResolver;
   FriendDeviceRefresher? deviceRefresher;
+  FriendSyncService? friendSync;
   if (accountServiceUrl != null && accountServiceUrl.isNotEmpty) {
     accountService = AccountServiceClient(
       baseUrl: accountServiceUrl,
@@ -285,6 +311,11 @@ Future<MusicatServerHandle> startMusicatServer({
       accountService: accountService,
       refreshInterval: friendDeviceRefreshInterval,
     )..start();
+    friendSync = FriendSyncService(
+      friendStore: friendStore,
+      sessionStore: sessionStore,
+      accountService: accountService,
+    );
     log('Account service: $accountServiceUrl');
   }
 
@@ -325,6 +356,18 @@ Future<MusicatServerHandle> startMusicatServer({
     playlistStore,
     verifier,
   );
+  // Mounted unconditionally, with `accountService`/`friendSync` left null
+  // when no account service is configured: the routes then degrade to a
+  // clean 503 on login while still reporting and clearing a session from
+  // local disk. Nothing here starts a timer or a background loop -- the
+  // sync only ever runs when something asks it to -- so there is nothing
+  // new for `close()` to stop.
+  final accountAppRouter = buildAccountAppRouter(
+    sessionStore: sessionStore,
+    accountService: accountService,
+    friendSync: friendSync,
+    appApiKey: appApiKey,
+  );
 
   final handler = Pipeline()
       .addMiddleware(logRequests())
@@ -338,6 +381,7 @@ Future<MusicatServerHandle> startMusicatServer({
           libraryRouter,
           playlistRouter,
           sharingFederationRouter,
+          accountAppRouter,
           appApiKey: appApiKey,
         ).call,
       );

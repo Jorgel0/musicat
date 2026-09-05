@@ -83,17 +83,56 @@ class FriendRequestStore {
         .toList();
   }
 
+  /// If [request] is an `accepted` friendship that [accountId] is one side
+  /// of, who the *other* side is; `null` otherwise.
+  ///
+  /// The single definition of the both-directions rule -- "friendship is
+  /// symmetric once accepted, no matter who sent the request" -- that both
+  /// [areMutualFriends] and [listAcceptedFriendAccountIds] are phrased in
+  /// terms of. Written once rather than twice on purpose: the two are the
+  /// same question asked from different ends (`is X in my friend list` vs
+  /// `what is my friend list`), and two independent encodings of it would be
+  /// free to drift into disagreeing -- which, since one of them gates
+  /// `GET /accounts/<accountId>/devices` and the other decides what
+  /// `GET /accounts/<me>/friends` discloses, would be a disclosure bug
+  /// rather than a cosmetic one.
+  static String? _acceptedCounterpartOf(
+    FriendRequest request,
+    String accountId,
+  ) {
+    if (request.status != FriendRequestStatus.accepted) return null;
+    if (request.fromAccountId == accountId) return request.toAccountId;
+    if (request.toAccountId == accountId) return request.fromAccountId;
+    return null;
+  }
+
   /// Whether [a] and [b] (accountIds) are mutual friends: an `accepted`
   /// request exists between them, in either direction -- the gate
   /// `GET /accounts/<accountId>/devices` checks.
   Future<bool> areMutualFriends(String a, String b) async {
     final requests = await loadAll();
-    return requests.any(
-      (request) =>
-          request.status == FriendRequestStatus.accepted &&
-          ((request.fromAccountId == a && request.toAccountId == b) ||
-              (request.fromAccountId == b && request.toAccountId == a)),
-    );
+    return requests.any((request) => _acceptedCounterpartOf(request, a) == b);
+  }
+
+  /// Every account [accountId] is currently friends with -- the accepted
+  /// half of [listAddressedTo]'s data, from both directions at once, which
+  /// is what `GET /accounts/<me>/friends` needs and what no existing method
+  /// could answer ([listAddressedTo] only ever sees *incoming* requests, so
+  /// on its own it silently omits every friend this account was the one to
+  /// ask).
+  ///
+  /// De-duplicated: two accounts that each sent *and* accepted a request in
+  /// the opposite direction are one friend, not two. Order is stable (first
+  /// accepted request first), so a caller diffing successive responses sees
+  /// real changes rather than reordering.
+  Future<List<String>> listAcceptedFriendAccountIds(String accountId) async {
+    final requests = await loadAll();
+    final counterparts = <String>{};
+    for (final request in requests) {
+      final other = _acceptedCounterpartOf(request, accountId);
+      if (other != null) counterparts.add(other);
+    }
+    return counterparts.toList();
   }
 
   Future<T> _locked<T>(Future<T> Function() operation) {

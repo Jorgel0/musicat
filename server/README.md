@@ -73,6 +73,21 @@ Endpoints so far:
   `{"connected": bool, "lastSeen": "...ISO..." | null}`
 - `GET /api/v1/federation/ping` — requires `X-Node-Id`/`X-Timestamp`/
   `X-Signature` headers from a trusted friend; `{"pong": true}` if valid
+- `POST /api/v1/account/login` (`{"username", "password"}`) — logs this
+  node in to a portable account on the configured account service (creating
+  it if that username is free), links this device to it, and immediately
+  syncs the account's accepted friendships into the local friend list before
+  answering; `{"accountId", "username", "created": bool}`. `401` on a wrong
+  password, `429` when the account service is rate-limiting that username,
+  `503` if the account service is unreachable or none is configured on this
+  node. The password is never stored: from here on this device proves it
+  acts for the account by signing with its own node key.
+- `GET /api/v1/account` — `{"account": {"accountId", "username",
+  "loggedInAt"} | null}`; answered from local disk, so it works with the
+  account service down
+- `DELETE /api/v1/account` — logs out (`204`, idempotent). Clears the
+  session only — friends are local trust and are deliberately left
+  untouched
 - `POST /api/v1/library/shared-tracks` (`{"filePath", "title", "artist",
   "album"?, "coverArtPath"?, "visibility": {"type": "friends", "nodeIds"} |
   {"type": "allFriends"}}`) — shares a local file's metadata
@@ -142,9 +157,11 @@ Configuration is via environment variables:
   the path of a normal request between two already-established friends —
   it is consulted only when an incoming request comes from a device this
   server has never heard of (rate-limited), on the periodic refresh of a
-  friend account's device list (every 30 minutes), and when a peer
-  redeeming a pairing code claims to belong to an account. Two friends on
-  the same network can always share with it down.
+  friend account's device list (every 30 minutes), when a peer redeeming a
+  pairing code claims to belong to an account, and when this node's own
+  user logs in (`POST /api/v1/account/login`, which also pulls that
+  account's accepted friendships in once). Two friends on the same network
+  can always share with it down, logged in or not.
 
 ## Running with Docker
 

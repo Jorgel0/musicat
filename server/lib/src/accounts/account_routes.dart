@@ -165,6 +165,14 @@ Response _respondOutcomeResponse(
 /// single `status` (`pending`/`accepted`/`declined`; `400` for anything
 /// else).
 ///
+/// `GET /<me>/friends` -- authenticated as `<me>`; every account `<me>`
+/// has an *accepted* friend request with, in either direction, as
+/// `[{accountId, username, devices: [...]}, ...]` (a bare JSON array, like
+/// its `GET /<me>/friend-requests` sibling). This is the endpoint a node's
+/// own `FriendSyncService` polls to learn who it is friends with; see
+/// [AccountFriend] for why each friend's device list is inlined rather than
+/// left to a follow-up `GET /<accountId>/devices` per friend.
+///
 /// `POST /<me>/friend-requests/<requestId>/accept` and `.../decline` --
 /// authenticated as `<me>`, which must be the request's *recipient*
 /// (`403` otherwise -- the sender can never accept/decline their own
@@ -406,6 +414,49 @@ Router buildAccountRouter(
     return _json([
       for (final friendRequest in requests) _friendRequestJson(friendRequest),
     ]);
+  });
+
+  // Registered among the other two-segment `/<id>/<literal>` routes, and
+  // safe anywhere among them: shelf_router matches in registration order
+  // with no most-specific-first rule (the trap `bin/relay.dart` and
+  // `musicat_server_runtime.dart` both call out), so overlap is what
+  // matters -- and `friends` overlaps nothing. `/<accountId>/devices` and
+  // `/<me>/friend-requests` each pin a *different literal* second segment,
+  // and `friends` is not a prefix-match of `friend-requests` (shelf_router
+  // matches whole segments, not prefixes). Verified against the real
+  // mounted server, not just this router, in `account_routes_test.dart` --
+  // mounting is exactly where this class of mistake has hidden before.
+  router.get('/<me>/friends', (Request request, String me) async {
+    final body = await request.readAsString();
+    final caller = await _authenticateCaller(request, accountStore, body: body);
+    if (caller == null) {
+      return _error('Authentication required', status: 401);
+    }
+    if (caller.accountId != me) {
+      return _error('Cannot act as another account', status: 403);
+    }
+
+    final friendIds = await friendRequestStore.listAcceptedFriendAccountIds(me);
+    final friends = <AccountFriend>[];
+    for (final friendId in friendIds) {
+      final friend = await accountStore.findById(friendId);
+      // An accepted request naming an account that no longer exists is not
+      // currently reachable (accounts are never deleted), but skipping it
+      // rather than failing the whole response keeps one bad row from
+      // costing a node its entire friend list -- and a node that receives a
+      // short list simply learns less, since the sync consuming this is
+      // additive-only and never removes anything.
+      if (friend == null) continue;
+      friends.add(
+        AccountFriend(
+          accountId: friend.accountId,
+          username: friend.username,
+          devices: friend.devices,
+        ),
+      );
+    }
+
+    return _json([for (final friend in friends) friend.toJson()]);
   });
 
   router.post('/<me>/friend-requests/<requestId>/accept', (

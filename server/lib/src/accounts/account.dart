@@ -111,3 +111,45 @@ class Account {
     createdAt: DateTime.parse(json['createdAt'] as String),
   );
 }
+
+/// One entry of `GET /accounts/<me>/friends` (ADR 0048's friend-request data
+/// model, projected into "who am I actually friends with"): an account this
+/// caller has an *accepted* friend request with, in either direction, plus
+/// that account's current [devices].
+///
+/// The device list is inlined here rather than left to a follow-up
+/// `GET /accounts/<accountId>/devices` per friend purely to save one signed
+/// round trip each -- it is the exact same data, disclosed to the exact same
+/// callers: that route's gate is "the caller is this account, or the two are
+/// mutual friends", and every entry in this response is by construction a
+/// mutual friend of the caller. Both gates read the same
+/// [FriendRequestStore.areMutualFriends] rule.
+///
+/// Deliberately *not* an [Account]: this is the outward-facing projection,
+/// and it has no field that could ever carry a password hash.
+class AccountFriend {
+  const AccountFriend({
+    required this.accountId,
+    required this.username,
+    required this.devices,
+  });
+
+  final String accountId;
+  final String username;
+  final List<DeviceLink> devices;
+
+  Map<String, dynamic> toJson() => {
+    'accountId': accountId,
+    'username': username,
+    'devices': [for (final device in devices) device.toJson()],
+  };
+
+  factory AccountFriend.fromJson(Map<String, dynamic> json) => AccountFriend(
+    accountId: json['accountId'] as String,
+    username: json['username'] as String,
+    devices: [
+      for (final device in json['devices'] as List<dynamic>)
+        DeviceLink.fromJson(device as Map<String, dynamic>),
+    ],
+  );
+}

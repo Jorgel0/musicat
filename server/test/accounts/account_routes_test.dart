@@ -11,6 +11,7 @@ import 'package:musicat_server/src/accounts/login_rate_limiter.dart';
 import 'package:musicat_server/src/federation/request_signing.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
+import 'package:shelf_router/shelf_router.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -791,5 +792,278 @@ void main() {
       final response = await http.get(Uri.parse('$baseUrl/$accountId/devices'));
       expect(response.statusCode, 401);
     });
+  });
+
+  group('GET /<me>/friends', () {
+    /// Sends a friend request from [from] to [toUsername] and returns its id.
+    Future<String> sendFriendRequest(
+      NodeIdentity from,
+      String fromAccountId,
+      String toUsername,
+    ) async {
+      final path = '/$fromAccountId/friend-requests';
+      final body = jsonEncode({'toUsername': toUsername});
+      final response = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(
+          from,
+          method: 'POST',
+          path: path,
+          body: body,
+        ),
+        body: body,
+      );
+      expect(response.statusCode, 201);
+      return (jsonDecode(response.body) as Map<String, dynamic>)['id']
+          as String;
+    }
+
+    Future<void> respond(
+      NodeIdentity recipient,
+      String recipientAccountId,
+      String requestId,
+      String action,
+    ) async {
+      final path = '/$recipientAccountId/friend-requests/$requestId/$action';
+      final response = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(recipient, method: 'POST', path: path),
+      );
+      expect(response.statusCode, 200);
+    }
+
+    Future<http.Response> listFriends(
+      NodeIdentity identity,
+      String accountId,
+    ) async {
+      final path = '/$accountId/friends';
+      return http.get(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(identity, method: 'GET', path: path),
+      );
+    }
+
+    test('lists an accepted friendship from *both* ends, not just the '
+        'recipient\'s -- the gap listAddressedTo alone leaves', () async {
+      final aliceIdentity = await newIdentity();
+      final bobIdentity = await newIdentity();
+      final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
+      final bobId = await signUp('bob', 'hunter2', bobIdentity);
+
+      final requestId = await sendFriendRequest(aliceIdentity, aliceId, 'bob');
+      await respond(bobIdentity, bobId, requestId, 'accept');
+
+      // Bob, the recipient: the direction `listAddressedTo` already covered.
+      final bobsFriends =
+          jsonDecode((await listFriends(bobIdentity, bobId)).body)
+              as List<dynamic>;
+      expect(bobsFriends, hasLength(1));
+      expect(
+        (bobsFriends.single as Map<String, dynamic>)['accountId'],
+        aliceId,
+      );
+      expect((bobsFriends.single as Map<String, dynamic>)['username'], 'alice');
+
+      // Alice, the *sender*: the direction that was previously invisible.
+      final alicesFriends =
+          jsonDecode((await listFriends(aliceIdentity, aliceId)).body)
+              as List<dynamic>;
+      expect(alicesFriends, hasLength(1));
+      expect(
+        (alicesFriends.single as Map<String, dynamic>)['accountId'],
+        bobId,
+      );
+      expect((alicesFriends.single as Map<String, dynamic>)['username'], 'bob');
+    });
+
+    test('inlines each friend\'s full device list, matching what GET '
+        '/<accountId>/devices would disclose to the same caller', () async {
+      final aliceIdentity = await newIdentity();
+      final aliceSecondDevice = await newIdentity();
+      final bobIdentity = await newIdentity();
+      final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
+      final bobId = await signUp('bob', 'hunter2', bobIdentity);
+      // Alice logs in on a second device, so her list is worth inlining.
+      expect(
+        (await completeLogin(
+          username: 'alice',
+          password: 'hunter2',
+          identity: aliceSecondDevice,
+        )).statusCode,
+        200,
+      );
+
+      final requestId = await sendFriendRequest(aliceIdentity, aliceId, 'bob');
+      await respond(bobIdentity, bobId, requestId, 'accept');
+
+      final inlined =
+          ((jsonDecode((await listFriends(bobIdentity, bobId)).body)
+                      as List<dynamic>)
+                  .single
+              as Map<String, dynamic>)['devices'];
+
+      // The equivalence this route's design relies on: the same caller can
+      // already fetch exactly this, one signed round trip at a time.
+      final devicesPath = '/$aliceId/devices';
+      final viaDevicesRoute = await http.get(
+        Uri.parse('$baseUrl$devicesPath'),
+        headers: await signedHeaders(
+          bobIdentity,
+          method: 'GET',
+          path: devicesPath,
+        ),
+      );
+      expect(viaDevicesRoute.statusCode, 200);
+      expect(
+        inlined,
+        (jsonDecode(viaDevicesRoute.body) as Map<String, dynamic>)['devices'],
+      );
+      expect(inlined, hasLength(2));
+    });
+
+    test('never leaks a password hash, even though it reports whole '
+        'accounts', () async {
+      final aliceIdentity = await newIdentity();
+      final bobIdentity = await newIdentity();
+      final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
+      final bobId = await signUp('bob', 'hunter2', bobIdentity);
+      final requestId = await sendFriendRequest(aliceIdentity, aliceId, 'bob');
+      await respond(bobIdentity, bobId, requestId, 'accept');
+
+      final body = (await listFriends(bobIdentity, bobId)).body;
+
+      expect(body.toLowerCase(), isNot(contains('password')));
+      expect(body.toLowerCase(), isNot(contains('argon')));
+      expect(
+        ((jsonDecode(body) as List<dynamic>).single as Map<String, dynamic>)
+            .keys
+            .toSet(),
+        {'accountId', 'username', 'devices'},
+      );
+    });
+
+    test('omits pending and declined requests', () async {
+      final aliceIdentity = await newIdentity();
+      final bobIdentity = await newIdentity();
+      final carolIdentity = await newIdentity();
+      final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
+      final bobId = await signUp('bob', 'hunter2', bobIdentity);
+      await signUp('carol', 'hunter2', carolIdentity);
+
+      // Pending: never accepted.
+      await sendFriendRequest(aliceIdentity, aliceId, 'carol');
+      // Declined.
+      final declined = await sendFriendRequest(aliceIdentity, aliceId, 'bob');
+      await respond(bobIdentity, bobId, declined, 'decline');
+
+      final friends =
+          jsonDecode((await listFriends(aliceIdentity, aliceId)).body)
+              as List<dynamic>;
+      expect(friends, isEmpty);
+    });
+
+    test(
+      'counts a pair that accepted in both directions once, not twice',
+      () async {
+        final aliceIdentity = await newIdentity();
+        final bobIdentity = await newIdentity();
+        final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
+        final bobId = await signUp('bob', 'hunter2', bobIdentity);
+
+        final aliceToBob = await sendFriendRequest(
+          aliceIdentity,
+          aliceId,
+          'bob',
+        );
+        await respond(bobIdentity, bobId, aliceToBob, 'accept');
+        final bobToAlice = await sendFriendRequest(bobIdentity, bobId, 'alice');
+        await respond(aliceIdentity, aliceId, bobToAlice, 'accept');
+
+        final friends =
+            jsonDecode((await listFriends(aliceIdentity, aliceId)).body)
+                as List<dynamic>;
+        expect(friends, hasLength(1));
+        expect((friends.single as Map<String, dynamic>)['accountId'], bobId);
+      },
+    );
+
+    test('401s an unauthenticated caller and 403s one acting as another '
+        'account', () async {
+      final aliceIdentity = await newIdentity();
+      final bobIdentity = await newIdentity();
+      final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
+      await signUp('bob', 'hunter2', bobIdentity);
+
+      expect(
+        (await http.get(Uri.parse('$baseUrl/$aliceId/friends'))).statusCode,
+        401,
+      );
+      expect((await listFriends(bobIdentity, aliceId)).statusCode, 403);
+    });
+
+    test(
+      'is reachable on the *real mounted* server, not just this router -- '
+      'the route-ordering trap /<me>/friend-requests could have hidden',
+      () async {
+        // Mounted exactly the way bin/relay.dart mounts it. A router tested in
+        // isolation cannot catch a prefix being swallowed by a sibling mount
+        // or a same-shape pattern registered earlier, which is the class of
+        // mistake this codebase has already hit twice.
+        final mountedRouter = Router()
+          ..mount(
+            '/accounts/',
+            buildAccountRouter(accountStore, friendRequestStore).call,
+          );
+        final mounted = await shelf_io.serve(
+          mountedRouter.call,
+          'localhost',
+          0,
+        );
+        addTearDown(() => mounted.close(force: true));
+        final mountedUrl = 'http://localhost:${mounted.port}';
+
+        final aliceIdentity = await newIdentity();
+        final bobIdentity = await newIdentity();
+        final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
+        final bobId = await signUp('bob', 'hunter2', bobIdentity);
+        final requestId = await sendFriendRequest(
+          aliceIdentity,
+          aliceId,
+          'bob',
+        );
+        await respond(bobIdentity, bobId, requestId, 'accept');
+
+        final path = '/accounts/$bobId/friends';
+        final response = await http.get(
+          Uri.parse('$mountedUrl$path'),
+          headers: await signedHeaders(bobIdentity, method: 'GET', path: path),
+        );
+
+        expect(response.statusCode, 200);
+        expect(
+          ((jsonDecode(response.body) as List<dynamic>).single
+              as Map<String, dynamic>)['accountId'],
+          aliceId,
+        );
+
+        // ...and the sibling it might have shadowed (or been shadowed by)
+        // still resolves to its own handler through the same mount.
+        final requestsPath = '/accounts/$bobId/friend-requests';
+        final requests = await http.get(
+          Uri.parse('$mountedUrl$requestsPath'),
+          headers: await signedHeaders(
+            bobIdentity,
+            method: 'GET',
+            path: requestsPath,
+          ),
+        );
+        expect(requests.statusCode, 200);
+        expect(
+          ((jsonDecode(requests.body) as List<dynamic>).single
+              as Map<String, dynamic>)['status'],
+          'accepted',
+        );
+      },
+    );
   });
 }

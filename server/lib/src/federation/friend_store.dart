@@ -232,6 +232,60 @@ class FriendStore {
     await _save(friends);
   }
 
+  /// Adds a friend account **learned from the account service** rather than
+  /// established locally — the only way a sync may ever *create* a friend,
+  /// and the additive counterpart of [updateDevices].
+  ///
+  /// Returns the stored [Friend], or `null` if it refused; every refusal is
+  /// silent and leaves the file untouched. It refuses when:
+  /// - that account has a [FriendTombstone]. **Checked here, inside the
+  ///   lock, not by the caller beforehand.** This is the resurrection race
+  ///   Rule 2 exists to prevent, in its most direct form yet: a caller doing
+  ///   its own [isRemoved] check and then calling [add] would leave a window
+  ///   in which a concurrent [remove] writes a tombstone and drops the
+  ///   friend, after which [add] — which *clears* tombstones on purpose,
+  ///   being the user's own explicit re-add — would erase that record and
+  ///   restore the friend with their keys. Same shape as the [updateDevices]
+  ///   race ADR 0049 fixed, and the reason this can't just be `add`.
+  /// - an entry for that accountId already exists. Overwriting it would
+  ///   discard locally-learned addresses the account service has never
+  ///   heard of; refreshing an existing friend is [updateDevices]' job.
+  /// - any of [friend]'s devices is currently a *device-pinned* friend's
+  ///   single device. [add] deliberately supersedes such an entry, because
+  ///   [add] is the user saying "trust this"; a background sync is not, and
+  ///   superseding here would silently delete an established friend and
+  ///   their only known address — turning a friend who works today on the
+  ///   local network into one who is unreachable, from a remote claim, with
+  ///   no user involvement. The account-based migration of such a friend
+  ///   stays where ADR 0049 put it: an explicit re-pair.
+  ///
+  /// [friend]'s devices are pruned from other *account-based* friends'
+  /// cached sets exactly as [updateDevices] does — see [_pruneClaimedDevices].
+  Future<Friend?> addFromAccountService(Friend friend) =>
+      _locked(() => _addFromAccountServiceLocked(friend));
+
+  Future<Friend?> _addFromAccountServiceLocked(Friend friend) async {
+    if (await isRemoved(friend.accountId)) return null;
+
+    final friends = await loadAll();
+    if (friends.any((f) => f.accountId == friend.accountId)) return null;
+
+    final incomingNodeIds = {
+      for (final device in friend.devices) device.nodeId,
+    };
+    final displacesDevicePinned = friends.any(
+      (f) =>
+          f.isDevicePinned &&
+          f.devices.any((device) => incomingNodeIds.contains(device.nodeId)),
+    );
+    if (displacesDevicePinned) return null;
+
+    friends.add(friend);
+    _pruneClaimedDevices(friends, friends.length - 1, incomingNodeIds);
+    await _save(friends);
+    return friend;
+  }
+
   /// Revokes trust in a friend account, addressed by its accountId or by
   /// any of its devices' nodeIds — no-op if it wasn't a friend. Signed
   /// requests from any of its devices are rejected from the next lookup
@@ -342,10 +396,38 @@ class FriendStore {
       devicesRefreshedAt: refreshedAt ?? DateTime.now().toUtc(),
     );
     friends[index] = updated;
+    _pruneClaimedDevices(friends, index, {
+      for (final device in devices) device.nodeId,
+    });
 
-    final claimed = {for (final device in devices) device.nodeId};
+    await _save(friends);
+    return updated;
+  }
+
+  /// Removes every nodeId in [claimed] from the cached device set of every
+  /// *account-based* friend in [friends] except the one at [ownerIndex],
+  /// which the account service has just told us those devices now belong to.
+  ///
+  /// Leaving the same device listed under two friends would make
+  /// [findByDeviceNodeId] pick between two accounts — a coin flip before the
+  /// deterministic precedence rule that method documents, and an
+  /// authorization outcome either way. Legacy device-pinned entries are
+  /// skipped: their single device *is* their identity and the user
+  /// established it out-of-band, so the account service has no standing to
+  /// take it away.
+  ///
+  /// Shared by [_updateDevicesLocked] and [_addFromAccountServiceLocked]
+  /// rather than written twice — the two are the same operation (apply what
+  /// the account service says about one account's devices) reached from
+  /// different starting states, and two copies of this rule would be free to
+  /// drift apart. Mutates [friends] in place; callers save it afterwards.
+  void _pruneClaimedDevices(
+    List<Friend> friends,
+    int ownerIndex,
+    Set<String> claimed,
+  ) {
     for (var i = 0; i < friends.length; i++) {
-      if (i == index) continue;
+      if (i == ownerIndex) continue;
       final other = friends[i];
       if (other.isDevicePinned) continue;
       final kept = other.devices
@@ -355,9 +437,6 @@ class FriendStore {
         friends[i] = other.copyWith(devices: kept);
       }
     }
-
-    await _save(friends);
-    return updated;
   }
 
   Future<List<FriendTombstone>> loadTombstones() async {

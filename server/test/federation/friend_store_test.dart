@@ -719,4 +719,186 @@ void main() {
       },
     );
   });
+
+  group('addFromAccountService (the sync-driven add)', () {
+    test('adds a friend account this node has never seen', () async {
+      final added = await store.addFromAccountService(
+        const Friend(
+          accountId: 'account-alice',
+          devices: [
+            FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+          ],
+          displayName: 'alice',
+        ),
+      );
+
+      expect(added, isNotNull);
+      final stored = await store.findByAccountId('account-alice');
+      expect(stored!.displayName, 'alice');
+      expect(stored.devices.single.nodeId, 'alice-phone');
+    });
+
+    test('refuses a tombstoned account -- and, unlike add(), leaves the '
+        'tombstone in place', () async {
+      await store.add(
+        const Friend(
+          accountId: 'account-alice',
+          devices: [
+            FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+          ],
+        ),
+      );
+      await store.remove('account-alice');
+
+      final added = await store.addFromAccountService(
+        const Friend(
+          accountId: 'account-alice',
+          devices: [
+            FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+          ],
+        ),
+      );
+
+      expect(added, isNull);
+      expect(await store.loadAll(), isEmpty);
+      expect(
+        await store.isRemoved('account-alice'),
+        isTrue,
+        reason:
+            'the tombstone was cleared, so the *next* sync would resurrect '
+            'her -- exactly what add() is allowed to do and this is not',
+      );
+    });
+
+    test('a remove landing inside an in-flight addFromAccountService still '
+        'sticks -- the check is inside the lock, not the caller', () async {
+      // The exact race a caller-side isRemoved() + add() would lose: the
+      // sync decides to add, the user removes, the add lands last.
+      for (var i = 0; i < 20; i++) {
+        final fresh = Directory.systemTemp.createTempSync(
+          'musicat_friend_store_race_',
+        );
+        final raced = FriendStore(fresh);
+        await raced.add(
+          const Friend(
+            accountId: 'account-alice',
+            devices: [
+              FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+            ],
+          ),
+        );
+        final removal = raced.remove('account-alice');
+        final adding = raced.addFromAccountService(
+          const Friend(
+            accountId: 'account-alice',
+            devices: [
+              FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+              FriendDevice(nodeId: 'alice-desktop', publicKeyBase64: 'k-a2'),
+            ],
+          ),
+        );
+        await Future.wait<Object?>([removal, adding]);
+
+        expect(await raced.isRemoved('account-alice'), isTrue);
+        expect(await raced.findByAccountId('account-alice'), isNull);
+        expect(await raced.findByDeviceNodeId('alice-desktop'), isNull);
+        fresh.deleteSync(recursive: true);
+      }
+    });
+
+    test('refuses to displace a device-pinned friend that already holds one '
+        'of those devices', () async {
+      // Alice was paired out-of-band, so this node has the only address
+      // anybody has for her. add() would supersede that entry; this must
+      // not, because the replacement would arrive address-less.
+      await store.add(
+        Friend.devicePinned(
+          nodeId: 'alice-phone',
+          publicKeyBase64: 'k-a',
+          address: 'alice.example:8080',
+        ),
+      );
+
+      final added = await store.addFromAccountService(
+        const Friend(
+          accountId: 'account-alice',
+          devices: [
+            FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+          ],
+        ),
+      );
+
+      expect(added, isNull);
+      final friends = await store.loadAll();
+      expect(friends, hasLength(1));
+      expect(friends.single.isDevicePinned, isTrue);
+      expect(friends.single.devices.single.address, 'alice.example:8080');
+    });
+
+    test('refuses to overwrite an existing entry for the same account, so a '
+        'locally-learned address is never discarded', () async {
+      await store.add(
+        const Friend(
+          accountId: 'account-alice',
+          devices: [
+            FriendDevice(
+              nodeId: 'alice-phone',
+              publicKeyBase64: 'k-a',
+              address: 'alice.example:8080',
+            ),
+          ],
+        ),
+      );
+
+      final added = await store.addFromAccountService(
+        const Friend(
+          accountId: 'account-alice',
+          devices: [
+            FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+          ],
+        ),
+      );
+
+      expect(added, isNull);
+      expect(
+        (await store.findByAccountId('account-alice'))!.devices.single.address,
+        'alice.example:8080',
+      );
+    });
+
+    test('prunes the added devices from other *account-based* friends, so '
+        'findByDeviceNodeId stays unambiguous', () async {
+      // A device that moved between accounts, with a stale cache still
+      // listing it under the old one.
+      await store.add(
+        const Friend(
+          accountId: 'account-old',
+          devices: [
+            FriendDevice(nodeId: 'shared-device', publicKeyBase64: 'k-s'),
+            FriendDevice(nodeId: 'old-only', publicKeyBase64: 'k-o'),
+          ],
+        ),
+      );
+
+      await store.addFromAccountService(
+        const Friend(
+          accountId: 'account-new',
+          devices: [
+            FriendDevice(nodeId: 'shared-device', publicKeyBase64: 'k-s'),
+          ],
+        ),
+      );
+
+      expect(
+        (await store.findByDeviceNodeId('shared-device'))!.accountId,
+        'account-new',
+      );
+      expect(
+        (await store.findByAccountId(
+          'account-old',
+        ))!.devices.map((d) => d.nodeId),
+        ['old-only'],
+      );
+    });
+  });
 }

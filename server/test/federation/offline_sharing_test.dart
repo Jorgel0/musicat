@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:musicat_server/musicat_server_runtime.dart';
+import 'package:musicat_server/src/accounts/account_session_store.dart';
 import 'package:musicat_server/src/federation/friend.dart';
 import 'package:musicat_server/src/federation/friend_store.dart';
 import 'package:musicat_server/src/federation/request_signing.dart';
@@ -310,6 +311,82 @@ void main() {
           'An unknown nodeId should consult the account service once; if '
           'it no longer does, every zero-call assertion here is vacuous.',
     );
+  });
+
+  test('a logged-in node still serves an established friend without ever '
+      'touching the account service', () async {
+    // Rule 1 with a *session* on disk, which is the state everything added
+    // for the account-friend sync runs in. Being logged in must not put the
+    // account service anywhere near the path of serving a friend, and
+    // nothing at startup may kick off a sync on its own.
+    await AccountSessionStore(
+      aliceDir,
+    ).save(accountId: aliceAccountId, username: 'alice');
+    final relogged = await startMusicatServer(
+      dataDir: aliceDir,
+      port: 0,
+      accountServiceUrl: accountServiceUrl,
+      friendDeviceRefreshInterval: const Duration(hours: 12),
+    );
+    addTearDown(relogged.close);
+    accountServiceCalls.clear();
+
+    // Reading who this node is: local disk, no call.
+    final session = await http
+        .get(Uri.parse('http://localhost:${relogged.port}/api/v1/account'))
+        .timeout(const Duration(seconds: 5));
+    expect(session.statusCode, 200);
+    expect(
+      ((jsonDecode(session.body) as Map<String, dynamic>)['account']
+          as Map<String, dynamic>)['accountId'],
+      aliceAccountId,
+    );
+
+    // ...and Bob, an established friend, still downloads from her.
+    final trackId = await shareWithAlicesApi(bobAccountId);
+    final path = '/api/v1/sharing/shared-tracks/$trackId/file';
+    final headers = await RequestSigner(
+      bobSecondDevice,
+    ).sign(method: 'GET', path: path);
+    final download = await http
+        .get(
+          Uri.parse('http://localhost:${relogged.port}$path'),
+          headers: headers,
+        )
+        .timeout(const Duration(seconds: 20));
+    expect(download.statusCode, 200);
+    expect(download.bodyBytes, musicFile.readAsBytesSync());
+
+    expectAccountServiceUntouched();
+  });
+
+  test('logging out never touches the friend list, and needs no account '
+      'service either', () async {
+    await AccountSessionStore(
+      aliceDir,
+    ).save(accountId: aliceAccountId, username: 'alice');
+    final trackId = await shareWithAlicesApi(bobAccountId);
+    accountServiceCalls.clear();
+
+    final loggedOut = await http
+        .delete(Uri.parse(aliceUrl('/api/v1/account')))
+        .timeout(const Duration(seconds: 5));
+    expect(loggedOut.statusCode, 204);
+
+    // Bob is still a friend, and can still download.
+    expect(
+      await FriendStore(aliceDir).findByAccountId(bobAccountId),
+      isNotNull,
+    );
+    final path = '/api/v1/sharing/shared-tracks/$trackId/file';
+    final headers = await RequestSigner(
+      bobSecondDevice,
+    ).sign(method: 'GET', path: path);
+    final download = await http
+        .get(Uri.parse(aliceUrl(path)), headers: headers)
+        .timeout(const Duration(seconds: 20));
+    expect(download.statusCode, 200);
+    expectAccountServiceUntouched();
   });
 
   test('unfriending still takes effect instantly with the account service '
