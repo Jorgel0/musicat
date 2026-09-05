@@ -156,4 +156,34 @@ void main() {
           : 'startEmbeddedServerIfSupported only runs on Linux/Windows',
     );
   });
+
+  group('accountServiceUrlForRelay', () {
+    test('points at the relay\'s own /accounts, on plain HTTP for ws', () {
+      expect(
+        accountServiceUrlForRelay('ws://relay.example:8090/connect'),
+        'http://relay.example:8090/accounts',
+      );
+    });
+
+    test('keeps a secure relay secure', () {
+      expect(
+        accountServiceUrlForRelay('wss://relay.example/session/abc'),
+        'https://relay.example/accounts',
+      );
+    });
+
+    test('accepts a relay already written as http(s)', () {
+      expect(
+        accountServiceUrlForRelay('http://192.0.2.10:8090'),
+        'http://192.0.2.10:8090/accounts',
+      );
+    });
+
+    test('no relay means no accounts, rather than a guessed URL', () {
+      expect(accountServiceUrlForRelay(null), isNull);
+      expect(accountServiceUrlForRelay(''), isNull);
+      expect(accountServiceUrlForRelay('not a url'), isNull);
+      expect(accountServiceUrlForRelay('ftp://relay.example'), isNull);
+    });
+  });
 }

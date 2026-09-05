@@ -67,6 +67,93 @@ void main() {
     });
   });
 
+  group('listFriends — a friend is an account with devices', () {
+    test('parses the devices a friend account is signed in on', () async {
+      final client = _clientWith(
+        (options) => const FakeHttpResponse(200, [
+          {
+            'nodeId': 'device-1',
+            'publicKeyBase64': 'pk1',
+            'address': 'a.example:8080',
+            'displayName': 'Ada',
+            'relayUrl': null,
+            'localNickname': null,
+            'accountId': 'acc-ada',
+            'devices': [
+              {
+                'nodeId': 'device-1',
+                'publicKeyBase64': 'pk1',
+                'address': 'a.example:8080',
+                'relayUrl': null,
+                'linkedAt': '2026-09-01T10:00:00.000Z',
+              },
+              {
+                'nodeId': 'device-2',
+                'publicKeyBase64': 'pk2',
+                'address': null,
+                'relayUrl': 'wss://relay.example/session/xyz',
+                'linkedAt': '2026-09-04T10:00:00.000Z',
+              },
+            ],
+          },
+        ]),
+      );
+
+      final friends = await client.listFriends();
+
+      expect(friends, hasLength(1));
+      expect(friends.single.accountId, 'acc-ada');
+      expect(friends.single.devices, hasLength(2));
+      // A device reachable only through a relay is still reachable — the
+      // shape every friend made purely by username has (server ADR 0051).
+      expect(friends.single.devices[1].address, isNull);
+      expect(friends.single.devices[1].isReachable, isTrue);
+      expect(friends.single.devices[0].linkedAt, DateTime.utc(2026, 9, 1, 10));
+    });
+
+    test('a pre-accounts response (no "devices" key at all) reads as the '
+        'one device its flat fields describe, not as none', () async {
+      final client = _clientWith(
+        (options) => const FakeHttpResponse(200, [
+          {
+            'nodeId': 'legacy-node',
+            'publicKeyBase64': 'pk1',
+            'address': 'a.example:8080',
+          },
+        ]),
+      );
+
+      final friends = await client.listFriends();
+
+      expect(friends.single.devices, hasLength(1));
+      expect(friends.single.devices.single.address, 'a.example:8080');
+      expect(friends.single.devices.single.isReachable, isTrue);
+      expect(friends.single.accountId, isNull);
+    });
+
+    test('a device with neither an address nor a relay is honestly not '
+        'reachable', () async {
+      final client = _clientWith(
+        (options) => const FakeHttpResponse(200, [
+          {
+            'nodeId': 'device-1',
+            'publicKeyBase64': 'pk1',
+            'address': '',
+            'accountId': 'acc-ada',
+            'devices': [
+              {'nodeId': 'device-1', 'publicKeyBase64': 'pk1'},
+            ],
+          },
+        ]),
+      );
+
+      final friends = await client.listFriends();
+
+      expect(friends.single.devices.single.isReachable, isFalse);
+      expect(friends.single.devices.single.linkedAt, isNull);
+    });
+  });
+
   group('addFriend — the friend\'s server', () {
     test("never carries this device's own configured apiKey, even when one "
         'is configured for calls to this device\'s own server (that call is '

@@ -30,6 +30,35 @@ import '../../features/friends/presentation/musicat_server_config_controller.dar
 bool get embeddedServerSupported =>
     Platform.isLinux || Platform.isWindows || Platform.isAndroid;
 
+/// The portable account service (server ADR 0048) that belongs to
+/// [relayUrl], or `null` if there isn't one to derive.
+///
+/// **Derived rather than configured, on purpose.** The account service is
+/// mounted on the *same* deployed process and port as the relay, under an
+/// `/accounts` prefix (`server/bin/relay.dart`), so a second field asking
+/// the user to type essentially the same host again would be a setup step
+/// with exactly one correct answer — and one more thing to get wrong in a
+/// feature whose whole point is that it stops being fiddly. A relay that
+/// happens not to host an account service simply behaves as if none were
+/// configured: signing in reports that accounts are unavailable, and
+/// nothing else in the app changes.
+///
+/// `ws`/`wss` map to `http`/`https` (the relay's tunnel and its plain HTTP
+/// routes are the same listener); anything else yields `null` rather than
+/// a guess.
+String? accountServiceUrlForRelay(String? relayUrl) {
+  if (relayUrl == null || relayUrl.isEmpty) return null;
+  final uri = Uri.tryParse(relayUrl);
+  if (uri == null || uri.host.isEmpty) return null;
+  final scheme = switch (uri.scheme) {
+    'wss' || 'https' => 'https',
+    'ws' || 'http' => 'http',
+    _ => null,
+  };
+  if (scheme == null) return null;
+  return '$scheme://${uri.authority}/accounts';
+}
+
 /// Starts this device's own embedded Musicat Server directly in-process,
 /// wired straight into the `musicat_server` package's own
 /// `startMusicatServer` — the exact same server implementation
@@ -59,6 +88,11 @@ Future<MusicatServerHandle?> startEmbeddedServerIfSupported({
 
   return startMusicatServer(
     dataDir: dataDir,
+    // Derived from the relay, never asked for separately — see
+    // [accountServiceUrlForRelay]. Without it this node has no accounts at
+    // all: signing in, friend requests and adding a friend by username
+    // would every one of them answer "no account service is configured".
+    accountServiceUrl: accountServiceUrlForRelay(relayUrl),
     // 0, not the runtime's own default of 8080: a desktop user may well
     // already be running a *separate*, non-embedded Musicat Server on the
     // standard port on this same machine (e.g. this repo's own
@@ -213,6 +247,10 @@ void _androidEmbeddedServerOnStart(ServiceInstance service) async {
   try {
     final handle = await startMusicatServer(
       dataDir: Directory(dataDirPath),
+      // Same derivation as the desktop path above; nothing extra has to
+      // cross the isolate boundary, since it comes from the relay URL that
+      // already does.
+      accountServiceUrl: accountServiceUrlForRelay(relayUrl),
       // Same reasoning as the desktop path: 0 lets the OS assign a free
       // port, read back below.
       port: 0,

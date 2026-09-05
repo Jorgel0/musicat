@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/embedded_server/embedded_server.dart';
+import '../../../core/network/federation/account_client.dart';
 import '../../../core/network/federation/federation_client.dart';
 import '../../../core/network/social/joint_playlist_client.dart';
 import '../../../core/network/social/sharing_client.dart';
@@ -88,6 +89,15 @@ final federationClientProvider = Provider<FederationClient?>((ref) {
   final config = ref.watch(effectiveMusicatServerConfigProvider);
   if (!config.isConfigured) return null;
   return FederationClient(baseUrl: config.baseUrl, apiKey: config.apiKey);
+});
+
+/// `null` when no Musicat Server is configured yet, same as
+/// [federationClientProvider] — both talk to this device's own server,
+/// this one about the portable account it acts for (server ADR 0048/0050).
+final accountClientProvider = Provider<AccountClient?>((ref) {
+  final config = ref.watch(effectiveMusicatServerConfigProvider);
+  if (!config.isConfigured) return null;
+  return AccountClient(baseUrl: config.baseUrl, apiKey: config.apiKey);
 });
 
 /// `null` when no Musicat Server is configured yet, same as

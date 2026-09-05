@@ -17,6 +17,48 @@ class MyNodeInfo {
   final String? relayUrl;
 }
 
+/// One of a friend's devices (server ADR 0049): a friend is an *account*,
+/// and an account can be signed in on a phone and a desktop at once.
+///
+/// [nodeId] is here because it identifies the device to the server, not
+/// because it is showable — nothing in the UI renders it. What a person can
+/// actually use is [linkedAt] ("is this a device they added recently?") and
+/// how it can be reached.
+class FriendDevice {
+  const FriendDevice({
+    required this.nodeId,
+    this.address,
+    this.relayUrl,
+    this.linkedAt,
+  });
+
+  final String nodeId;
+
+  /// A direct address for this device, if this node has ever learned one.
+  /// Always `null` for a friend made purely through a friend request: the
+  /// account service records a relay, never an address (server ADR 0051).
+  final String? address;
+
+  final String? relayUrl;
+
+  /// When this device was linked to the friend's account. `null` for a
+  /// legacy device-pinned friend (paired before accounts existed).
+  final DateTime? linkedAt;
+
+  /// Whether this device can be reached at all with what's known about it.
+  bool get isReachable =>
+      (address != null && address!.isNotEmpty) || relayUrl != null;
+
+  factory FriendDevice.fromJson(Map<String, dynamic> json) => FriendDevice(
+    nodeId: json['nodeId'] as String,
+    address: json['address'] as String?,
+    relayUrl: json['relayUrl'] as String?,
+    linkedAt: json['linkedAt'] == null
+        ? null
+        : DateTime.parse(json['linkedAt'] as String),
+  );
+}
+
 /// A trusted friend node, as this device's Musicat Server knows it.
 class FederationFriend {
   const FederationFriend({
@@ -26,8 +68,14 @@ class FederationFriend {
     this.displayName,
     this.relayUrl,
     this.localNickname,
+    this.accountId,
+    this.devices = const [],
   });
 
+  /// The friend's *primary* device, projected flat by the server for the
+  /// benefit of this parser (server ADR 0049 keeps these keys verbatim).
+  /// Still what every existing call site uses to address a friend; see
+  /// [devices] for the whole set.
   final String nodeId;
   final String publicKeyBase64;
   final String address;
@@ -46,6 +94,16 @@ class FederationFriend {
   /// the friend it labels. `null` until set.
   final String? localNickname;
 
+  /// The account this friend *is* (server ADR 0049). `null` only when
+  /// talking to a server old enough not to send it; for a legacy,
+  /// device-pinned friend the server sends the friend's own nodeId here.
+  final String? accountId;
+
+  /// Every device of this friend's account this node currently knows
+  /// about, including the one projected flat above. Empty only from a
+  /// pre-accounts server; a legacy device-pinned friend has exactly one.
+  final List<FriendDevice> devices;
+
   /// The name to actually show for this friend: [localNickname] (what
   /// this device's user chose to call them) if set, else [displayName]
   /// (what they call themselves), else the raw [nodeId] as a last resort.
@@ -59,7 +117,32 @@ class FederationFriend {
         displayName: json['displayName'] as String?,
         relayUrl: json['relayUrl'] as String?,
         localNickname: json['localNickname'] as String?,
+        accountId: json['accountId'] as String?,
+        devices: _devicesFromJson(json),
       );
+
+  /// `devices` is absent from a pre-accounts server's response. Read that
+  /// as "this friend has the one device the flat fields already describe"
+  /// rather than as "no devices at all", which would make a perfectly
+  /// ordinary legacy friend render as having none — the same
+  /// one-device-is-the-degenerate-case reading the server's own parser
+  /// applies (server ADR 0049).
+  static List<FriendDevice> _devicesFromJson(Map<String, dynamic> json) {
+    final devices = json['devices'] as List<dynamic>?;
+    if (devices == null) {
+      return [
+        FriendDevice(
+          nodeId: json['nodeId'] as String,
+          address: json['address'] as String?,
+          relayUrl: json['relayUrl'] as String?,
+        ),
+      ];
+    }
+    return [
+      for (final device in devices)
+        FriendDevice.fromJson(device as Map<String, dynamic>),
+    ];
+  }
 }
 
 class FriendConnectionStatus {

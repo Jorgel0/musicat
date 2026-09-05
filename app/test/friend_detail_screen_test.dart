@@ -257,6 +257,105 @@ void main() {
       expect(find.widgetWithText(AppBar, 'Ada'), findsOneWidget);
     });
   });
+
+  group('a friend with several devices', () {
+    /// Mounts the screen for [friend] with no shared tracks, which is all
+    /// the device summary needs — same shape as the nickname tests above.
+    Future<void> pumpFor(WidgetTester tester, FederationFriend friend) async {
+      final container = ProviderContainer(
+        overrides: [
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(
+              FriendsState(friends: [_withStatus(friend)]),
+            ),
+          ),
+          sharingClientProvider.overrideWithValue(null),
+        ],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(home: FriendDetailScreen(nodeId: friend.nodeId)),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('says how many devices they use, and something useful about '
+        'each — without ever showing a node id', (tester) async {
+      final now = DateTime.now();
+      await pumpFor(
+        tester,
+        FederationFriend(
+          nodeId: 'device-1',
+          publicKeyBase64: 'pk1',
+          address: 'a.example:8080',
+          displayName: 'Ada',
+          accountId: 'acc-ada',
+          devices: [
+            FriendDevice(
+              nodeId: 'device-1',
+              address: 'a.example:8080',
+              linkedAt: now.subtract(const Duration(days: 3)),
+            ),
+            FriendDevice(
+              nodeId: 'device-2',
+              relayUrl: 'wss://relay.example/session/xyz',
+              linkedAt: now.subtract(const Duration(days: 1)),
+            ),
+          ],
+        ),
+      );
+
+      expect(find.text('Uses Musicat on 2 devices'), findsOneWidget);
+      expect(find.text('Added 3 days ago · reachable'), findsOneWidget);
+      expect(find.text('Added yesterday · reachable'), findsOneWidget);
+      // The plumbing stays out of the copy.
+      expect(find.textContaining('device-1'), findsNothing);
+      expect(find.textContaining('device-2'), findsNothing);
+      expect(find.textContaining('wss://'), findsNothing);
+    });
+
+    testWidgets('a device with nowhere to reach it says so rather than '
+        'implying it works', (tester) async {
+      await pumpFor(
+        tester,
+        FederationFriend(
+          nodeId: 'device-1',
+          publicKeyBase64: 'pk1',
+          address: 'a.example:8080',
+          displayName: 'Ada',
+          accountId: 'acc-ada',
+          devices: [
+            const FriendDevice(nodeId: 'device-1', address: 'a.example:8080'),
+            const FriendDevice(nodeId: 'device-2'),
+          ],
+        ),
+      );
+
+      expect(
+        find.text('Added a while ago · no way to reach it yet'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('an ordinary one-device friend gets no device section at '
+        'all', (tester) async {
+      await pumpFor(
+        tester,
+        const FederationFriend(
+          nodeId: 'device-1',
+          publicKeyBase64: 'pk1',
+          address: 'a.example:8080',
+          displayName: 'Ada',
+          devices: [FriendDevice(nodeId: 'device-1')],
+        ),
+      );
+
+      expect(find.textContaining('Uses Musicat on'), findsNothing);
+    });
+  });
 }
 
 FriendWithStatus _withStatus(FederationFriend friend) =>

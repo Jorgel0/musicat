@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../features/friends/presentation/account_controller.dart';
 import '../../features/player/presentation/mini_player.dart';
 import '../invite/pending_invite.dart';
 
@@ -50,7 +51,12 @@ class _AppShellState extends ConsumerState<AppShell> {
     if (location.startsWith('/search')) return 1;
     if (location.startsWith('/downloads')) return 2;
     if (location.startsWith('/playlists')) return 3;
-    if (location.startsWith('/friends')) return 4;
+    // `/account` is a Friends-section screen that lives at the top level
+    // (see `app_router.dart` for why), so it keeps the Friends tab lit
+    // rather than falling through to Library.
+    if (location.startsWith('/friends') || location.startsWith('/account')) {
+      return 4;
+    }
     if (location.startsWith('/settings')) return 5;
     return 0;
   }
@@ -71,6 +77,15 @@ class _AppShellState extends ConsumerState<AppShell> {
       (previous, next) => _maybeShowPendingInviteError(next),
     );
 
+    // Unanswered friend requests, surfaced on the nav bar itself: the one
+    // place they are visible without already being on the Friends screen.
+    // A request nobody notices is the same as not having the feature at
+    // all — see `account_controller.dart` for why this provider outlives
+    // the Friends screen. `0` while loading, signed out, or unable to
+    // check, so the badge only ever appears when there is really
+    // something waiting.
+    final pendingRequests = ref.watch(pendingFriendRequestCountProvider);
+
     return Scaffold(
       body: widget.child,
       bottomNavigationBar: Column(
@@ -80,33 +95,41 @@ class _AppShellState extends ConsumerState<AppShell> {
           NavigationBar(
             selectedIndex: _currentIndex,
             onDestinationSelected: (index) => context.go(_destinations[index]),
-            destinations: const [
-              NavigationDestination(
+            destinations: [
+              const NavigationDestination(
                 icon: Icon(Icons.library_music_outlined),
                 selectedIcon: Icon(Icons.library_music),
                 label: 'Library',
               ),
-              NavigationDestination(
+              const NavigationDestination(
                 icon: Icon(Icons.search_outlined),
                 selectedIcon: Icon(Icons.search),
                 label: 'Search',
               ),
-              NavigationDestination(
+              const NavigationDestination(
                 icon: Icon(Icons.download_outlined),
                 selectedIcon: Icon(Icons.download),
                 label: 'Downloads',
               ),
-              NavigationDestination(
+              const NavigationDestination(
                 icon: Icon(Icons.queue_music_outlined),
                 selectedIcon: Icon(Icons.queue_music),
                 label: 'Playlists',
               ),
               NavigationDestination(
-                icon: Icon(Icons.people_outline),
-                selectedIcon: Icon(Icons.people),
+                icon: Badge.count(
+                  count: pendingRequests,
+                  isLabelVisible: pendingRequests > 0,
+                  child: const Icon(Icons.people_outline),
+                ),
+                selectedIcon: Badge.count(
+                  count: pendingRequests,
+                  isLabelVisible: pendingRequests > 0,
+                  child: const Icon(Icons.people),
+                ),
                 label: 'Friends',
               ),
-              NavigationDestination(
+              const NavigationDestination(
                 icon: Icon(Icons.settings_outlined),
                 selectedIcon: Icon(Icons.settings),
                 label: 'Settings',

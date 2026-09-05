@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../features/downloads/presentation/downloads_screen.dart';
+import '../../features/friends/presentation/account_screen.dart';
 import '../../features/friends/presentation/friend_detail_screen.dart';
 import '../../features/friends/presentation/friends_screen.dart';
 import '../../features/friends/presentation/my_profile_screen.dart';
@@ -83,6 +84,13 @@ GoRouter createAppRouter() => GoRouter(
         GoRoute(
           path: '/my-profile',
           builder: (context, state) => const MyProfileScreen(),
+        ),
+        // Top-level rather than under `/friends`, which already owns a
+        // `:nodeId` child route that would happily match `account` as a
+        // node id.
+        GoRoute(
+          path: '/account',
+          builder: (context, state) => const AccountScreen(),
         ),
         GoRoute(
           path: '/friends',

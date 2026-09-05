@@ -50,6 +50,11 @@ class FriendDetailScreen extends ConsumerWidget {
     }
     final hasRelay = friend?.relayUrl != null;
     final tracksAsync = ref.watch(_friendSharedTracksProvider(nodeId));
+    // A friend is an account now, and an account can be signed in on
+    // several devices at once (server ADR 0049) — worth saying out loud
+    // here, because "why is there a device I don't recognise" is a
+    // question only the person reading this screen can answer.
+    final devices = friend?.devices ?? const <FriendDevice>[];
 
     return Scaffold(
       appBar: AppBar(
@@ -84,6 +89,7 @@ class FriendDetailScreen extends ConsumerWidget {
                 ],
               ),
             ),
+          if (devices.length > 1) _FriendDevicesSummary(devices: devices),
           Expanded(
             child: tracksAsync.when(
               loading: () => const Center(child: CircularProgressIndicator()),
@@ -108,6 +114,69 @@ class FriendDetailScreen extends ConsumerWidget {
         ],
       ),
     );
+  }
+}
+
+/// The "this friend has more than one device" line, and what is known
+/// about each one.
+///
+/// Deliberately says nothing about node ids, keys or addresses: none of
+/// that is a thing a person can check or act on. What they *can* recognise
+/// is when a device joined and whether it can be reached at all — enough
+/// to notice a device they were not expecting.
+class _FriendDevicesSummary extends StatelessWidget {
+  const _FriendDevicesSummary({required this.devices});
+
+  final List<FriendDevice> devices;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.devices_outlined,
+                size: 16,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Uses Musicat on ${devices.length} devices',
+                style: textTheme.bodySmall,
+              ),
+            ],
+          ),
+          for (final device in devices)
+            Padding(
+              padding: const EdgeInsets.only(left: 24, top: 4),
+              child: Text(
+                '${_addedWhen(device.linkedAt)} · '
+                '${device.isReachable ? 'reachable' : 'no way to reach it yet'}',
+                style: textTheme.bodySmall,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// When a device joined the account, in the vaguest terms that are still
+  /// useful — an exact timestamp would suggest a precision that does not
+  /// matter here, and `linkedAt` is absent entirely for a friend paired
+  /// before accounts existed.
+  static String _addedWhen(DateTime? linkedAt) {
+    if (linkedAt == null) return 'Added a while ago';
+    final days = DateTime.now().difference(linkedAt).inDays;
+    if (days <= 0) return 'Added today';
+    if (days == 1) return 'Added yesterday';
+    if (days < 30) return 'Added $days days ago';
+    if (days < 365) return 'Added ${days ~/ 30} months ago';
+    return 'Added over a year ago';
   }
 }
 

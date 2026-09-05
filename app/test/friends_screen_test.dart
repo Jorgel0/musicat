@@ -13,6 +13,7 @@ import 'package:musicat/features/friends/presentation/musicat_server_config_cont
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'fakes/fake_account_client.dart';
 import 'fakes/fake_federation_client.dart';
 import 'fakes/fake_http_adapter.dart';
 
@@ -56,6 +57,7 @@ void main() {
     ) async {
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(_configured),
           ),
@@ -111,6 +113,7 @@ void main() {
       (tester) async {
         final container = ProviderContainer(
           overrides: [
+            signedOutAccountOverride,
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
@@ -182,6 +185,7 @@ void main() {
       });
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(_configured),
           ),
@@ -221,6 +225,7 @@ void main() {
       });
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(_configured),
           ),
@@ -263,6 +268,7 @@ void main() {
       });
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(
               const MusicatServerConfig(
@@ -315,6 +321,7 @@ void main() {
       });
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(_configured),
           ),
@@ -356,6 +363,7 @@ void main() {
       });
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(
               const MusicatServerConfig(
@@ -421,6 +429,7 @@ void main() {
       });
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(
               const MusicatServerConfig(
@@ -483,6 +492,7 @@ void main() {
       });
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(
               const MusicatServerConfig(
@@ -549,6 +559,7 @@ void main() {
       });
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(
               const MusicatServerConfig(
@@ -602,6 +613,7 @@ void main() {
       (tester) async {
         final container = ProviderContainer(
           overrides: [
+            signedOutAccountOverride,
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
@@ -672,6 +684,7 @@ void main() {
       (tester) async {
         final container = ProviderContainer(
           overrides: [
+            signedOutAccountOverride,
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
@@ -713,6 +726,7 @@ void main() {
     ) async {
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(_configured),
           ),
@@ -752,6 +766,7 @@ void main() {
       (tester) async {
         final container = ProviderContainer(
           overrides: [
+            signedOutAccountOverride,
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
@@ -795,6 +810,7 @@ void main() {
         );
         final container = ProviderContainer(
           overrides: [
+            signedOutAccountOverride,
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
@@ -850,6 +866,7 @@ void main() {
       });
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(_configured),
           ),
@@ -896,6 +913,7 @@ void main() {
         );
         final container = ProviderContainer(
           overrides: [
+            signedOutAccountOverride,
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
@@ -940,6 +958,7 @@ void main() {
       );
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(_configured),
           ),
@@ -990,6 +1009,7 @@ void main() {
               );
         final container = ProviderContainer(
           overrides: [
+            signedOutAccountOverride,
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
@@ -1038,6 +1058,7 @@ void main() {
       );
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(_configured),
           ),
@@ -1079,6 +1100,7 @@ void main() {
       )..usernameDirectory['bob'] = 'node-bob';
       final container = ProviderContainer(
         overrides: [
+          signedOutAccountOverride,
           musicatServerConfigControllerProvider.overrideWith(
             () => MusicatServerConfigController(_configured),
           ),
@@ -1137,6 +1159,7 @@ void main() {
         );
         final container = ProviderContainer(
           overrides: [
+            signedOutAccountOverride,
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
@@ -1198,6 +1221,7 @@ void main() {
               );
         final container = ProviderContainer(
           overrides: [
+            signedOutAccountOverride,
             musicatServerConfigControllerProvider.overrideWith(
               () => MusicatServerConfigController(_configured),
             ),
