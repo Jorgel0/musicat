@@ -1,4 +1,22 @@
-enum FriendRequestStatus { pending, accepted, declined }
+enum FriendRequestStatus {
+  pending,
+  accepted,
+  declined,
+
+  /// An `accepted` friendship that one of the two sides has since taken
+  /// back (`DELETE /accounts/<me>/friends/<accountId>`). A terminal state
+  /// like [declined], and deliberately a *status* rather than the row being
+  /// deleted: absence is what a bug produces, so "these two are no longer
+  /// friends" has to look different on disk from "this row was lost". See
+  /// [FriendRequestStore.revokeFriendship].
+  ///
+  /// Re-befriending afterwards works through an ordinary *new* request
+  /// (`send` only ever de-duplicates against a still-`pending` one), never
+  /// by flipping this row back: `_respond` refuses any transition out of a
+  /// non-`pending` status, so a revoked friendship can't be resurrected by
+  /// replaying an old accept.
+  revoked,
+}
 
 /// A friend request between two [Account]s, addressed by accountId (not by
 /// nodeId/device -- an account can have many devices, and friendship is a

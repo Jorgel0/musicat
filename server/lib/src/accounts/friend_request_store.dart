@@ -221,4 +221,42 @@ class FriendRequestStore {
     callerAccountId: callerAccountId,
     newStatus: FriendRequestStatus.declined,
   );
+
+  /// Ends the friendship between [a] and [b], whichever of them sent the
+  /// original request: every `accepted` request between the two is flipped
+  /// to [FriendRequestStatus.revoked]. Returns how many rows that was --
+  /// `0` meaning they were not friends, which is a perfectly ordinary
+  /// outcome and not an error (see `account_routes.dart`'s
+  /// `DELETE /<me>/friends/<accountId>`, which is idempotent).
+  ///
+  /// **Either side may call this**, which is the whole point: [_respond]'s
+  /// rule that only a request's *recipient* may act on it is about
+  /// answering an offer, and an established friendship is no longer an
+  /// offer. Phrased in terms of [_acceptedCounterpartOf] like
+  /// [areMutualFriends] and [listAcceptedFriendAccountIds], so all three
+  /// agree by construction about what "friends" means -- the disagreement
+  /// that method's own doc comment warns about would here mean revoking
+  /// something that still gates a device-list disclosure.
+  ///
+  /// *Every* matching row, not just the first: two accounts that each sent
+  /// and each accepted a request have two accepted rows for one friendship
+  /// ([listAcceptedFriendAccountIds] already de-duplicates them into one
+  /// friend), and leaving either one behind would leave them mutual friends
+  /// after a revocation that reported success.
+  ///
+  /// Nothing else is touched: a `pending` request between the two survives
+  /// as pending (it is a separate, still-unanswered offer), and this writes
+  /// nothing at all when there is nothing to revoke, so a retried
+  /// revocation costs one file read.
+  Future<int> revokeFriendship(String a, String b) => _locked(() async {
+    final requests = await loadAll();
+    var revoked = 0;
+    for (var i = 0; i < requests.length; i++) {
+      if (_acceptedCounterpartOf(requests[i], a) != b) continue;
+      requests[i] = requests[i].copyWith(status: FriendRequestStatus.revoked);
+      revoked++;
+    }
+    if (revoked > 0) await _save(requests);
+    return revoked;
+  });
 }

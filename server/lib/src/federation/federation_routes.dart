@@ -13,6 +13,7 @@ import '../relay/relay_client.dart';
 import '../relay/username_directory_store.dart';
 import 'friend.dart';
 import 'friend_reachability.dart';
+import 'friend_revocation.dart';
 import 'friend_store.dart';
 import 'pairing_code_store.dart';
 import 'request_signing.dart';
@@ -117,6 +118,20 @@ Response _verificationErrorResponse(
 /// refresh can bring that friend back. Re-adding them explicitly (another
 /// pairing) clears it.
 ///
+/// When [revocations] is configured *and* the friend being removed is an
+/// **account-based** one, `DELETE /friends/<id>` additionally records a
+/// durable revocation so the account service is eventually told too, which
+/// is what makes unfriending bidirectional (the other side's own
+/// `FriendSyncService` then drops this node). That is strictly an extra
+/// guarantee bolted onto the side: the local removal happens first and
+/// completes regardless, the account-service call is fired unawaited from a
+/// queue on disk, and nothing about the `204` depends on the network. A
+/// **device-pinned** friend (paired out-of-band with a pairing code, ADR
+/// 0020) has no account-service friendship at all, so removing one records
+/// nothing and generates no account-service traffic whatsoever; neither does
+/// removing anybody at all on a node with no account session. See
+/// [FriendRevocationService].
+///
 /// `PATCH /friends/<nodeId>` sets [Friend.localNickname] — a purely local
 /// label this device's own user picks for a friend, distinct from
 /// [Friend.displayName] (what the friend calls *themselves*). Like `GET`/
@@ -152,6 +167,7 @@ Router buildFederationRouter(
   RelayClient? relayClient,
   http.Client? httpClient,
   AccountServiceClient? accountService,
+  FriendRevocationService? revocations,
 }) {
   final client = httpClient ?? http.Client();
   final router = Router();
@@ -345,6 +361,26 @@ Router buildFederationRouter(
         puncher.stopKeepalive(device.nodeId);
       }
       puncher.stopKeepalive(friendId);
+
+      // Strictly afterwards, and strictly optional. Ordered this way on
+      // purpose: a crash between the two steps must lose the *propagation*,
+      // never the local removal and its tombstone -- the first failure mode
+      // is what this node did before this feature existed, the second would
+      // be a Rule 2 violation (an unfriending that silently didn't happen).
+      //
+      // Only for an account-based friend this node actually held:
+      //   - a device-pinned friend has no account-service friendship to
+      //     revoke, and must therefore cost zero account-service traffic;
+      //   - an id that matched no friend tells us nothing about which
+      //     account, if any, it named -- writing a revocation for a raw
+      //     device nodeId would send the account service somebody else's
+      //     identifier. `friend.accountId` (not `friendId`) is used for the
+      //     same reason: the app may well have addressed a device.
+      // `revoke` itself is two small local-disk operations and then an
+      // unawaited send; it is a no-op with no account session.
+      if (revocations != null && friend != null && !friend.isDevicePinned) {
+        await revocations.revoke(friend.accountId);
+      }
       return Response(204);
     }, appApiKey: appApiKey),
   );

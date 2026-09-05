@@ -119,6 +119,7 @@ class Friend {
     this.displayName,
     this.localNickname,
     this.devicesRefreshedAt,
+    this.confirmedByAccountService = false,
   });
 
   /// A legacy, device-pinned friend: one device, `accountId == nodeId`,
@@ -170,6 +171,37 @@ class Friend {
   /// When [devices] was last refreshed from the account service — `null`
   /// if never (always the case for a device-pinned friend).
   final DateTime? devicesRefreshedAt;
+
+  /// Whether the account service has ever **vouched for this friendship
+  /// itself** — not merely for the account's device list, but for "these two
+  /// accounts are friends".
+  ///
+  /// This is the flag that decides whether a friend sync may *remove* this
+  /// entry, and it exists because "has an accountId" turned out not to be
+  /// the same question. Two people who pair out-of-band with a pairing code
+  /// while both happen to be logged in become **account-based friends who
+  /// were never friends on the account service** (`POST /friends` with a
+  /// confirmed `accountId`, ADR 0049) — so they are absent from
+  /// `GET /accounts/<me>/friends` forever, and a sync that removed everyone
+  /// absent from that list would delete them, destroying trust the user
+  /// established by hand along with the only address anybody has for them.
+  /// That is the same harm rule 3 protects a device-pinned friend from, and
+  /// it needs the same protection.
+  ///
+  /// Never set by a caller: [FriendStore] decides it from *which* of its
+  /// methods wrote the entry, so it can't be got wrong from outside.
+  /// [FriendStore.add] (pairing, or any explicit local decision) clears it;
+  /// [FriendStore.addFromAccountService] and [FriendStore.updateDevices] set
+  /// it, and both are only ever reached with real confirmation in hand —
+  /// each of the three callers has just had that service either list this
+  /// friendship or answer `GET /<accountId>/devices`, which it only does for
+  /// the account itself or a mutual friend.
+  ///
+  /// Defaults to `false`, so every `friends.json` written before this field
+  /// existed loads as "not confirmed" and is safe from removal until a sync
+  /// confirms it for real — the conservative direction, and self-correcting
+  /// on the first successful sync.
+  final bool confirmedByAccountService;
 
   /// Whether this is a legacy, device-pinned friend (see the class doc
   /// comment): exactly one device, whose `nodeId` *is* this friend's
@@ -233,12 +265,15 @@ class Friend {
     List<FriendDevice>? devices,
     String? displayName,
     DateTime? devicesRefreshedAt,
+    bool? confirmedByAccountService,
   }) => Friend(
     accountId: accountId,
     devices: devices ?? this.devices,
     displayName: displayName ?? this.displayName,
     localNickname: localNickname,
     devicesRefreshedAt: devicesRefreshedAt ?? this.devicesRefreshedAt,
+    confirmedByAccountService:
+        confirmedByAccountService ?? this.confirmedByAccountService,
   );
 
   /// Both the persisted form and what this node's own app-facing
@@ -248,8 +283,8 @@ class Friend {
   /// `relayUrl` keys are the [primaryDevice] projection, kept verbatim on
   /// purpose: they are what the app's own parser reads today, and keeping
   /// them means a file written by this version is still readable by the
-  /// pre-Fase-5 one. `accountId`/`devices` are what a reader that
-  /// understands accounts should use.
+  /// pre-Fase-5 one. `accountId`/`devices`/`confirmedByAccountService` are
+  /// what a reader that understands accounts should use.
   Map<String, Object?> toJson() {
     final primary = primaryDevice;
     return {
@@ -263,6 +298,7 @@ class Friend {
       'accountId': accountId,
       'devices': [for (final device in devices) device.toJson()],
       'devicesRefreshedAt': devicesRefreshedAt?.toIso8601String(),
+      'confirmedByAccountService': confirmedByAccountService,
     };
   }
 
@@ -296,6 +332,12 @@ class Friend {
       devicesRefreshedAt: json['devicesRefreshedAt'] == null
           ? null
           : DateTime.parse(json['devicesRefreshedAt'] as String),
+      // Missing in every file written before this field existed, and
+      // deliberately defaulted to the safe answer -- see the field's own doc
+      // comment. Same nullable-field-defaulting pattern as `localNickname`
+      // and `DeviceLink.relayUrl`.
+      confirmedByAccountService:
+          json['confirmedByAccountService'] as bool? ?? false,
     );
   }
 }

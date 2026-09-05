@@ -4,6 +4,7 @@ import '../accounts/account_service_client.dart';
 import '../accounts/account_session_store.dart';
 import '../accounts/pending_friend_request_cache.dart';
 import 'account_friend_sync.dart';
+import 'friend_revocation.dart';
 
 /// The **poll** half of "push for convenience, poll for correctness" (the
 /// same pattern ADR 0038 settled on for invite links), applied to everything
@@ -68,6 +69,7 @@ class AccountUpdatePoller {
     required this.friendSync,
     required this.accountService,
     required this.pendingRequests,
+    this.revocations,
     this.pollInterval = const Duration(minutes: 5),
   });
 
@@ -75,6 +77,13 @@ class AccountUpdatePoller {
   final FriendSyncService friendSync;
   final AccountServiceClient accountService;
   final PendingFriendRequestCache pendingRequests;
+
+  /// Outstanding unfriendings this node still owes the account service, or
+  /// `null` on a node that doesn't propagate them. Drained at the top of
+  /// every [refreshNow], which is what turns "I unfriended someone on a
+  /// plane" into something that lands when the plane does -- see
+  /// [FriendRevocationService], which owns the durability and the backoff.
+  final FriendRevocationService? revocations;
 
   /// How often [start] re-runs [refreshNow]. See this class's doc comment for
   /// the number and its justification. Configurable (rather than a bare
@@ -104,9 +113,9 @@ class AccountUpdatePoller {
     _timer = null;
   }
 
-  /// One pass: reconcile the friend list, then refresh the pending
-  /// friend-request cache. Returns whether it got as far as talking to the
-  /// account service at all.
+  /// One pass: flush any revocations this node still owes, reconcile the
+  /// friend list, then refresh the pending friend-request cache. Returns
+  /// whether it got as far as talking to the account service at all.
   ///
   /// This is also what a relay push triggers (see
   /// `musicat_server_runtime.dart`), with [force] set — a push is a signal
@@ -126,6 +135,14 @@ class AccountUpdatePoller {
       // socket. See this class's doc comment.
       final session = await sessionStore.load();
       if (session == null) return false;
+
+      // Before the fetch, not after: a revocation this node still owes is
+      // the one thing that changes what the *authoritative* answer should
+      // be, so sending it first means the friend list fetched below is
+      // already the post-revocation one instead of a round out of date.
+      // Never blocks anything for long -- a dead service stops the drain at
+      // the first timeout (see [FriendRevocationService.drain]).
+      await revocations?.drain();
 
       await friendSync.sync(force: force);
       await _refreshPendingRequests(session.accountId);

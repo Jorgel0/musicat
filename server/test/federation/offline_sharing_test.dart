@@ -420,6 +420,151 @@ void main() {
     expectAccountServiceUntouched();
   });
 
+  group('unfriending propagates, without ever getting in the way', () {
+    /// Alice, logged in, against the same blackhole. Started as a second
+    /// instance over the same data directory, the way every other
+    /// session-having test in this file does it.
+    Future<MusicatServerHandle> loggedInAlice() async {
+      await AccountSessionStore(
+        aliceDir,
+      ).save(accountId: aliceAccountId, username: 'alice');
+      final node = await startMusicatServer(
+        dataDir: aliceDir,
+        port: 0,
+        accountServiceUrl: accountServiceUrl,
+        friendDeviceRefreshInterval: const Duration(hours: 12),
+        accountPollInterval: const Duration(hours: 12),
+      );
+      addTearDown(node.close);
+      accountServiceCalls.clear();
+      return node;
+    }
+
+    File pendingRevocations() =>
+        File('${aliceDir.path}/pending_revocations.json');
+
+    test('a logged-in node still unfriends instantly and locally, with the '
+        'account service blackholed -- propagation is queued, never '
+        'awaited', () async {
+      final alice = await loggedInAlice();
+      final trackId = await shareWithAlicesApi(bobAccountId);
+
+      final stopwatch = Stopwatch()..start();
+      final revoked = await http
+          .delete(
+            Uri.parse(
+              'http://localhost:${alice.port}'
+              '/api/v1/federation/friends/$bobAccountId',
+            ),
+          )
+          .timeout(const Duration(seconds: 20));
+      stopwatch.stop();
+
+      expect(revoked.statusCode, 204);
+      // The load-bearing number. `AccountServiceClient.timeout` is 5s
+      // against this blackhole, so anything that *awaited* the revocation
+      // would land above that; this has to be nowhere near it.
+      expect(
+        stopwatch.elapsed,
+        lessThan(const Duration(seconds: 2)),
+        reason:
+            'the removal waited on the account service, which is exactly '
+            'what it must never do',
+      );
+
+      // ...and it took effect the moment it returned: Bob's other device,
+      // with a real key and a real signature, is now a stranger.
+      final path = '/api/v1/sharing/shared-tracks/$trackId/file';
+      final headers = await RequestSigner(
+        bobSecondDevice,
+      ).sign(method: 'GET', path: path);
+      final response = await http
+          .get(
+            Uri.parse('http://localhost:${alice.port}$path'),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 20));
+      expect(response.statusCode, 401);
+      expect(await FriendStore(aliceDir).isRemoved(bobAccountId), isTrue);
+
+      // The propagation half: durably owed, and really attempted.
+      expect(pendingRevocations().existsSync(), isTrue);
+      expect(
+        pendingRevocations().readAsStringSync(),
+        contains(bobAccountId),
+        reason:
+            'nothing was written down, so unfriending while offline would '
+            'never propagate at all',
+      );
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (accountServiceCalls.isEmpty && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(accountServiceCalls, [
+        'DELETE /accounts/$aliceAccountId/friends/$bobAccountId',
+      ]);
+    });
+
+    test('removing a device-pinned friend generates zero account-service '
+        'traffic and no queue entry at all', () async {
+      // Paired out-of-band with a pairing code: no account, no friendship on
+      // the account service, and therefore nothing to tell it about.
+      final pinned = await NodeIdentityStore(
+        Directory('${bobDir.path}/pinned_peer')..createSync(),
+      ).loadOrCreate();
+      await FriendStore(aliceDir).add(
+        Friend.devicePinned(
+          nodeId: pinned.nodeId,
+          publicKeyBase64: await pinned.publicKeyBase64(),
+          address: 'pinned.example:8080',
+        ),
+      );
+      final alice = await loggedInAlice();
+
+      final revoked = await http
+          .delete(
+            Uri.parse(
+              'http://localhost:${alice.port}'
+              '/api/v1/federation/friends/${pinned.nodeId}',
+            ),
+          )
+          .timeout(const Duration(seconds: 20));
+
+      expect(revoked.statusCode, 204);
+      expect(
+        await FriendStore(aliceDir).findByAccountId(pinned.nodeId),
+        isNull,
+      );
+      // Give any stray background call the chance to be recorded before
+      // asserting there wasn't one.
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expectAccountServiceUntouched();
+      expect(
+        pendingRevocations().existsSync(),
+        isFalse,
+        reason:
+            'a device-pinned friend has no account-service friendship, so '
+            'queueing one is work that can never be delivered usefully',
+      );
+    });
+
+    test('unfriending while logged out queues nothing either', () async {
+      // The pre-existing guarantee, restated against the queue: no session
+      // means no propagation state and no traffic, however many friends are
+      // removed.
+      final revoked = await http
+          .delete(
+            Uri.parse(aliceUrl('/api/v1/federation/friends/$bobAccountId')),
+          )
+          .timeout(const Duration(seconds: 20));
+
+      expect(revoked.statusCode, 204);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expectAccountServiceUntouched();
+      expect(pendingRevocations().existsSync(), isFalse);
+    });
+  });
+
   group('the background poller, against the same blackhole', () {
     test('a node that has never logged in makes zero account-service calls, '
         'however long it runs', () async {

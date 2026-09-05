@@ -11,6 +11,7 @@ import 'package:musicat_server/src/accounts/friend_request_store.dart';
 import 'package:musicat_server/src/accounts/pending_friend_request_cache.dart';
 import 'package:musicat_server/src/federation/account_friend_sync.dart';
 import 'package:musicat_server/src/federation/account_update_poller.dart';
+import 'package:musicat_server/src/federation/friend_revocation.dart';
 import 'package:musicat_server/src/federation/friend_store.dart';
 import 'package:musicat_server/src/federation/request_signing.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
@@ -40,6 +41,7 @@ void main() {
   late AccountSessionStore sessionStore;
   late AccountServiceClient accountService;
   late PendingFriendRequestCache pendingRequests;
+  late PendingRevocationStore revocationQueue;
   late AccountUpdatePoller poller;
 
   late NodeIdentity myDevice;
@@ -147,6 +149,7 @@ void main() {
       identity: myDevice,
     );
     pendingRequests = PendingFriendRequestCache();
+    revocationQueue = PendingRevocationStore(nodeDir);
     poller = AccountUpdatePoller(
       sessionStore: sessionStore,
       friendSync: FriendSyncService(
@@ -156,6 +159,11 @@ void main() {
       ),
       accountService: accountService,
       pendingRequests: pendingRequests,
+      revocations: FriendRevocationService(
+        sessionStore: sessionStore,
+        accountService: accountService,
+        store: revocationQueue,
+      ),
       // Short enough that a handful of real ticks fit in a test, rather than
       // faking time. Every assertion below waits for an observable outcome,
       // never for a fixed number of milliseconds it hopes is enough.
@@ -324,5 +332,75 @@ void main() {
             'dropped, exactly as FriendDeviceRefresher.refreshAll does.',
       );
     });
+  });
+
+  group('outstanding revocations', () {
+    /// Makes this node and Alice accepted friends on the account service.
+    Future<void> befriendAlice() async {
+      final sent = await signedRequest(
+        myDevice,
+        'POST',
+        '/accounts/$myAccountId/friend-requests',
+        body: {'toUsername': 'alice'},
+      );
+      expect(sent.statusCode, 201);
+      final requestId =
+          (jsonDecode(sent.body) as Map<String, dynamic>)['id'] as String;
+      final accepted = await signedRequest(
+        alicePhone,
+        'POST',
+        '/accounts/$aliceAccountId/friend-requests/$requestId/accept',
+      );
+      expect(accepted.statusCode, 200);
+    }
+
+    test('a tick flushes one that was queued while this node was offline -- '
+        'the plane-landing case', () async {
+      await logIn();
+      await befriendAlice();
+      // What `DELETE /api/v1/federation/friends/<id>` left behind when the
+      // account service could not be reached at the time.
+      await revocationQueue.enqueue(
+        friendAccountId: aliceAccountId,
+        asAccountId: myAccountId,
+      );
+      accountServiceCalls.clear();
+
+      poller.start();
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while ((await revocationQueue.loadAll()).isNotEmpty &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+
+      expect(
+        await friendRequestStore.areMutualFriends(myAccountId, aliceAccountId),
+        isFalse,
+        reason: 'the poller never flushed the queued revocation',
+      );
+      expect(await revocationQueue.loadAll(), isEmpty);
+    });
+
+    test(
+      'a session-less node never flushes one, however long it runs',
+      () async {
+        await befriendAlice();
+        await revocationQueue.enqueue(
+          friendAccountId: aliceAccountId,
+          asAccountId: myAccountId,
+        );
+        accountServiceCalls.clear();
+
+        poller.start();
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+
+        expect(accountServiceCalls, isEmpty);
+        expect(
+          await revocationQueue.loadAll(),
+          hasLength(1),
+          reason: 'logging out is not abandoning a revocation you owe',
+        );
+      },
+    );
   });
 }

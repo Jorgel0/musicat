@@ -161,6 +161,33 @@ class FriendRequestActionResult {
   bool get isSuccess => outcome == FriendRequestActionOutcome.ok;
 }
 
+/// How [AccountServiceClient.revokeFriendship] ended -- three outcomes rather
+/// than a `bool`, because the caller
+/// (`federation/friend_revocation.dart`) has to decide between "done, forget
+/// it", "this will never work, stop trying" and "try again later", and those
+/// are three different things.
+enum RevokeFriendshipOutcome {
+  /// `204`: the account service applied it, or had already applied it
+  /// (the route is idempotent). Either way there is nothing left owed.
+  revoked,
+
+  /// The service answered, and answered definitively **no** -- a `403` (this
+  /// node's device isn't linked to the account it claims), a `404` (an
+  /// account service too old to have this route at all), or any other `4xx`
+  /// that isn't [failed]'s. Retrying reproduces it exactly, so the queued
+  /// revocation is dropped rather than retried for days.
+  refused,
+
+  /// Anything that might succeed later: never answered at all (connection
+  /// refused, DNS failure, [AccountServiceClient.timeout]), a `5xx`, a
+  /// `429`, or a `401`. `401` is deliberately in this bucket and not
+  /// [refused]: the account service rejects a signed request whose timestamp
+  /// is more than five minutes off (`AccountRequestVerifier`), and a phone
+  /// with a bad clock that later corrects itself must not have silently
+  /// thrown its pending revocations away.
+  failed,
+}
+
 /// A Musicat Server's *client* for the account service (`account_routes.dart`,
 /// hosted on the relay process, ADR 0048) — the only code in a node that
 /// talks to it.
@@ -617,6 +644,49 @@ class AccountServiceClient {
       // fix by retrying, and not a reason to say the service is down.
       _ => FriendRequestActionOutcome.failed,
     }, error: message);
+  }
+
+  /// Ends the friendship between [accountId] (this node's own account) and
+  /// [friendAccountId] on the account service --
+  /// `DELETE <baseUrl>/<accountId>/friends/<friendAccountId>`, signed as
+  /// this node's own device.
+  ///
+  /// **Never on the critical path of anything.** Local unfriending has
+  /// already happened, permanently, by the time this is called; this is the
+  /// propagation half, and every one of its failure modes is somebody else's
+  /// problem to retry (see `federation/friend_revocation.dart`, which owns
+  /// the durable queue and the backoff). It is safe to call repeatedly: the
+  /// route is idempotent, so a retry of one that already landed is a
+  /// [RevokeFriendshipOutcome.revoked] too.
+  Future<RevokeFriendshipOutcome> revokeFriendship({
+    required String accountId,
+    required String friendAccountId,
+  }) async {
+    final uri = Uri.parse(
+      '$baseUrl/${Uri.encodeComponent(accountId)}/friends/'
+      '${Uri.encodeComponent(friendAccountId)}',
+    );
+    final http.Response response;
+    try {
+      final headers = await RequestSigner(
+        identity,
+      ).sign(method: 'DELETE', path: uri.path);
+      response = await _client.delete(uri, headers: headers).timeout(timeout);
+    } catch (_) {
+      return RevokeFriendshipOutcome.failed;
+    }
+
+    // Everything from here on is the service having answered, so a refusal is
+    // never mistaken for it being down -- and only a refusal is terminal.
+    if (response.statusCode == 204) return RevokeFriendshipOutcome.revoked;
+    if (response.statusCode == 401 ||
+        response.statusCode == 429 ||
+        response.statusCode >= 500) {
+      return RevokeFriendshipOutcome.failed;
+    }
+    return response.statusCode >= 400
+        ? RevokeFriendshipOutcome.refused
+        : RevokeFriendshipOutcome.failed;
   }
 
   /// Closes the underlying HTTP client, if this instance created it (an

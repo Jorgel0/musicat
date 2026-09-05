@@ -244,6 +244,21 @@ Future<Response> _respondOutcomeResponse(
 /// [AccountFriend] for why each friend's device list is inlined rather than
 /// left to a follow-up `GET /<accountId>/devices` per friend.
 ///
+/// `DELETE /<me>/friends/<accountId>` -- authenticated as `<me>`; ends an
+/// accepted friendship **from either side**, whichever of the two originally
+/// sent the request (see [FriendRequestStore.revokeFriendship]). Always
+/// `204` with no body, and deliberately idempotent: revoking a friendship
+/// that doesn't exist, or that was already revoked, or naming an account
+/// that was never real, all do nothing and answer the same way -- so a
+/// node's retry of a revocation it isn't sure landed is free and safe, and
+/// the route is no account-enumeration oracle either. `401` if not
+/// authenticated at all, `403` if authenticated as a *different* account
+/// (nobody may revoke somebody else's friendships). Afterwards
+/// [FriendRequestStore.areMutualFriends] is false for the pair, which closes
+/// `GET /<accountId>/devices` and drops each side from the other's
+/// `GET /<me>/friends` -- for **both** accounts, since that gate was
+/// symmetric all along. A later re-friend is an ordinary new request.
+///
 /// `POST /<me>/friend-requests/<requestId>/accept` and `.../decline` --
 /// authenticated as `<me>`, which must be the request's *recipient*
 /// (`403` otherwise -- the sender can never accept/decline their own
@@ -254,10 +269,10 @@ Future<Response> _respondOutcomeResponse(
 /// [deviceNotifier] is optional and defaults to `null` -- with none, this
 /// service works exactly as it did before push existed, and every existing
 /// caller (and every node whose relay hosts no account service) keeps
-/// working unchanged. When one *is* given, `POST /<me>/friend-requests` and
-/// its `accept`/`decline` siblings nudge the affected account's devices
-/// afterwards; see [_notifyAccountDevices] for who is notified and why that
-/// push can never carry data.
+/// working unchanged. When one *is* given, `POST /<me>/friend-requests`, its
+/// `accept`/`decline` siblings and `DELETE /<me>/friends/<accountId>` nudge
+/// the affected accounts' devices afterwards; see [_notifyAccountDevices]
+/// for who is notified and why that push can never carry data.
 Router buildAccountRouter(
   AccountStore accountStore,
   FriendRequestStore friendRequestStore, {
@@ -556,6 +571,49 @@ Router buildAccountRouter(
     }
 
     return _json([for (final friend in friends) friend.toJson()]);
+  });
+
+  // Three segments with `friends` pinned in the middle, so it overlaps
+  // neither `DELETE /<accountId>/devices/<targetNodeId>` (which pins
+  // `devices`) nor anything else registered here -- the same
+  // registration-order care the `GET /<me>/friends` comment above spells
+  // out. Also verified against the real mounted server in
+  // `account_routes_test.dart` rather than only against this router.
+  router.delete('/<me>/friends/<friendAccountId>', (
+    Request request,
+    String me,
+    String friendAccountId,
+  ) async {
+    final body = await request.readAsString();
+    final caller = await _authenticateCaller(request, accountStore, body: body);
+    if (caller == null) {
+      return _error('Authentication required', status: 401);
+    }
+    if (caller.accountId != me) {
+      return _error('Cannot act as another account', status: 403);
+    }
+
+    final revoked = await friendRequestStore.revokeFriendship(
+      me,
+      friendAccountId,
+    );
+    if (revoked > 0) {
+      // Both sides, and the far side is the one that matters: nothing else
+      // would ever tell them their friend list just shrank, and until they
+      // re-fetch they still hold that account's cached device keys. `<me>`'s
+      // *other* devices are told for the same reason accept tells them --
+      // their own friend list changed too.
+      //
+      // Deliberately only on a real change. A no-op revocation (they were
+      // never friends, or a retry of one that already landed) pushes
+      // nothing, so this route can't be used as a free way to make some
+      // other account's devices poll on demand.
+      unawaited(_notifyAccountDevices(accountStore, deviceNotifier, me));
+      unawaited(
+        _notifyAccountDevices(accountStore, deviceNotifier, friendAccountId),
+      );
+    }
+    return Response(204);
   });
 
   router.post('/<me>/friend-requests/<requestId>/accept', (

@@ -15,6 +15,7 @@ import 'src/federation/account_friend_devices.dart';
 import 'src/federation/account_friend_sync.dart';
 import 'src/federation/account_update_poller.dart';
 import 'src/federation/federation_routes.dart';
+import 'src/federation/friend_revocation.dart';
 import 'src/federation/friend_store.dart';
 import 'src/federation/pairing_code_store.dart';
 import 'src/federation/request_signing.dart';
@@ -205,7 +206,10 @@ Router _buildRouter(
 /// set (a rate-limited lookup, see [AccountFriendDeviceResolver]), on the
 /// two periodic background jobs below, when a pairing caller claims an
 /// accountId, when this node's own user acts on an account (logging in, or
-/// any `/api/v1/account/friend-requests` route), and when the relay pushes a
+/// any `/api/v1/account/friend-requests` route), when this node's own user
+/// unfriends an *account-based* friend (fired off the critical path from a
+/// durable queue, see [FriendRevocationService] — unfriending a
+/// device-pinned friend still touches nothing), and when the relay pushes a
 /// contentless "go look" nudge down the tunnel (`RelayNotify`), which makes
 /// this node do the poll's work immediately instead of at the next tick.
 /// Two established friends can always share with it down, and a node that
@@ -328,6 +332,7 @@ Future<MusicatServerHandle> startMusicatServer({
   AccountFriendDeviceResolver? deviceResolver;
   FriendDeviceRefresher? deviceRefresher;
   FriendSyncService? friendSync;
+  FriendRevocationService? revocations;
   AccountUpdatePoller? accountUpdates;
   // In-memory and always constructed, like `sessionStore`: it costs nothing,
   // and `DELETE /api/v1/account` has to be able to clear it whether or not
@@ -352,11 +357,23 @@ Future<MusicatServerHandle> startMusicatServer({
       sessionStore: sessionStore,
       accountService: accountService,
     );
+    // The durable half of bidirectional unfriending: `DELETE
+    // /api/v1/federation/friends/<id>` records what it owes here and returns
+    // immediately, and the poller below flushes it. Constructed only
+    // alongside an account service, since with none there is nothing to
+    // propagate *to* and the removal route stays purely local -- see
+    // [FriendRevocationService].
+    revocations = FriendRevocationService(
+      sessionStore: sessionStore,
+      accountService: accountService,
+      store: PendingRevocationStore(dataDir),
+    );
     accountUpdates = AccountUpdatePoller(
       sessionStore: sessionStore,
       friendSync: friendSync,
       accountService: accountService,
       pendingRequests: pendingFriendRequests,
+      revocations: revocations,
       pollInterval: accountPollInterval,
     )..start();
     // What a relay push actually triggers. Forced past `minSyncInterval`
@@ -384,6 +401,7 @@ Future<MusicatServerHandle> startMusicatServer({
     appApiKey: appApiKey,
     relayClient: relayClient,
     accountService: accountService,
+    revocations: revocations,
   );
 
   final sharedTrackStore = SharedTrackStore(dataDir);

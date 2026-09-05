@@ -191,6 +191,117 @@ void main() {
     });
   });
 
+  group('revokeFriendship', () {
+    /// Makes [a] and [b] accepted friends, with [a] the sender.
+    Future<FriendRequest> befriend(String a, String b) async {
+      final request = await store.send(a, b);
+      await store.accept(request.id, b);
+      return request;
+    }
+
+    test('either side can end it, whichever of them sent the request '
+        'originally', () async {
+      await befriend('alice', 'bob');
+
+      // Bob, the *recipient* of the original request, is the one revoking.
+      expect(await store.revokeFriendship('bob', 'alice'), 1);
+
+      expect(await store.areMutualFriends('alice', 'bob'), isFalse);
+      expect(await store.areMutualFriends('bob', 'alice'), isFalse);
+      expect(await store.listAcceptedFriendAccountIds('alice'), isEmpty);
+      expect(await store.listAcceptedFriendAccountIds('bob'), isEmpty);
+    });
+
+    test('the sender can end it too', () async {
+      await befriend('alice', 'bob');
+
+      expect(await store.revokeFriendship('alice', 'bob'), 1);
+
+      expect(await store.areMutualFriends('alice', 'bob'), isFalse);
+    });
+
+    test('marks the row revoked rather than deleting it -- absence is what a '
+        'bug looks like, a deliberate end should not', () async {
+      final request = await befriend('alice', 'bob');
+
+      await store.revokeFriendship('alice', 'bob');
+
+      final stored = await store.findById(request.id);
+      expect(stored, isNotNull);
+      expect(stored!.status, FriendRequestStatus.revoked);
+    });
+
+    test('revokes *every* accepted row between the two, not just the first -- '
+        'both directions accepted is one friendship', () async {
+      await befriend('alice', 'bob');
+      await befriend('bob', 'alice');
+      expect(await store.areMutualFriends('alice', 'bob'), isTrue);
+
+      expect(await store.revokeFriendship('alice', 'bob'), 2);
+
+      expect(
+        await store.areMutualFriends('alice', 'bob'),
+        isFalse,
+        reason:
+            'a second accepted row survived, so they are still friends after '
+            'a revocation that reported success',
+      );
+    });
+
+    test('is a no-op for two accounts that were never friends', () async {
+      await store.send('alice', 'bob'); // pending, never accepted
+
+      expect(await store.revokeFriendship('alice', 'bob'), 0);
+      expect(await store.revokeFriendship('alice', 'nobody'), 0);
+    });
+
+    test('leaves a still-pending request between the two alone -- that is a '
+        'separate, unanswered offer', () async {
+      await befriend('alice', 'bob');
+      final pending = await store.send('bob', 'alice');
+
+      await store.revokeFriendship('alice', 'bob');
+
+      expect(
+        (await store.findById(pending.id))!.status,
+        FriendRequestStatus.pending,
+      );
+    });
+
+    test(
+      're-friending afterwards works, through an ordinary new request',
+      () async {
+        await befriend('alice', 'bob');
+        await store.revokeFriendship('alice', 'bob');
+
+        final again = await store.send('alice', 'bob');
+        final (outcome, _) = await store.accept(again.id, 'bob');
+
+        expect(outcome, RespondOutcome.updated);
+        expect(await store.areMutualFriends('alice', 'bob'), isTrue);
+      },
+    );
+
+    test('a revoked request can never be re-accepted -- resurrection has to '
+        'go through a new request', () async {
+      final request = await befriend('alice', 'bob');
+      await store.revokeFriendship('alice', 'bob');
+
+      final (outcome, _) = await store.accept(request.id, 'bob');
+
+      expect(outcome, RespondOutcome.conflict);
+      expect(await store.areMutualFriends('alice', 'bob'), isFalse);
+    });
+
+    test('survives a restart', () async {
+      await befriend('alice', 'bob');
+      await store.revokeFriendship('alice', 'bob');
+
+      final reloaded = FriendRequestStore(tempDir);
+      expect(await reloaded.areMutualFriends('alice', 'bob'), isFalse);
+    });
+  });
+
   test('two concurrent send() calls for the same (from, to) pair result in '
       'exactly one persisted pending request', () async {
     final results = await Future.wait([

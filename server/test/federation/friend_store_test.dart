@@ -901,4 +901,283 @@ void main() {
       );
     });
   });
+
+  group('confirmedByAccountService (who established this friendship)', () {
+    const alice = Friend(
+      accountId: 'account-alice',
+      devices: [FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a')],
+    );
+
+    test('add() clears it, whatever the caller passed -- pairing is local '
+        'trust', () async {
+      await store.add(
+        const Friend(
+          accountId: 'account-alice',
+          devices: [
+            FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+          ],
+          // A caller getting this wrong must not be able to make a paired
+          // friend look sync-removable.
+          confirmedByAccountService: true,
+        ),
+      );
+
+      expect(
+        (await store.findByAccountId(
+          'account-alice',
+        ))!.confirmedByAccountService,
+        isFalse,
+      );
+    });
+
+    test('addFromAccountService() sets it', () async {
+      await store.addFromAccountService(alice);
+
+      expect(
+        (await store.findByAccountId(
+          'account-alice',
+        ))!.confirmedByAccountService,
+        isTrue,
+      );
+    });
+
+    test('updateDevices() promotes a friend the account service has now '
+        'vouched for -- so an entry written before this field existed does '
+        'not stay un-removable forever', () async {
+      await store.add(alice);
+      expect(
+        (await store.findByAccountId(
+          'account-alice',
+        ))!.confirmedByAccountService,
+        isFalse,
+      );
+
+      await store.updateDevices('account-alice', const [
+        FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+      ]);
+
+      expect(
+        (await store.findByAccountId(
+          'account-alice',
+        ))!.confirmedByAccountService,
+        isTrue,
+      );
+    });
+
+    test('setLocalNickname() preserves it', () async {
+      await store.addFromAccountService(alice);
+
+      await store.setLocalNickname('account-alice', 'Bestie');
+
+      expect(
+        (await store.findByAccountId(
+          'account-alice',
+        ))!.confirmedByAccountService,
+        isTrue,
+      );
+    });
+
+    test('round-trips through the file, and defaults to false for an entry '
+        'written before it existed', () async {
+      await store.addFromAccountService(alice);
+      expect(
+        (await FriendStore(
+          tempDir,
+        ).findByAccountId('account-alice'))!.confirmedByAccountService,
+        isTrue,
+      );
+
+      // The pre-this-round shape: the same entry with the key simply absent.
+      final file = File('${tempDir.path}/friends.json');
+      final json = jsonDecode(file.readAsStringSync()) as List<dynamic>;
+      (json.single as Map<String, dynamic>).remove('confirmedByAccountService');
+      file.writeAsStringSync(jsonEncode(json));
+
+      expect(
+        (await FriendStore(
+          tempDir,
+        ).findByAccountId('account-alice'))!.confirmedByAccountService,
+        isFalse,
+        reason:
+            'an old entry must default to the safe answer -- unconfirmed, and '
+            'therefore never deleted by a sync until one confirms it',
+      );
+    });
+  });
+
+  group('removeFromAccountService (the other side unfriended us)', () {
+    Future<void> addConfirmed() => store.addFromAccountService(
+      const Friend(
+        accountId: 'account-alice',
+        devices: [FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a')],
+        displayName: 'alice',
+      ),
+    );
+
+    test('removes a confirmed account friend, keys and all', () async {
+      await addConfirmed();
+
+      expect(await store.removeFromAccountService('account-alice'), isTrue);
+
+      expect(await store.findByAccountId('account-alice'), isNull);
+      expect(
+        await store.findByDeviceNodeId('alice-phone'),
+        isNull,
+        reason:
+            "their cached device keys have to go with them, or their signed "
+            'requests keep verifying',
+      );
+    });
+
+    test('writes NO tombstone -- this is not the user\'s own decision, and '
+        'tombstoning it would make a later re-friend silently fail', () async {
+      await addConfirmed();
+
+      await store.removeFromAccountService('account-alice');
+
+      expect(await store.loadTombstones(), isEmpty);
+      expect(await store.isRemoved('account-alice'), isFalse);
+      expect(await store.isRemovedDevice('alice-phone'), isFalse);
+
+      // ...and the proof of why that matters: befriending again on the
+      // account service takes effect here, with no local action needed.
+      final again = await store.addFromAccountService(
+        const Friend(
+          accountId: 'account-alice',
+          devices: [
+            FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+          ],
+        ),
+      );
+      expect(again, isNotNull);
+      expect(await store.findByAccountId('account-alice'), isNotNull);
+    });
+
+    test("the deliberate kind still tombstones -- the asymmetry, side by "
+        'side', () async {
+      await addConfirmed();
+
+      await store.remove('account-alice');
+
+      expect(await store.isRemoved('account-alice'), isTrue);
+      expect(
+        await store.addFromAccountService(
+          const Friend(
+            accountId: 'account-alice',
+            devices: [
+              FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+            ],
+          ),
+        ),
+        isNull,
+      );
+    });
+
+    test('refuses a device-pinned friend -- out-of-band trust is invisible '
+        'to the account service, so its silence means nothing', () async {
+      await store.add(
+        Friend.devicePinned(
+          nodeId: 'pinned-node',
+          publicKeyBase64: 'k-p',
+          address: 'pinned.example:8080',
+        ),
+      );
+
+      expect(await store.removeFromAccountService('pinned-node'), isFalse);
+
+      final kept = await store.findByAccountId('pinned-node');
+      expect(kept, isNotNull);
+      expect(kept!.devices.single.address, 'pinned.example:8080');
+    });
+
+    test('refuses an account friend the account service never vouched for -- '
+        'two people who paired out-of-band while both logged in', () async {
+      // Exactly what `POST /api/v1/federation/friends` writes when the
+      // caller claims an accountId and the account service confirms the
+      // *device* belongs to it (ADR 0049). They were never friends *on* that
+      // service, so they never appear in its list.
+      await store.add(
+        const Friend(
+          accountId: 'account-alice',
+          devices: [
+            FriendDevice(
+              nodeId: 'alice-phone',
+              publicKeyBase64: 'k-a',
+              address: 'alice.example:8080',
+            ),
+          ],
+          localNickname: 'my label',
+        ),
+      );
+
+      expect(await store.removeFromAccountService('account-alice'), isFalse);
+
+      final kept = await store.findByAccountId('account-alice');
+      expect(kept, isNotNull);
+      expect(kept!.devices.single.address, 'alice.example:8080');
+      expect(kept.localNickname, 'my label');
+    });
+
+    test('is a no-op for an unknown account', () async {
+      expect(await store.removeFromAccountService('nobody'), isFalse);
+      expect(await store.loadTombstones(), isEmpty);
+    });
+
+    test(
+      'addresses accounts only, never a device nodeId -- one account\'s '
+      'stale cached device must not be able to drop a different friend',
+      () async {
+        await addConfirmed();
+
+        expect(await store.removeFromAccountService('alice-phone'), isFalse);
+        expect(await store.findByAccountId('account-alice'), isNotNull);
+      },
+    );
+
+    test('a concurrent add() wins: the entry it turns into local trust is '
+        'never dropped by an in-flight sync removal', () async {
+      for (var i = 0; i < 20; i++) {
+        final fresh = Directory.systemTemp.createTempSync(
+          'musicat_friend_store_revoke_race_',
+        );
+        addTearDown(() => fresh.deleteSync(recursive: true));
+        final raced = FriendStore(fresh);
+        await raced.addFromAccountService(
+          const Friend(
+            accountId: 'account-alice',
+            devices: [
+              FriendDevice(nodeId: 'alice-phone', publicKeyBase64: 'k-a'),
+            ],
+          ),
+        );
+
+        // The user re-pairs at the same moment a sync decides she is gone.
+        final pairing = raced.add(
+          const Friend(
+            accountId: 'account-alice',
+            devices: [
+              FriendDevice(
+                nodeId: 'alice-phone',
+                publicKeyBase64: 'k-a',
+                address: 'alice.example:8080',
+              ),
+            ],
+          ),
+        );
+        final removing = raced.removeFromAccountService('account-alice');
+        await Future.wait<Object?>([pairing, removing]);
+
+        // Either order is fine as long as it is *consistent*: if the pairing
+        // landed last the friend is there as local trust, and if it landed
+        // first the removal saw a confirmed entry and dropped it. What must
+        // never happen is a surviving entry that is still marked confirmed
+        // while carrying the paired address.
+        final alice = await raced.findByAccountId('account-alice');
+        if (alice != null) {
+          expect(alice.confirmedByAccountService, isFalse);
+          expect(alice.devices.single.address, 'alice.example:8080');
+        }
+      }
+    });
+  });
 }

@@ -74,7 +74,8 @@ class FriendStore {
   final Directory dataDirectory;
 
   /// Serializes every mutating call on *this* store instance ([add],
-  /// [remove], [setLocalNickname] and [updateDevices]) so their
+  /// [addFromAccountService], [remove], [removeFromAccountService],
+  /// [setLocalNickname] and [updateDevices]) so their
   /// load-mutate-save cycles can never interleave -- the same plain
   /// `Future`-chaining mutex `AccountStore._mutationLock` and
   /// `UsernameDirectoryStore._claimLock` already use, for the same reason
@@ -222,7 +223,11 @@ class FriendStore {
           f.accountId == friend.accountId ||
           f.devices.any((device) => incomingNodeIds.contains(device.nodeId)),
     );
-    friends.add(friend);
+    // Whatever the caller passed, an entry written by *this* method is local
+    // trust: [Friend.confirmedByAccountService] is decided here, not by
+    // callers, so a friend the user paired with can never be mistaken for
+    // one a sync may later delete.
+    friends.add(friend.copyWith(confirmedByAccountService: false));
     // Tombstone first, friend list second: a crash between the two writes
     // must never leave a friend trusted while a tombstone still says they
     // were removed, which would be a trusted friend that every path
@@ -280,10 +285,15 @@ class FriendStore {
     );
     if (displacesDevicePinned) return null;
 
-    friends.add(friend);
+    // The counterpart of [_addLocked]'s override: this entry exists only
+    // because `GET /accounts/<me>/friends` listed it, which is exactly the
+    // condition under which its later *absence* from that list means the
+    // friendship is over.
+    final confirmed = friend.copyWith(confirmedByAccountService: true);
+    friends.add(confirmed);
     _pruneClaimedDevices(friends, friends.length - 1, incomingNodeIds);
     await _save(friends);
-    return friend;
+    return confirmed;
   }
 
   /// Revokes trust in a friend account, addressed by its accountId or by
@@ -321,6 +331,76 @@ class FriendStore {
     await _save(friends);
   }
 
+  /// Drops the friend account [accountId] because **the account service no
+  /// longer lists it** -- the other side unfriended this node.
+  ///
+  /// Returns whether an entry was actually removed. The counterpart of
+  /// [addFromAccountService], and the exact mirror of its asymmetry with
+  /// [add]: this is what a *sync* is allowed to do, [remove] is what the
+  /// *user* is allowed to do, and the two differ in one crucial way.
+  ///
+  /// **This writes no [FriendTombstone], deliberately.** A tombstone records
+  /// *this user's own deliberate decision* and is checked by every path that
+  /// could re-learn an account, so it is precisely the thing that must not
+  /// be written here:
+  /// - the other side unfriending you is not your decision, and stamping it
+  ///   as one would be a lie on disk;
+  /// - a tombstone would make a later re-friend **silently fail to take**.
+  ///   Re-befriending on the account service is an ordinary new request, and
+  ///   the sync that would apply it goes through [addFromAccountService],
+  ///   which refuses a tombstoned account -- so the two of you would agree
+  ///   you are friends everywhere except on this node, forever, with no
+  ///   error anywhere. Nothing clears a tombstone but an explicit local
+  ///   [add].
+  /// Nothing is lost by not writing one: the account service is
+  /// authoritative about this friendship, so the only way the friend comes
+  /// back is the only way that *should* bring them back -- that same service
+  /// listing them again.
+  ///
+  /// Refuses, and returns `false`, for a friend the account service has
+  /// never vouched for ([Friend.confirmedByAccountService] false) — two
+  /// people who paired out-of-band while both logged in are account-based
+  /// friends who were never friends *on* that service, so its list has
+  /// nothing to say about them and their absence from it means nothing. That
+  /// case is not hypothetical: it is what
+  /// `POST /api/v1/federation/friends` with a confirmed `accountId` creates
+  /// (ADR 0049), and an existing test caught this method deleting exactly
+  /// such a friend — address, nickname and all — before this check existed.
+  ///
+  /// Refuses, and returns `false`, for a **device-pinned** friend, checked
+  /// here inside the lock rather than by the caller. Both halves matter.
+  /// Device-pinned trust was established out-of-band by the user
+  /// (a pairing code, ADR 0020/0045); such a friend does not appear on the
+  /// account service at all, so their absence from its list means nothing,
+  /// and deleting one would destroy the only address anybody has for them
+  /// along with trust the user set up by hand. And the check belongs in
+  /// here for the same TOCTOU reason [addFromAccountService] documents: a
+  /// caller that read the entry, decided it was account-based, and then
+  /// called this would leave a window in which a concurrent [add] turns it
+  /// device-pinned first.
+  ///
+  /// Removal is as immediate as the deliberate kind: the entry carries the
+  /// account's cached device keys, so from the next [findByDeviceNodeId]
+  /// onward their signed requests no longer verify.
+  Future<bool> removeFromAccountService(String accountId) =>
+      _locked(() => _removeFromAccountServiceLocked(accountId));
+
+  Future<bool> _removeFromAccountServiceLocked(String accountId) async {
+    final friends = await loadAll();
+    // By accountId only, never by a device nodeId: this is fed by the
+    // account service, which speaks accountIds, and resolving a device id
+    // here would let one account's stale cached device drop a different
+    // friend.
+    final index = friends.indexWhere((f) => f.accountId == accountId);
+    if (index == -1) return false;
+    if (friends[index].isDevicePinned) return false;
+    if (!friends[index].confirmedByAccountService) return false;
+
+    friends.removeAt(index);
+    await _save(friends);
+    return true;
+  }
+
   /// Updates just [Friend.localNickname] for the friend with the given
   /// accountId (or any of its devices' nodeIds), leaving every other field
   /// untouched. Purely local: this never touches anything sent to or
@@ -348,6 +428,7 @@ class FriendStore {
       displayName: existing.displayName,
       localNickname: nickname,
       devicesRefreshedAt: existing.devicesRefreshedAt,
+      confirmedByAccountService: existing.confirmedByAccountService,
     );
     friends[index] = updated;
     await _save(friends);
@@ -394,6 +475,14 @@ class FriendStore {
     final updated = friends[index].copyWith(
       devices: devices,
       devicesRefreshedAt: refreshedAt ?? DateTime.now().toUtc(),
+      // Promotion, and the reason a friend who predates
+      // [Friend.confirmedByAccountService] doesn't stay un-removable
+      // forever. Every caller of this method has just had the account
+      // service answer for this account -- `GET /<accountId>/devices`, which
+      // it only answers for the account itself or a *mutual friend*, or
+      // `GET /<me>/friends`, which lists nothing else. So reaching here is
+      // itself the confirmation.
+      confirmedByAccountService: true,
     );
     friends[index] = updated;
     _pruneClaimedDevices(friends, index, {

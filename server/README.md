@@ -64,7 +64,15 @@ Endpoints so far:
   the caller's if one was provided
 - `GET /api/v1/federation/friends` — lists trusted nodes
 - `DELETE /api/v1/federation/friends/<nodeId>` — revokes trust and stops
-  maintaining its NAT keepalive
+  maintaining its NAT keepalive. Instant, local and permanent: it answers
+  `204` without waiting on anything networked, and no later refresh or sync
+  can bring that friend back. If the friend was an *account* friend and this
+  node is logged in, the unfriending is additionally queued for the account
+  service (`pending_revocations.json`) and delivered in the background, so
+  the other side stops treating this node as a friend too — retried with
+  backoff if you were offline at the time, and given up on after 30 days.
+  Unfriending a device-pinned friend, or unfriending while logged out,
+  generates no account-service traffic at all
 - `PATCH /api/v1/federation/friends/<nodeId>` (`{"localNickname": "..." |
   null}`) — sets/clears a purely local label for that friend (never sent
   to them, distinct from the `displayName` they report about
@@ -179,7 +187,9 @@ Configuration is via environment variables:
   of this account's own friends and pending friend requests (every 5
   minutes), when a peer redeeming a pairing code claims to belong to an
   account, when this node's own user logs in or answers a friend request,
-  and when the relay nudges this node that something changed. Two friends
+  when this node's own user unfriends an account friend (queued to disk and
+  sent in the background, never blocking the removal), and when the relay
+  nudges this node that something changed. Two friends
   on the same network can always share with it down, logged in or not, and
   **a node that never logs in never contacts it at all** — the periodic
   refreshes do nothing without a session.

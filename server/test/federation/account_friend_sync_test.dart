@@ -486,56 +486,292 @@ void main() {
     });
   });
 
-  group('additive only', () {
-    test('a local friend absent from the accepted list is left completely '
-        'alone', () async {
+  group('friendships the account service has no say over', () {
+    /// Bob as `POST /api/v1/federation/friends` writes him when a peer
+    /// redeems a pairing code and claims an accountId the service confirms
+    /// (ADR 0049): an *account-based* friend who was nonetheless never
+    /// befriended **on** the account service, so he is absent from its list
+    /// forever. [Friend.confirmedByAccountService] is false for anything
+    /// [FriendStore.add] writes, which is what protects him.
+    Future<void> pairWithBobOutOfBand() async => friendStore.add(
+      Friend(
+        accountId: bobAccountId,
+        devices: [
+          FriendDevice(
+            nodeId: bobPhone.nodeId,
+            publicKeyBase64: await bobPhone.publicKeyBase64(),
+            address: 'bob.example:8080',
+          ),
+        ],
+        displayName: 'Bob',
+        localNickname: 'my label',
+      ),
+    );
+
+    test('an account friend paired out-of-band is left completely alone, '
+        'even though the accepted list has never heard of him', () async {
       await logIn();
-      // Bob is a local friend, with an address, whom this account has never
-      // exchanged a friend request with.
-      await friendStore.add(
-        Friend(
-          accountId: bobAccountId,
-          devices: [
-            FriendDevice(
-              nodeId: bobPhone.nodeId,
-              publicKeyBase64: await bobPhone.publicKeyBase64(),
-              address: 'bob.example:8080',
-            ),
-          ],
-          displayName: 'Bob',
-        ),
-      );
+      await pairWithBobOutOfBand();
       await befriendAlice();
 
       final result = await sync.sync();
 
       expect(result.added, 1);
+      expect(result.removed, 0);
       final bob = await friendStore.findByAccountId(bobAccountId);
-      expect(bob, isNotNull, reason: 'the sync removed a local friend');
+      expect(
+        bob,
+        isNotNull,
+        reason:
+            'the sync deleted a friend the user established by hand, from a '
+            'list that was never going to mention him',
+      );
       expect(bob!.devices.single.address, 'bob.example:8080');
       expect(bob.displayName, 'Bob');
+      expect(bob.localNickname, 'my label');
     });
 
-    test('an empty accepted list removes nothing', () async {
+    test('...and an empty accepted list does not remove him either', () async {
       await logIn();
-      await friendStore.add(
-        Friend(
-          accountId: bobAccountId,
-          devices: [
-            FriendDevice(
-              nodeId: bobPhone.nodeId,
-              publicKeyBase64: await bobPhone.publicKeyBase64(),
-              address: 'bob.example:8080',
-            ),
-          ],
-        ),
-      );
+      await pairWithBobOutOfBand();
 
       final result = await sync.sync();
 
       expect(result.status, FriendSyncStatus.completed);
-      expect(result.added, 0);
+      expect(result.removed, 0);
       expect(await friendStore.loadAll(), hasLength(1));
+    });
+  });
+
+  group('the other side unfriending propagates here', () {
+    /// Alice revokes her friendship with this node on the account service,
+    /// the way her own node's `DELETE /api/v1/federation/friends/<id>` would.
+    Future<void> aliceUnfriendsMe() async {
+      final response = await signedRequest(
+        alicePhone,
+        'DELETE',
+        '/accounts/$aliceAccountId/friends/$myAccountId',
+      );
+      expect(response.statusCode, 204);
+    }
+
+    /// Whether [device]'s Ed25519-signed request to this node still
+    /// verifies — the thing that actually matters about a removal, and
+    /// deliberately not a `friends.json` read.
+    Future<RequestVerificationResult> verifySignedRequestFrom(
+      NodeIdentity device,
+    ) async {
+      const path = '/api/v1/federation/ping';
+      final headers = await RequestSigner(
+        device,
+      ).sign(method: 'GET', path: path);
+      final verification = await RequestVerifier(friendStore).verify(
+        method: 'GET',
+        path: path,
+        body: '',
+        nodeId: headers['X-Node-Id'],
+        timestamp: headers['X-Timestamp'],
+        signatureBase64: headers['X-Signature'],
+      );
+      return verification.result;
+    }
+
+    test('a revoked friend really disappears, and their real signatures stop '
+        'verifying from the next lookup onward', () async {
+      await logIn();
+      await befriendAlice();
+      await sync.sync(force: true);
+      expect(await friendStore.findByAccountId(aliceAccountId), isNotNull);
+      expect(
+        await verifySignedRequestFrom(alicePhone),
+        RequestVerificationResult.valid,
+      );
+
+      await aliceUnfriendsMe();
+      final result = await sync.sync(force: true);
+
+      expect(result.status, FriendSyncStatus.completed);
+      expect(result.removed, 1);
+      expect(await friendStore.findByAccountId(aliceAccountId), isNull);
+      expect(await friendStore.loadAll(), isEmpty);
+      // The load-bearing half: her cached device keys went with her, so a
+      // genuinely well-formed, correctly-signed request from her phone is
+      // now from a stranger.
+      expect(
+        await verifySignedRequestFrom(alicePhone),
+        RequestVerificationResult.unknownNode,
+      );
+    });
+
+    test('every device of a revoked friend loses trust, not just the one '
+        'that was listed first', () async {
+      await logIn();
+      await befriendAlice();
+      await login('alice', 'hunter2-correct', aliceDesktop);
+      await sync.sync(force: true);
+      expect(
+        (await friendStore.findByAccountId(aliceAccountId))!.devices,
+        hasLength(2),
+      );
+
+      await aliceUnfriendsMe();
+      await sync.sync(force: true);
+
+      expect(
+        await verifySignedRequestFrom(alicePhone),
+        RequestVerificationResult.unknownNode,
+      );
+      expect(
+        await verifySignedRequestFrom(aliceDesktop),
+        RequestVerificationResult.unknownNode,
+      );
+    });
+
+    test('leaves NO tombstone, so becoming friends again just works -- the '
+        'asymmetry with a deliberate local removal', () async {
+      await logIn();
+      await befriendAlice();
+      await sync.sync(force: true);
+      await aliceUnfriendsMe();
+      await sync.sync(force: true);
+      expect(await friendStore.findByAccountId(aliceAccountId), isNull);
+
+      expect(
+        await friendStore.isRemoved(aliceAccountId),
+        isFalse,
+        reason:
+            'a tombstone here would make the re-friend below silently fail, '
+            'forever, with no error anywhere',
+      );
+      expect(await friendStore.isRemovedDevice(alicePhone.nodeId), isFalse);
+
+      // They make up. An ordinary new friend request, accepted.
+      await befriend(
+        meDevice: alicePhone,
+        meAccountId: aliceAccountId,
+        otherUsername: 'jorge',
+        otherDevice: myDevice,
+        otherAccountId: myAccountId,
+      );
+      final result = await sync.sync(force: true);
+
+      expect(result.added, 1);
+      expect(await friendStore.findByAccountId(aliceAccountId), isNotNull);
+      expect(
+        await verifySignedRequestFrom(alicePhone),
+        RequestVerificationResult.valid,
+      );
+    });
+
+    test('a device-pinned friend is never removed, however absent from the '
+        'list they are', () async {
+      await logIn();
+      await befriendAlice();
+      await friendStore.add(
+        Friend.devicePinned(
+          nodeId: bobPhone.nodeId,
+          publicKeyBase64: await bobPhone.publicKeyBase64(),
+          address: 'bob.example:8080',
+        ),
+      );
+      await sync.sync(force: true);
+      await aliceUnfriendsMe();
+
+      final result = await sync.sync(force: true);
+
+      expect(result.removed, 1, reason: 'only Alice should have gone');
+      final friends = await friendStore.loadAll();
+      expect(friends, hasLength(1));
+      expect(friends.single.isDevicePinned, isTrue);
+      expect(friends.single.devices.single.address, 'bob.example:8080');
+      expect(
+        await verifySignedRequestFrom(bobPhone),
+        RequestVerificationResult.valid,
+      );
+    });
+
+    test('an unreachable account service removes nobody -- a friend list is '
+        'never applied from a failed fetch', () async {
+      await logIn();
+      await befriendAlice();
+      await sync.sync(force: true);
+      await accountServer.close(force: true);
+
+      final result = await sync.sync(force: true);
+
+      expect(result.status, FriendSyncStatus.unreachable);
+      expect(result.removed, 0);
+      expect(await friendStore.findByAccountId(aliceAccountId), isNotNull);
+      expect(
+        await verifySignedRequestFrom(alicePhone),
+        RequestVerificationResult.valid,
+      );
+    });
+
+    test('a 403 removes nobody either', () async {
+      await logIn();
+      await befriendAlice();
+      await sync.sync(force: true);
+
+      // A session claiming an account this device is not a device of: the
+      // service answers, and answers no.
+      await sessionStore.save(accountId: bobAccountId, username: 'bob');
+      final result = await sync.sync(force: true);
+
+      expect(result.status, FriendSyncStatus.unreachable);
+      expect(await friendStore.findByAccountId(aliceAccountId), isNotNull);
+    });
+
+    test('the stated blast radius: a successful-but-empty answer really does '
+        'drop every confirmed friend, and they come back on the next '
+        'correct sync', () async {
+      // Not a bug being tested -- a documented, deliberate consequence,
+      // written down so it cannot be discovered by surprise later. There is
+      // no sanity threshold here on purpose: any rule that refused a
+      // suspiciously large removal would also refuse a legitimate "I removed
+      // everyone from my other device".
+      await logIn();
+      await befriendAlice();
+      await befriend(
+        meDevice: bobPhone,
+        meAccountId: bobAccountId,
+        otherUsername: 'jorge',
+        otherDevice: myDevice,
+        otherAccountId: myAccountId,
+      );
+      await sync.sync(force: true);
+      expect(await friendStore.loadAll(), hasLength(2));
+      // The user's own label, which lives nowhere but this node.
+      await friendStore.setLocalNickname(aliceAccountId, 'best friend');
+
+      // Both friendships vanish from the service at once -- indistinguishable
+      // here from a bug on its side answering `200 []`.
+      await signedRequest(
+        alicePhone,
+        'DELETE',
+        '/accounts/$aliceAccountId/friends/$myAccountId',
+      );
+      await signedRequest(
+        bobPhone,
+        'DELETE',
+        '/accounts/$bobAccountId/friends/$myAccountId',
+      );
+      final result = await sync.sync(force: true);
+
+      expect(result.removed, 2);
+      expect(await friendStore.loadAll(), isEmpty);
+
+      // No tombstones, so a correct answer restores the friendships...
+      await befriendAlice();
+      await sync.sync(force: true);
+      expect(await friendStore.findByAccountId(aliceAccountId), isNotNull);
+      // ...but the local label does not come back. That is the real,
+      // permanent cost of a wrong-but-successful answer, and it is why this
+      // is documented rather than papered over.
+      expect(
+        (await friendStore.findByAccountId(aliceAccountId))!.localNickname,
+        isNull,
+      );
     });
   });
 

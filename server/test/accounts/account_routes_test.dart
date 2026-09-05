@@ -1124,6 +1124,272 @@ void main() {
     );
   });
 
+  group('DELETE /<me>/friends/<accountId>', () {
+    late NodeIdentity alicePhone;
+    late NodeIdentity bobPhone;
+    late String aliceId;
+    late String bobId;
+
+    setUp(() async {
+      alicePhone = await newIdentity();
+      bobPhone = await newIdentity();
+      aliceId = await signUp('alice', 'hunter2', alicePhone);
+      bobId = await signUp('bob', 'hunter2', bobPhone);
+    });
+
+    Future<http.Response> revoke(
+      NodeIdentity as,
+      String meId,
+      String friendId,
+    ) async {
+      final path = '/$meId/friends/$friendId';
+      return http.delete(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(as, method: 'DELETE', path: path),
+      );
+    }
+
+    Future<List<dynamic>> friendsOf(NodeIdentity as, String meId) async {
+      final path = '/$meId/friends';
+      final response = await http.get(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(as, method: 'GET', path: path),
+      );
+      expect(response.statusCode, 200);
+      return jsonDecode(response.body) as List<dynamic>;
+    }
+
+    Future<int> devicesStatus(NodeIdentity as, String targetAccountId) async {
+      final path = '/$targetAccountId/devices';
+      final response = await http.get(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(as, method: 'GET', path: path),
+      );
+      return response.statusCode;
+    }
+
+    Future<void> makeFriends() => befriend(
+      fromIdentity: alicePhone,
+      fromId: aliceId,
+      toUsername: 'bob',
+      toIdentity: bobPhone,
+      toId: bobId,
+    );
+
+    test(
+      'either side can end the friendship, and it ends for *both*',
+      () async {
+        await makeFriends();
+        expect(await friendsOf(alicePhone, aliceId), hasLength(1));
+        expect(await friendsOf(bobPhone, bobId), hasLength(1));
+
+        // Bob revokes -- and Bob was the *recipient* of the original request,
+        // so this is the direction a naive "only the sender may undo it"
+        // implementation would refuse.
+        final response = await revoke(bobPhone, bobId, aliceId);
+
+        expect(response.statusCode, 204);
+        expect(response.body, isEmpty);
+        expect(
+          await friendRequestStore.areMutualFriends(aliceId, bobId),
+          isFalse,
+        );
+        expect(await friendsOf(alicePhone, aliceId), isEmpty);
+        expect(await friendsOf(bobPhone, bobId), isEmpty);
+      },
+    );
+
+    test('closes the device-list gate again, in both directions', () async {
+      await makeFriends();
+      expect(await devicesStatus(alicePhone, bobId), 200);
+      expect(await devicesStatus(bobPhone, aliceId), 200);
+
+      expect((await revoke(alicePhone, aliceId, bobId)).statusCode, 204);
+
+      expect(
+        await devicesStatus(alicePhone, bobId),
+        403,
+        reason: 'the revoking side can still read the other account\'s keys',
+      );
+      expect(
+        await devicesStatus(bobPhone, aliceId),
+        403,
+        reason: 'the revoked side can still read the other account\'s keys',
+      );
+      // Each account can always still see its own.
+      expect(await devicesStatus(alicePhone, aliceId), 200);
+    });
+
+    test('401s an unauthenticated caller', () async {
+      await makeFriends();
+
+      final response = await http.delete(
+        Uri.parse('$baseUrl/$aliceId/friends/$bobId'),
+      );
+
+      expect(response.statusCode, 401);
+      expect(await friendRequestStore.areMutualFriends(aliceId, bobId), isTrue);
+    });
+
+    test('403s a caller acting as another account -- nobody may revoke '
+        "somebody else's friendships", () async {
+      await makeFriends();
+      final carolPhone = await newIdentity();
+      await signUp('carol', 'hunter2', carolPhone);
+
+      final response = await revoke(carolPhone, aliceId, bobId);
+
+      expect(response.statusCode, 403);
+      expect(await friendRequestStore.areMutualFriends(aliceId, bobId), isTrue);
+    });
+
+    test('is idempotent: revoking twice, or revoking a friendship that never '
+        'existed, is the same 204', () async {
+      await makeFriends();
+
+      expect((await revoke(alicePhone, aliceId, bobId)).statusCode, 204);
+      expect((await revoke(alicePhone, aliceId, bobId)).statusCode, 204);
+      // Never friends at all, and an account that does not exist -- both
+      // answer identically, so this route is no enumeration oracle either.
+      expect(
+        (await revoke(alicePhone, aliceId, 'no-such-account')).statusCode,
+        204,
+      );
+    });
+
+    test('re-friending afterwards works end to end', () async {
+      await makeFriends();
+      await revoke(alicePhone, aliceId, bobId);
+
+      // An ordinary new request, in the opposite direction this time.
+      await befriend(
+        fromIdentity: bobPhone,
+        fromId: bobId,
+        toUsername: 'alice',
+        toIdentity: alicePhone,
+        toId: aliceId,
+      );
+
+      expect(await friendRequestStore.areMutualFriends(aliceId, bobId), isTrue);
+      expect(await friendsOf(alicePhone, aliceId), hasLength(1));
+      expect(await devicesStatus(bobPhone, aliceId), 200);
+    });
+
+    test('nudges every device of *both* accounts, so the other side finds '
+        'out without waiting for its next poll', () async {
+      await makeFriends();
+      // Alice has a second device, which also has to be told.
+      final aliceDesktop = await newIdentity();
+      expect(
+        (await completeLogin(
+          username: 'alice',
+          password: 'hunter2',
+          identity: aliceDesktop,
+        )).statusCode,
+        200,
+      );
+      notifier.pushes.clear();
+
+      expect((await revoke(alicePhone, aliceId, bobId)).statusCode, 204);
+      await settlePushes(atLeast: 3);
+
+      expect(notifier.pushes.map((p) => p.nodeId).toSet(), {
+        alicePhone.nodeId,
+        aliceDesktop.nodeId,
+        bobPhone.nodeId,
+      });
+      expect(notifier.pushes.map((p) => p.event).toSet(), {
+        AccountEvent.friendRequests,
+      });
+    });
+
+    test('a no-op revocation nudges nobody -- this is not a way to make some '
+        "other account's devices poll on demand", () async {
+      await makeFriends();
+      await revoke(alicePhone, aliceId, bobId);
+      await settlePushes(atLeast: 2);
+      notifier.pushes.clear();
+
+      expect((await revoke(alicePhone, aliceId, bobId)).statusCode, 204);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(notifier.pushes, isEmpty);
+    });
+
+    test('a notifier that throws never turns a successful revocation into an '
+        'error', () async {
+      await makeFriends();
+      notifier
+        ..pushes.clear()
+        ..throwOnNotify = true;
+
+      final response = await revoke(alicePhone, aliceId, bobId);
+
+      expect(response.statusCode, 204);
+      expect(
+        await friendRequestStore.areMutualFriends(aliceId, bobId),
+        isFalse,
+      );
+    });
+
+    test('is reachable on the *real mounted* server, and does not shadow (or '
+        'get shadowed by) its same-shape siblings', () async {
+      final mountedRouter = Router()
+        ..mount(
+          '/accounts/',
+          buildAccountRouter(accountStore, friendRequestStore).call,
+        );
+      final mounted = await shelf_io.serve(mountedRouter.call, 'localhost', 0);
+      addTearDown(() => mounted.close(force: true));
+      final mountedUrl = 'http://localhost:${mounted.port}';
+      await makeFriends();
+
+      // The sibling that pins `devices` in the same middle position must
+      // still resolve to its own handler...
+      final devicesPath = '/accounts/$aliceId/devices/${alicePhone.nodeId}';
+      expect(
+        (await http.delete(
+          Uri.parse('$mountedUrl$devicesPath'),
+          headers: await signedHeaders(
+            alicePhone,
+            method: 'DELETE',
+            path: devicesPath,
+          ),
+        )).statusCode,
+        204,
+      );
+      expect(
+        (await accountStore.findById(aliceId))!.devices,
+        isEmpty,
+        reason: 'DELETE /<id>/friends/<id> swallowed the device-unlink route',
+      );
+
+      // ...and the new route resolves to *its* handler through the mount.
+      // Alice signs with the device she just unlinked, so a fresh one is
+      // needed to prove the revocation itself, not the unlink.
+      final aliceLaptop = await newIdentity();
+      expect(
+        (await completeLogin(
+          username: 'alice',
+          password: 'hunter2',
+          identity: aliceLaptop,
+        )).statusCode,
+        200,
+      );
+      final path = '/accounts/$aliceId/friends/$bobId';
+      final response = await http.delete(
+        Uri.parse('$mountedUrl$path'),
+        headers: await signedHeaders(aliceLaptop, method: 'DELETE', path: path),
+      );
+
+      expect(response.statusCode, 204);
+      expect(
+        await friendRequestStore.areMutualFriends(aliceId, bobId),
+        isFalse,
+      );
+    });
+  });
+
   group("a device's relayUrl -- the one piece of reachability this service "
       'records', () {
     test('login/complete records it, and both device-listing routes return '
