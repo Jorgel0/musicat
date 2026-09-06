@@ -75,3 +75,76 @@ you don't need to set this at all.
 - To stop the stack: `docker-compose down` (add `-v` to also delete the
   persisted data — this changes Musicat Server's node identity and forgets
   slskd's cache/database).
+
+## Running your own relay (optional)
+
+A **relay** is the piece that lets two Musicat nodes reach each other when
+both sit behind NAT — which is nearly always. Each node holds one *outbound*
+WebSocket to it and the relay forwards requests down that tunnel (ADR
+[0033](adr/0033-self-hosted-relay.md)). The same process also hosts the
+**account service**: usernames, passwords, device lists and friend requests
+(ADR [0048](adr/0048-account-service-foundation.md)).
+
+You do not need your own — the app ships with one configured. Run your own
+if you would rather not depend on somebody else's box. Two things to know
+before you do:
+
+- **Accounts are per-relay.** People using a different relay cannot add you
+  by username. Pairing codes and QR invites still work across relays.
+- **The relay is a dumb pipe.** It authenticates nodes but cannot read or
+  forge what it carries: every request is signed end to end and every
+  authorization check happens at the endpoints. Running one does not make
+  you able to read your users' traffic — but it does let you see *who* talks
+  to whom, which is a good reason to put TLS in front of it.
+
+### What it needs
+
+- A machine with a **real public IP** and a port reachable from the
+  internet. Carrier-grade NAT (a WAN address in `100.64.0.0/10`) makes this
+  impossible no matter how you configure the router; ask your ISP for a
+  public IPv4.
+- A **DNS name**, not a bare IP. Not cosmetic: if your address ever changes,
+  every installed copy pointing at an IP breaks at once with no fix short of
+  shipping a new build, whereas a name just follows. A free dynamic-DNS
+  name is fine, with a timer that keeps it current.
+
+### Running it
+
+```
+cd server
+MUSICAT_RELAY_DATA_DIR=/var/lib/musicat-relay PORT=8090 dart run bin/relay.dart
+```
+
+Point each node at it with `MUSICAT_RELAY_URL` (or the app's Relay URL
+setting). The data directory holds the username directory, accounts and
+friend requests — back it up; losing it loses every account.
+
+### TLS
+
+Put a terminating proxy in front rather than teaching the relay about
+certificates. With [Caddy](https://caddyserver.com) the whole config is:
+
+```
+relay.example.com {
+	reverse_proxy localhost:8090 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+```
+
+Caddy obtains and renews a Let's Encrypt certificate by itself. Nodes then
+use `wss://relay.example.com/connect`.
+
+Two details that will bite you otherwise:
+
+- **Keep port 80 open forever**, not just for the first certificate. Renewal
+  uses the same HTTP challenge every ~60 days; closing 80 breaks TLS about
+  two months later, silently until it does.
+- **The `X-Forwarded-For` line matters.** The account service rate-limits
+  new accounts per source address, and behind a proxy every request
+  otherwise arrives as `127.0.0.1` and the whole internet shares one budget.
+  The relay only trusts that header on a loopback connection, so a proxy on
+  the same host is exactly the case it is safe for.
+
+If you keep an existing plain-`ws://` port open alongside, devices already
+paired against it keep working — useful when migrating.
