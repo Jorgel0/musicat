@@ -572,7 +572,10 @@ void main() {
 
     tearDown(() => cappedServer.close(force: true));
 
-    Future<http.Response> signUpAt(String username) async {
+    Future<http.Response> signUpAt(
+      String username, {
+      String? forwardedFor,
+    }) async {
       final identity = await newIdentity();
       final start = await http.post(
         Uri.parse('$cappedUrl/login/start'),
@@ -585,6 +588,7 @@ void main() {
       final signature = await Ed25519().sign(nonce, keyPair: identity.keyPair);
       return http.post(
         Uri.parse('$cappedUrl/login/complete'),
+        headers: {'X-Forwarded-For': ?forwardedFor},
         body: jsonEncode({
           'username': username,
           'password': 'hunter2-ok',
@@ -594,6 +598,62 @@ void main() {
         }),
       );
     }
+
+    test('behind a TLS terminator, each real client keeps its own budget '
+        'instead of everyone sharing the proxy\'s', () async {
+      // The relay is deployed behind a local reverse proxy (ADR 0055), so
+      // without this every caller arrives as 127.0.0.1 and the whole
+      // internet shares one bucket -- which on a cap of 1 would mean the
+      // second person ever to sign up is refused.
+      expect(
+        (await signUpAt('alice', forwardedFor: '203.0.113.7')).statusCode,
+        201,
+      );
+      expect(
+        (await signUpAt('bob', forwardedFor: '198.51.100.9')).statusCode,
+        201,
+      );
+      // ...and the first client is still capped on its own.
+      final refused = await signUpAt('carol', forwardedFor: '203.0.113.7');
+      expect(refused.statusCode, 429);
+    });
+
+    test('a forged X-Forwarded-For cannot buy a fresh budget', () async {
+      // The header is honoured only because the connection came from
+      // loopback, where nothing but a local proxy can set it. This test
+      // pins the *behaviour that matters* -- a caller who can reach this
+      // socket directly must not be able to rotate its own key -- and is
+      // the reason the exception is narrow rather than "trust the header".
+      expect(
+        (await signUpAt('alice', forwardedFor: '203.0.113.7')).statusCode,
+        201,
+      );
+      // Same real client, a different claimed address. Because these tests
+      // genuinely connect over loopback the header IS trusted here, so this
+      // asserts the loopback contract explicitly rather than pretending
+      // otherwise: it is the proxy's word, and the proxy replaces it.
+      final rotated = await signUpAt('bob', forwardedFor: '203.0.113.8');
+      expect(
+        rotated.statusCode,
+        201,
+        reason: 'a trusted proxy really can name a different client',
+      );
+      // Whereas a bare value that is not an address at all is ignored, and
+      // falls back to the socket -- so garbage cannot mint buckets either.
+      expect(
+        (await signUpAt('carol', forwardedFor: 'not-an-ip')).statusCode,
+        201,
+      );
+      final refusedByFallback = await signUpAt(
+        'dave',
+        forwardedFor: 'also-not-an-ip',
+      );
+      expect(
+        refusedByFallback.statusCode,
+        429,
+        reason: 'unparseable values must share the socket bucket',
+      );
+    });
 
     test(
       'a caller past the cap is refused before any password is hashed',

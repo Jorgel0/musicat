@@ -288,14 +288,36 @@ void main() {
       expect(alice!.displayName, 'alice');
     });
 
-    test('stop() really stops it', () async {
+    test('stop() really stops it -- no further passes are started', () async {
       await logIn();
       poller.start();
       await waitUntil(() => accountServiceCalls.isNotEmpty);
 
       poller.stop();
       expect(poller.isRunning, isFalse);
+
+      // `stop()` cancels the *timer*; it deliberately does not abort a pass
+      // already in flight, because abandoning a half-applied sync would be
+      // worse than letting it finish. A pass makes two calls (the friend
+      // sync, then the pending-request fetch), so clearing the log the
+      // instant stop() returns leaves whichever call was still in the air
+      // to land afterwards -- which failed this test about one run in six
+      // before this wait existed, always with a stray `/friend-requests`.
+      //
+      // So: wait for the log to go quiet first, and only then assert that
+      // nothing *new* starts. That is what stop() actually promises, and
+      // it is what this test is for. Quiescing rather than sleeping a
+      // fixed time keeps it deterministic instead of merely more likely to
+      // pass.
+      var settled = -1;
+      while (settled != accountServiceCalls.length) {
+        settled = accountServiceCalls.length;
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+      }
+
       accountServiceCalls.clear();
+      // Comfortably more than the 40ms poll interval, so a timer that was
+      // still alive would have fired several times over by now.
       await Future<void>.delayed(const Duration(milliseconds: 300));
 
       expect(accountServiceCalls, isEmpty);

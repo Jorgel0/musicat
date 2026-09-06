@@ -70,11 +70,37 @@ Map<String, dynamic> _deviceJson(DeviceLink device) => device.toJson();
 /// `shelf.io.connection_info` key `requireLocal` reads, and the same
 /// treatment of its absence: no special trust for a caller that can't be
 /// placed).
+///
+/// `X-Forwarded-For` is honoured **only when the connection itself came
+/// from loopback**, which is the one case where the header cannot have been
+/// set by the caller: nothing but a process on this machine can open that
+/// socket, and on the deployed relay that process is the TLS terminator in
+/// front of it (ADR 0055). Read from a remote connection the same header
+/// would be an attacker-supplied string handing them a fresh budget per
+/// request -- strictly worse than no limiter at all, which is why the
+/// limiter's own doc comment refuses it outright and why the loopback test
+/// here is the whole basis for making an exception.
+///
+/// The *last* value is taken, not the first: a proxy appends the peer it
+/// actually saw, so anything to its left was supplied by that peer and is
+/// exactly as untrustworthy as the remote case above. (The deployed Caddy
+/// config replaces the header rather than appending, so there is normally
+/// only one.)
 String _clientKeyOf(Request request) {
   final connectionInfo = request.context['shelf.io.connection_info'];
-  return connectionInfo is HttpConnectionInfo
-      ? connectionInfo.remoteAddress.address
-      : 'unknown';
+  if (connectionInfo is! HttpConnectionInfo) return 'unknown';
+
+  final peer = connectionInfo.remoteAddress;
+  if (peer.isLoopback) {
+    final forwarded = request.headers['x-forwarded-for'];
+    if (forwarded != null) {
+      final last = forwarded.split(',').last.trim();
+      if (last.isNotEmpty && InternetAddress.tryParse(last) != null) {
+        return last;
+      }
+    }
+  }
+  return peer.address;
 }
 
 /// Every account's current username, by accountId -- one file read, reused

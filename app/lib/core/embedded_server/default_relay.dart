@@ -4,27 +4,27 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// configured one of their own — **the one place to fill in to give every
 /// fresh install a working relay.**
 ///
-/// Empty today, deliberately: the only relay this project has ever actually
-/// deployed is a bare IP on a home connection (ADR 0035), and whether to
-/// bake that into a public, open-source repo is the project owner's call,
-/// not something to guess at. Everything that consumes this — the fallback
-/// itself ([resolveRelayUrl]), the "your own relay always wins" rule, the
-/// copy in the server settings sheet, and the honest "this copy of Musicat
-/// has nowhere to sign in" state on the account screen — is built and
-/// tested against both states, so shipping a default is a one-line change
-/// here and nothing else.
+/// A **name, not an IP, and `wss://` rather than `ws://`** — both on
+/// purpose. ADR 0035's deployment was a bare home IP over plain
+/// WebSocket, which had two problems a default cannot live with: every
+/// installed copy would break at once and unfixably the day the ISP
+/// changed that address, and every request — including the password sent
+/// at sign-in — would cross the network in the clear. A DNS name kept
+/// current by the relay host, plus a Let's Encrypt certificate, fixes
+/// both. See ADR 0055.
 ///
-/// While it is empty, this app behaves exactly as it did before: an
-/// embedded server with no relay configured, no account service derived
-/// from it (see `accountServiceUrlForRelay`), and a UI that says so up
-/// front instead of letting the user find out through a failed sign-in.
+/// Emptying this string is a supported state, not a broken one: the app
+/// then behaves exactly as it did before a default existed (no relay, no
+/// account service derived from it, and a UI that says so up front rather
+/// than letting the user discover it through a failed sign-in). Anyone
+/// forking Musicat should replace it with their own relay, or clear it.
 ///
 /// Must be a `ws://`/`wss://` (or `http(s)://`) URL of a deployed Musicat
-/// relay, including its path, e.g. `ws://relay.example:8090/connect` — the
-/// account service is derived from it rather than configured separately
-/// (`accountServiceUrlForRelay`), so a value that isn't a relay this
-/// project deployed will also break accounts.
-const defaultRelayUrl = '';
+/// relay, including its path — the account service is derived from it
+/// rather than configured separately (`accountServiceUrlForRelay`), so a
+/// value that isn't a relay this project deployed will also break
+/// accounts.
+const defaultRelayUrl = 'wss://musicat-relay.duckdns.org/connect';
 
 /// Which relay this device should actually use: [configured] (whatever the
 /// user typed in the server settings sheet) when they set one, and
