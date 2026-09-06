@@ -428,9 +428,14 @@ Future<MusicatServerHandle> startMusicatServer({
   // reporting and clearing a session from local disk.
   final accountAppRouter = buildAccountAppRouter(
     sessionStore: sessionStore,
+    // Not for adding friends -- that stays the sync's job -- but so an
+    // explicit accept/send can forget a removal the user has plainly changed
+    // their mind about. See `adoptExplicitly` in that router.
+    friendStore: friendStore,
     accountService: accountService,
     accountUpdates: accountUpdates,
     pendingRequests: pendingFriendRequests,
+    revocations: revocations,
     myRelayUrl: myRelayUrl,
     appApiKey: appApiKey,
   );

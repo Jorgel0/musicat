@@ -12,6 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../features/friends/presentation/musicat_server_config_controller.dart'
     show loadMusicatServerConfigPreference;
+import 'default_relay.dart';
 
 /// Whether this platform can safely run a full HTTP server in-process
 /// alongside the Flutter app for the whole app lifetime — Linux, Windows,
@@ -57,6 +58,26 @@ String? accountServiceUrlForRelay(String? relayUrl) {
   };
   if (scheme == null) return null;
   return '$scheme://${uri.authority}/accounts';
+}
+
+/// The relay this device's own embedded server should connect to on this
+/// run: the one the user configured in the server settings sheet if they
+/// set one, this build's own [defaultRelayUrl] otherwise (see
+/// [resolveRelayUrl]) -- and `null` when there is neither, which runs
+/// exactly as this app always has, with no relay and, consequently, no
+/// account service derived from one ([accountServiceUrlForRelay]).
+///
+/// Resolved here, at the moment the server starts, rather than written
+/// into the user's saved config: a relay the user typed themselves is
+/// never overwritten by a default that shows up in some later build, and a
+/// fresh install picks the default up on its very first run without
+/// needing a restart. (Changing the *stored* value still only takes effect
+/// on the next app start -- see [embeddedServerProvider].)
+Future<String?> resolveEmbeddedServerRelayUrl({
+  String defaultUrl = defaultRelayUrl,
+}) async {
+  final configured = (await loadMusicatServerConfigPreference()).relayUrl;
+  return resolveRelayUrl(configured, defaultUrl: defaultUrl);
 }
 
 /// Starts this device's own embedded Musicat Server directly in-process,
@@ -417,9 +438,11 @@ void setAndroidBackgroundReachable(bool reachable) {
 /// [AsyncValue] progress from `loading` to `data`, the normal way any
 /// [FutureProvider] is consumed.
 ///
-/// Reads this device's configured relay URL
-/// (`MusicatServerConfig.relayUrl`) via `loadMusicatServerConfigPreference()`
-/// — a direct, one-shot [SharedPreferences] read, the exact same function
+/// Reads this device's relay URL via [resolveEmbeddedServerRelayUrl] —
+/// the user's own configured `MusicatServerConfig.relayUrl` if they set
+/// one, this build's [defaultRelayUrl] otherwise — which is in turn a
+/// `loadMusicatServerConfigPreference()` call:
+/// a direct, one-shot [SharedPreferences] read, the exact same function
 /// `bootstrap()` itself already calls once before the [ProviderContainer]
 /// even exists — rather than `ref.watch(musicatServerConfigControllerProvider)`.
 /// This is deliberate, not an oversight: `ref.watch`ing the live, editable
@@ -437,7 +460,15 @@ void setAndroidBackgroundReachable(bool reachable) {
 /// [ProviderContainer]-level proof of this.
 final embeddedServerProvider = FutureProvider<EmbeddedServerInfo?>((ref) async {
   final dataDir = await embeddedServerDataDir();
-  final relayUrl = (await loadMusicatServerConfigPreference()).relayUrl;
+  // Read through [defaultRelayUrlProvider] rather than the constant, so
+  // this and the UI can never disagree about what relay this build ships
+  // — and so this whole chain is reachable from a test. Safe to `watch`: a
+  // plain constant Provider with no dependencies of its own never changes,
+  // so it gives Riverpod nothing to rebuild this (and restart the server)
+  // over — the concern this provider's own doc comment is about.
+  final relayUrl = await resolveEmbeddedServerRelayUrl(
+    defaultUrl: ref.watch(defaultRelayUrlProvider),
+  );
   if (Platform.isAndroid) {
     return _startAndroidEmbeddedServer(dataDir: dataDir, relayUrl: relayUrl);
   }

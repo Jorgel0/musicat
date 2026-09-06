@@ -190,6 +190,31 @@ class PendingRevocationStore {
     if (pending.length != before) await _save(pending);
   });
 
+  /// Drops every entry naming any of [friendAccountIds] as the friend,
+  /// **whatever account it was queued as**, and returns how many went.
+  ///
+  /// The account-agnostic part is deliberate: this is called because the user
+  /// has just re-established a friendship with those accounts, and "I am
+  /// friends with X again" invalidates every queued "I am no longer friends
+  /// with X", including one left over from a session as a different account
+  /// (which [FriendRevocationService.drain] would drop unsent anyway).
+  ///
+  /// One load and, only if something actually matched, one save -- and a
+  /// missing queue file costs a single `existsSync`. That cheapness is a
+  /// requirement, not a detail: the caller is a re-add, which must stay
+  /// instant and work with every network in the world down.
+  Future<int> dropAllFor(Set<String> friendAccountIds) => _locked(() async {
+    if (friendAccountIds.isEmpty) return 0;
+    final pending = await loadAll();
+    final before = pending.length;
+    pending.removeWhere(
+      (entry) => friendAccountIds.contains(entry.friendAccountId),
+    );
+    if (pending.length == before) return 0;
+    await _save(pending);
+    return before - pending.length;
+  });
+
   /// Records one failed delivery attempt for [friendAccountId]/[asAccountId]
   /// and when it may next be retried. No-op if the entry is gone (a
   /// concurrent [dequeue] wins, which is the safe direction: nothing is
@@ -252,10 +277,13 @@ class PendingRevocationStore {
 ///
 /// ## It can never resurrect anything
 ///
-/// This class only ever *sends* revocations. It never reads or writes
-/// `FriendStore`, never adds a friend, and never un-tombstones one. The
-/// worst a corrupt or replayed queue achieves is telling the account service
-/// again about a friendship that is already over.
+/// This class only ever *sends* revocations, or forgets them ([cancel]). It
+/// never reads or writes `FriendStore`, never adds a friend, and never
+/// un-tombstones one. The worst a corrupt or replayed queue achieves is
+/// telling the account service again about a friendship that is already
+/// over; the worst a spurious [cancel] achieves is a friendship that ends
+/// only on this node, which is exactly where this node was before any of
+/// this existed.
 class FriendRevocationService {
   FriendRevocationService({
     required this.sessionStore,
@@ -311,6 +339,28 @@ class FriendRevocationService {
     // removal route must not wait on a socket. `drain` swallows everything.
     unawaited(drain());
   }
+
+  /// Forgets any queued revocation for [friendAccountIds] -- the user has
+  /// re-established those friendships, so this node no longer owes anybody
+  /// the news that they ended.
+  ///
+  /// **The other half of [revoke], and the fix for a silently asymmetric
+  /// friendship.** Unfriending someone while offline queues a revocation;
+  /// re-adding them before it ever drains used to leave that entry in place,
+  /// so connectivity returning delivered a revocation for a friendship that
+  /// was live again -- the other side dropped this node, this node kept them,
+  /// and nothing anywhere said so. The trigger is precisely the being-offline
+  /// scenario the durable queue exists for.
+  ///
+  /// Purely local disk and never a socket, so the re-add it hangs off stays
+  /// instant and works with the account service unreachable. Returns how many
+  /// entries were dropped (0 is the overwhelmingly common case). Callers must
+  /// be an explicit user action -- a re-pair, a friend request sent, a friend
+  /// request accepted -- never a sync: a sync learning that two accounts are
+  /// friends on the service says nothing about whether this node's user still
+  /// wants that.
+  Future<int> cancel(Iterable<String> friendAccountIds) =>
+      store.dropAllFor(friendAccountIds.toSet());
 
   /// Delivers whatever is currently due, and returns how many revocations
   /// this run got rid of -- delivered, definitively refused, expired, or

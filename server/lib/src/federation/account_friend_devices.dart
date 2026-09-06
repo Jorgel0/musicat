@@ -23,26 +23,38 @@ import 'unknown_device_resolver.dart';
 /// - **`relayUrl` is recorded by the account service too** (as of round B of
 ///   Fase 5 — before it, this function's doc comment stated flatly that the
 ///   service records no reachability at all, which is no longer true), so it
-///   has two possible sources. **The locally-learned one wins**, and the
-///   authoritative one is the fallback for a device this node has no cached
-///   relay for — which is every device of a friend it never paired with, and
-///   exactly the case that used to leave such a friend with no way to be
-///   reached at all (ADR 0050).
+///   has two possible sources. **A relay learned by really pairing with that
+///   device wins**, and the authoritative one is used for everything else —
+///   including every device of a friend this node never paired with, the
+///   case that used to leave such a friend with no way to be reached at all
+///   (ADR 0050).
 ///
-/// Preferring the local value is the deliberate half. A cached relay was
-/// established by really pairing with that device (`POST
-/// /api/v1/federation/friends` exchanges `relayUrl` directly between the two
-/// nodes, with no third party in the middle), whereas the authoritative one
-/// is a claim relayed through the account service. Both point at a relay
-/// that still has to prove control of the target nodeId before it can
-/// forward anything — a wrong relay can misroute or drop a request, never
-/// read or forge one — so this is a robustness preference, not a trust
-/// boundary: first-hand knowledge beats second-hand when there is a
-/// disagreement, and second-hand is infinitely better than nothing.
+/// Preferring the paired value is the deliberate half. It was established by
+/// really pairing with that device (`POST /api/v1/federation/friends`
+/// exchanges `relayUrl` directly between the two nodes, with no third party
+/// in the middle), whereas the authoritative one is a claim relayed through
+/// the account service. Both point at a relay that still has to prove control
+/// of the target nodeId before it can forward anything — a wrong relay can
+/// misroute or drop a request, never read or forge one — so this is a
+/// robustness preference, not a trust boundary: first-hand knowledge beats
+/// second-hand when there is a disagreement, and second-hand is infinitely
+/// better than nothing.
+///
+/// **The preference is keyed on [FriendDevice.relayUrlFromPairing], not on
+/// "there is a cached value", and that distinction is the whole point.** The
+/// first version of this function said `cached?.relayUrl ?? authoritative`,
+/// which reads like the rule above and is not it: this function *writes* the
+/// cache, so from the second sync onward the cached value is the
+/// authoritative one and the `??` never falls through again. A friend's relay
+/// therefore froze at whatever it was the first time this node synced them —
+/// permanently unreachable for an account-only friend, whose `relayUrl` is
+/// their only candidate, and not fixable by re-syncing. Reproduced: first
+/// sync `relay-ONE`, service then says `relay-TWO`, second sync still
+/// `relay-ONE`.
 ///
 /// A device this node *has* paired with, whose relay has since changed, is
-/// therefore refreshed by re-pairing rather than by the account service. That
-/// is a real (if narrow) staleness cost, accepted knowingly: the stale relay
+/// still refreshed by re-pairing rather than by the account service. That is
+/// a real (if narrow) staleness cost, accepted knowingly: the stale relay
 /// simply answers `502` and reachability falls through to the next candidate
 /// (`friend_reachability.dart` tries every direct address before any relay,
 /// and bounds each relay attempt separately).
@@ -52,19 +64,32 @@ List<FriendDevice> mergeFriendDevices(
 ) {
   final byNodeId = {for (final device in cached) device.nodeId: device};
   return [
-    for (final device in authoritative)
-      FriendDevice(
-        nodeId: device.nodeId,
-        publicKeyBase64: device.publicKeyBase64,
-        address: byNodeId[device.nodeId]?.address,
-        udpCandidate: byNodeId[device.nodeId]?.udpCandidate,
-        // `??` on the *whole* cached relay, so an explicitly-cleared local
-        // relay (null) still falls back to the authoritative one rather than
-        // staying null forever.
-        relayUrl: byNodeId[device.nodeId]?.relayUrl ?? device.relayUrl,
-        linkedAt: device.linkedAt,
-      ),
+    for (final device in authoritative) _merge(byNodeId[device.nodeId], device),
   ];
+}
+
+/// One device's worth of [mergeFriendDevices] — the authoritative [link]
+/// with whatever [cached] holds that the account service does not record.
+FriendDevice _merge(FriendDevice? cached, DeviceLink link) {
+  // Only a *paired* relay outranks the authoritative one, and only if there
+  // really is one: a paired device whose relay this node never learned (or
+  // that explicitly cleared it) still falls back rather than staying null
+  // forever.
+  final keepPairedRelay =
+      cached != null && cached.relayUrlFromPairing && cached.relayUrl != null;
+  return FriendDevice(
+    nodeId: link.nodeId,
+    publicKeyBase64: link.publicKeyBase64,
+    address: cached?.address,
+    udpCandidate: cached?.udpCandidate,
+    relayUrl: keepPairedRelay ? cached.relayUrl : link.relayUrl,
+    // Carried, not re-derived: the value written back here is authoritative
+    // unless a paired one was kept, and next time round that is exactly the
+    // question this asks. Re-deriving it from "the cache has a value" is the
+    // bug this whole flag exists to prevent.
+    relayUrlFromPairing: keepPairedRelay,
+    linkedAt: link.linkedAt,
+  );
 }
 
 /// Resolves an incoming nodeId that matched *no* known friend's cached
@@ -229,15 +254,27 @@ class FriendDeviceRefresher {
   /// cached device sets were actually updated. Overlapping runs are
   /// skipped (returns 0) rather than queued.
   ///
-  /// **Abandons the rest of the sweep the first time the account service
-  /// looks unreachable.** Being down is a property of the service, not of
-  /// one friend, so continuing would just pay
+  /// **Abandons the rest of the sweep the first time the account service is
+  /// genuinely unreachable, and only then.** Being down is a property of the
+  /// service, not of one friend, so continuing would just pay
   /// [AccountServiceClient.timeout] again per remaining account friend —
   /// five seconds each, serially, on every sweep, forever, for a result
   /// already known. Nothing is lost by stopping: a failed fetch never
   /// changes the cache anyway, and the next scheduled sweep retries the
   /// whole list from the top. Deliberately not a backoff state machine —
   /// [refreshInterval] is already the retry cadence.
+  ///
+  /// A friend the service *answers* about and refuses (`403`, `404`) is
+  /// **skipped, and the sweep continues**. That distinction is load-bearing
+  /// rather than tidy: a `403` here is permanent (an account-based friend who
+  /// is not a mutual friend on the account service — exactly what `POST
+  /// /api/v1/federation/friends` with a confirmed accountId creates, ADR
+  /// 0049) and it sits at the same position in the list every time, so
+  /// treating it as "the service is down" meant every friend *after* it
+  /// never refreshed again — their unlinked devices staying trusted here
+  /// forever, which is the one thing this class exists to prevent.
+  /// [AccountServiceClient.fetchDevicesOf] carries the distinction its
+  /// `devicesOf` shorthand throws away.
   Future<int> refreshAll() async {
     if (_running) return 0;
     _running = true;
@@ -257,8 +294,8 @@ class FriendDeviceRefresher {
 
   /// Refreshes one friend account's cached device set. Returns whether the
   /// local cache was actually updated — `false` for an unknown or removed
-  /// account, a legacy device-pinned friend, or an unreachable account
-  /// service.
+  /// account, a legacy device-pinned friend, an account service that refused
+  /// to answer for this account, or an unreachable one.
   Future<bool> refresh(String accountId) async =>
       await _refresh(accountId) == _RefreshOutcome.updated;
 
@@ -274,13 +311,16 @@ class FriendDeviceRefresher {
       return _RefreshOutcome.skipped;
     }
 
-    final devices = await accountService.devicesOf(accountId);
-    // `devicesOf` collapses every failure mode to null (see its doc
-    // comment), so this covers a refused connection, a timeout and a 5xx
-    // alike — all of them reasons to stop the sweep rather than repeat it
-    // per friend. A 404 for one account would be misread as the service
-    // being down; that costs one skipped sweep, which the next one undoes.
-    if (devices == null) return _RefreshOutcome.serviceUnreachable;
+    final fetched = await accountService.fetchDevicesOf(accountId);
+    // `reachable: false` is the only thing that means "the service is down"
+    // -- a refused connection, a DNS failure, or the timeout elapsing. An
+    // answer this node can't use (`403`, `404`, an unparseable body) says
+    // nothing at all about the next account, so it skips this friend and the
+    // sweep carries on. See [refreshAll]'s doc comment for why that is not a
+    // cosmetic difference.
+    if (!fetched.reachable) return _RefreshOutcome.serviceUnreachable;
+    final devices = fetched.devices;
+    if (devices == null) return _RefreshOutcome.skipped;
 
     final updated = await friendStore.updateDevices(
       accountId,

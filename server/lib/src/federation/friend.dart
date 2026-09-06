@@ -26,6 +26,7 @@ class FriendDevice {
     this.address,
     this.udpCandidate,
     this.relayUrl,
+    this.relayUrlFromPairing = false,
     this.linkedAt,
   });
 
@@ -45,11 +46,42 @@ class FriendDevice {
   /// This device's own relay WebSocket endpoint (e.g.
   /// `ws://relay.example.com/connect`), learned either at pairing time or
   /// from the account service (see `mergeFriendDevices`, which prefers the
-  /// former) — the fallback address for reaching it when [address] itself
-  /// isn't (ADR 0032/0033): a request to it becomes
+  /// former — [relayUrlFromPairing] is how it tells the two apart) — the
+  /// fallback address for reaching it when [address] itself isn't (ADR
+  /// 0032/0033): a request to it becomes
   /// `<relayUrl's http(s) origin>/<nodeId>/<path>` instead of
   /// `http://$address/<path>`. `null` if neither source reported a relay.
   final String? relayUrl;
+
+  /// Whether [relayUrl] was learned by **really pairing with this device**
+  /// (`POST /api/v1/federation/friends`, which exchanges it directly between
+  /// the two nodes) rather than copied out of what the account service says.
+  ///
+  /// The provenance has to be stored, not inferred, and the bug that proves
+  /// it is worth spelling out: `mergeFriendDevices` prefers a locally-learned
+  /// relay over the authoritative one, and used to express that as "keep the
+  /// cached value if there is one". But the cache is *written by that same
+  /// merge*, so from the first sync onward the cached value **is** the
+  /// authoritative one — and the preference then pinned a friend to whatever
+  /// relay they happened to be using the first time this node ever synced
+  /// them. For an account-only friend `relayUrl` is the sole reachability
+  /// candidate, so changing relays made them permanently unreachable here.
+  /// This flag is the same shape of answer [Friend.confirmedByAccountService]
+  /// gives one level up: remember *where a fact came from*, don't re-derive
+  /// it from the fact's presence.
+  ///
+  /// Defaults to `false`, and **an entry written before this field existed
+  /// loads as `false` too** — deliberately the direction that lets the
+  /// account service correct a frozen value on the next sync. The other
+  /// default would have been "assume paired", which is safe-looking and
+  /// wrong: it would preserve exactly the frozen state this field exists to
+  /// unfreeze, for every `friends.json` already on disk. Getting it wrong
+  /// this way costs at most a genuinely-paired relay being replaced by the
+  /// one that device most recently logged in from (a fresher claim, and no
+  /// trust boundary either way — a relay can misroute or drop a request,
+  /// never read or forge one), and re-pairing marks it paired again. Getting
+  /// it wrong the other way is unrecoverable without re-pairing.
+  final bool relayUrlFromPairing;
 
   /// When the account service says this device was linked to its account —
   /// `null` for a device this node learned at pairing time rather than
@@ -61,6 +93,7 @@ class FriendDevice {
     String? address,
     String? udpCandidate,
     String? relayUrl,
+    bool? relayUrlFromPairing,
     DateTime? linkedAt,
   }) => FriendDevice(
     nodeId: nodeId,
@@ -68,6 +101,7 @@ class FriendDevice {
     address: address ?? this.address,
     udpCandidate: udpCandidate ?? this.udpCandidate,
     relayUrl: relayUrl ?? this.relayUrl,
+    relayUrlFromPairing: relayUrlFromPairing ?? this.relayUrlFromPairing,
     linkedAt: linkedAt ?? this.linkedAt,
   );
 
@@ -77,6 +111,7 @@ class FriendDevice {
     'address': address,
     'udpCandidate': udpCandidate,
     'relayUrl': relayUrl,
+    'relayUrlFromPairing': relayUrlFromPairing,
     'linkedAt': linkedAt?.toIso8601String(),
   };
 
@@ -86,6 +121,10 @@ class FriendDevice {
     address: json['address'] as String?,
     udpCandidate: json['udpCandidate'] as String?,
     relayUrl: json['relayUrl'] as String?,
+    // Missing in every file written before this field existed, and
+    // defaulted to the *unpaired* answer -- see the field's own doc comment
+    // for why that direction, and not the reassuring-looking other one.
+    relayUrlFromPairing: json['relayUrlFromPairing'] as bool? ?? false,
     linkedAt: json['linkedAt'] == null
         ? null
         : DateTime.parse(json['linkedAt'] as String),
@@ -144,6 +183,10 @@ class Friend {
         address: address,
         udpCandidate: udpCandidate,
         relayUrl: relayUrl,
+        // Everything this factory is handed came from really pairing with
+        // that device, [relayUrl] included -- see
+        // [FriendDevice.relayUrlFromPairing].
+        relayUrlFromPairing: true,
       ),
     ],
     displayName: displayName,
@@ -316,6 +359,11 @@ class Friend {
               address: json['address'] as String?,
               udpCandidate: json['udpCandidate'] as String?,
               relayUrl: json['relayUrl'] as String?,
+              // A flat, pre-Fase-5 entry can only have been written by
+              // pairing: the account service did not exist, let alone record
+              // a relay. Unlike the `devices` shape above, the provenance of
+              // this one is not unknown -- it is known to be pairing.
+              relayUrlFromPairing: true,
             ),
           ]
         : [

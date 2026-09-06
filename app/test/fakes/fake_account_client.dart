@@ -12,9 +12,10 @@ class FakeAccountClient implements AccountClient {
   FakeAccountClient({
     this.account,
     FriendRequestsSnapshot? requests,
-    this.createdOnSignIn = false,
+    Set<String> existingUsernames = const {},
   }) : requests =
-           requests ?? const FriendRequestsSnapshot(requests: [], live: true);
+           requests ?? const FriendRequestsSnapshot(requests: [], live: true),
+       existingUsernames = {...existingUsernames};
 
   /// Who this fake is currently signed in as — `null` for signed out.
   MyAccount? account;
@@ -22,16 +23,27 @@ class FakeAccountClient implements AccountClient {
   /// What [listFriendRequests] answers, honesty flags included.
   FriendRequestsSnapshot requests;
 
-  /// Whether a successful [signIn] reports having *created* the account
-  /// rather than linked this device to an existing one.
-  bool createdOnSignIn;
+  /// Usernames this fake's service already has an account for. Everything
+  /// else is unknown to it, which is what makes [signIn]'s
+  /// `allowCreate: false` leg answer `404` — the real contract, and the
+  /// only way a test can walk the "no account called that yet — create
+  /// it?" path for real rather than by stubbing an exception.
+  final Set<String> existingUsernames;
 
   Object? signInError;
+
+  /// Thrown by the *create* leg only (`allowCreate: true`). The contract's
+  /// too-short-password `400` can only ever happen there, and a test that
+  /// used [signInError] for it would never get past the first, no-create
+  /// call to reach the case it meant to exercise.
+  Object? createError;
+
   Object? listError;
   Object? sendError;
   Object? respondError;
 
-  final List<({String username, String password})> signInCalls = [];
+  final List<({String username, String password, bool allowCreate})>
+  signInCalls = [];
   final List<String> sentRequests = [];
   final List<({String id, bool accept})> respondCalls = [];
   int signOutCalls = 0;
@@ -41,10 +53,26 @@ class FakeAccountClient implements AccountClient {
   Future<SignInResult> signIn({
     required String username,
     required String password,
+    bool allowCreate = true,
   }) async {
-    signInCalls.add((username: username, password: password));
+    signInCalls.add((
+      username: username,
+      password: password,
+      allowCreate: allowCreate,
+    ));
     final error = signInError;
     if (error != null) throw error;
+    final exists = existingUsernames.contains(username);
+    // The contract this round is built against: an unknown username with
+    // `allowCreate: false` is a 404, not a brand-new account.
+    if (!exists && !allowCreate) {
+      throw const AccountClientException(404, 'No such account');
+    }
+    if (!exists) {
+      final creationError = createError;
+      if (creationError != null) throw creationError;
+    }
+    existingUsernames.add(username);
     account = MyAccount(
       accountId: 'account-$username',
       username: username,
@@ -53,7 +81,7 @@ class FakeAccountClient implements AccountClient {
     return SignInResult(
       accountId: account!.accountId,
       username: username,
-      created: createdOnSignIn,
+      created: !exists,
     );
   }
 

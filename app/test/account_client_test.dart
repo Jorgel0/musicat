@@ -52,25 +52,53 @@ void main() {
       expect(result.created, isFalse);
     });
 
-    test('surfaces the status code for each failure the UI has to tell '
-        'apart', () async {
-      for (final status in [400, 401, 429, 502, 503]) {
-        final client = _clientWith(
-          (options) => FakeHttpResponse(status, {'error': 'nope'}),
-        );
+    test('sends allowCreate on the wire, so the caller decides whether a '
+        'new account may be made at all', () async {
+      late RequestOptions seen;
+      final client = _clientWith((options) {
+        seen = options;
+        return const FakeHttpResponse(200, {
+          'accountId': 'acc-1',
+          'username': 'jorge',
+          'created': false,
+        });
+      });
 
-        expect(
-          () => client.signIn(username: 'jorge', password: 'pw'),
-          throwsA(
-            isA<AccountClientException>().having(
-              (e) => e.statusCode,
-              'statusCode',
-              status,
-            ),
-          ),
-        );
-      }
+      await client.signIn(
+        username: 'jorge',
+        password: 'pw',
+        allowCreate: false,
+      );
+      expect((seen.data as Map)['allowCreate'], isFalse);
+
+      await client.signIn(username: 'jorge', password: 'pw');
+      // Sent explicitly even when it matches the route's own default, so
+      // the request says what it means on its own.
+      expect((seen.data as Map)['allowCreate'], isTrue);
     });
+
+    test(
+      'surfaces the status code for each failure the UI has to tell '
+      'apart, including the 404 that means "no account by that name"',
+      () async {
+        for (final status in [400, 401, 404, 429, 502, 503]) {
+          final client = _clientWith(
+            (options) => FakeHttpResponse(status, {'error': 'nope'}),
+          );
+
+          expect(
+            () => client.signIn(username: 'jorge', password: 'pw'),
+            throwsA(
+              isA<AccountClientException>().having(
+                (e) => e.statusCode,
+                'statusCode',
+                status,
+              ),
+            ),
+          );
+        }
+      },
+    );
   });
 
   group('currentAccount', () {

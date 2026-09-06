@@ -16,7 +16,55 @@ String _generateId() {
   ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }
 
-enum LoginOutcome { created, linked, wrongPassword, invalidUsername }
+/// The one canonical spelling of [username] -- what is stored, what is
+/// looked up, and what every response echoes back.
+///
+/// Usernames are **case-insensitive**, because the alternative was a trap
+/// with no floor: `usernamePattern` allows both cases, an unknown username
+/// used to take the *create* branch with no confirmation, and so typing
+/// `Jorge` instead of `jorge` on a second device silently made a second,
+/// empty account, stranded that device on it, and handed the other spelling
+/// to whoever asked for it next.
+///
+/// Nothing preserves the casing the user typed, deliberately: there is no
+/// display-name field to keep it in, and the login response already
+/// documents its `username` as the canonical spelling rather than whatever
+/// the caller sent (see `AccountLoginResult.username`). One spelling, in one
+/// place, is the whole point.
+String normalizeUsername(String username) => username.toLowerCase();
+
+/// The shortest password [AccountStore.loginOrSignup] will create an account
+/// with. NIST SP 800-63B's floor for a user-chosen memorized secret, and the
+/// only length rule here -- no composition rules, no maximum.
+///
+/// **Enforced on creation only, never on login.** An account created before
+/// this existed may well have a one-character password (the previous check
+/// was `password.isEmpty`, nothing more), and refusing to let its owner log
+/// in would lock them out of their own account to punish a decision the
+/// service allowed them to make.
+const int minPasswordLength = 8;
+
+enum LoginOutcome {
+  created,
+  linked,
+  wrongPassword,
+  invalidUsername,
+
+  /// No account holds this username and the caller asked not to create one
+  /// (`allowCreate: false`). See [AccountStore.loginOrSignup].
+  noSuchAccount,
+
+  /// The password offered for a *new* account is shorter than
+  /// [minPasswordLength]. Never returned for a login.
+  passwordTooShort,
+
+  /// Two or more stored accounts normalize to this same username -- only
+  /// possible for data written before usernames were case-insensitive. Not
+  /// resolvable here without picking a winner, which would silently shadow
+  /// somebody's account, so it is reported instead. See
+  /// [AccountStore.findAllByUsername].
+  ambiguousUsername,
+}
 
 /// The result of [AccountStore.loginOrSignup]. [account] is non-null
 /// exactly when [outcome] is [LoginOutcome.created] or
@@ -34,6 +82,14 @@ class LoginResult {
 
   const LoginResult.invalidUsername()
     : this._(LoginOutcome.invalidUsername, null);
+
+  const LoginResult.noSuchAccount() : this._(LoginOutcome.noSuchAccount, null);
+
+  const LoginResult.passwordTooShort()
+    : this._(LoginOutcome.passwordTooShort, null);
+
+  const LoginResult.ambiguousUsername()
+    : this._(LoginOutcome.ambiguousUsername, null);
 
   final LoginOutcome outcome;
   final Account? account;
@@ -88,12 +144,47 @@ class AccountStore {
     );
   }
 
+  /// The account holding [username], matched **case-insensitively** (see
+  /// [normalizeUsername]), or `null` if there is none.
+  ///
+  /// With two stored accounts that differ only by case -- impossible to
+  /// create now, but possible in data written before this rule existed --
+  /// only the *exact* spelling resolves, and neither entry is touched,
+  /// merged or hidden from [loadAll]. That is a deterministic precedence
+  /// rule in the same spirit as [FriendStore.findByDeviceNodeId]'s, and the
+  /// alternative (picking one of them) would silently hand one person's
+  /// friend requests to the other. Logging in refuses outright in that state
+  /// rather than choosing: see [findAllByUsername] and
+  /// [LoginOutcome.ambiguousUsername].
+  ///
+  /// [FriendStore.findByDeviceNodeId]: ../federation/friend_store.dart
   Future<Account?> findByUsername(String username) async {
-    final accounts = await loadAll();
-    for (final account in accounts) {
+    final matches = await findAllByUsername(username);
+    if (matches.isEmpty) return null;
+    if (matches.length == 1) return matches.single;
+    for (final account in matches) {
       if (account.username == username) return account;
     }
     return null;
+  }
+
+  /// Every stored account whose username normalizes to [username]'s -- one
+  /// entry in every case this service can still produce, and more only for
+  /// accounts written before usernames were case-insensitive.
+  ///
+  /// Exists so that state is *detected and reported* rather than papered
+  /// over: nothing in this class merges two such accounts, renames one, or
+  /// drops one, because each may have its own password, its own devices and
+  /// its own friendships, and picking a winner would silently strand the
+  /// other. An operator resolves it by editing `accounts.json` (there is no
+  /// safe automatic answer -- which of the two keeps the name is a question
+  /// only its owners can settle).
+  Future<List<Account>> findAllByUsername(String username) async {
+    final normalized = normalizeUsername(username);
+    return [
+      for (final account in await loadAll())
+        if (normalizeUsername(account.username) == normalized) account,
+    ];
   }
 
   Future<Account?> findById(String accountId) async {
@@ -108,6 +199,15 @@ class AccountStore {
   /// own devices -- the lookup behind `GET /accounts/by-device/<nodeId>`
   /// and every account route's own signed-request authentication (see
   /// `account_request_auth.dart`).
+  ///
+  /// **A device is linked to at most one account at a time**, enforced by
+  /// [loginOrSignup] unlinking it from every other one, so there is nothing
+  /// here to disambiguate. Before that rule, this returned whichever account
+  /// happened to come first in `accounts.json`, which meant a device that had
+  /// ever linked to account A kept authenticating as A no matter what it
+  /// signed in as afterwards: logging in as B answered `200 created:true` and
+  /// then every account route answered `403 Cannot act as another account`,
+  /// with no way out from the app.
   Future<Account?> findByDeviceNodeId(String nodeId) async {
     final accounts = await loadAll();
     for (final account in accounts) {
@@ -150,12 +250,33 @@ class AccountStore {
   /// you had". Keeping a stale endpoint would send this device's friends to
   /// a relay it is no longer connected to, which costs them a wasted
   /// reachability attempt each time and can never succeed.
+  ///
+  /// [username] is matched and stored **case-insensitively**
+  /// ([normalizeUsername]); [LoginOutcome.ambiguousUsername] reports the one
+  /// state that cannot be resolved that way (two pre-existing accounts
+  /// differing only by case) rather than picking one of them.
+  ///
+  /// [allowCreate] defaults to `true`, which is exactly what this method has
+  /// always done. Passing `false` turns "there is no such account" from a
+  /// signup into a [LoginOutcome.noSuchAccount] refusal that writes nothing
+  /// and hashes nothing -- the opt-in the app needs so a mistyped username
+  /// asks "create a new account?" instead of silently becoming one.
+  ///
+  /// **Logging in unlinks [nodeId] from every other account.** A device acts
+  /// for one account at a time; see [findByDeviceNodeId] for what the absence
+  /// of that rule did. It is safe to do here and nowhere else, because
+  /// reaching this line takes both the target account's password *and* a
+  /// signature from the device itself, so only that device's own owner can
+  /// trigger it -- and it belongs on the login path specifically, never on
+  /// logout, which is purely local, works offline, and deliberately keeps
+  /// this node's friends.
   Future<LoginResult> loginOrSignup({
     required String username,
     required String password,
     required String nodeId,
     required String publicKeyBase64,
     String? relayUrl,
+    bool allowCreate = true,
   }) => _locked(
     () => _loginOrSignupLocked(
       username: username,
@@ -163,6 +284,7 @@ class AccountStore {
       nodeId: nodeId,
       publicKeyBase64: publicKeyBase64,
       relayUrl: relayUrl,
+      allowCreate: allowCreate,
     ),
   );
 
@@ -172,22 +294,39 @@ class AccountStore {
     required String nodeId,
     required String publicKeyBase64,
     String? relayUrl,
+    required bool allowCreate,
   }) async {
-    if (!usernamePattern.hasMatch(username)) {
+    final canonicalUsername = normalizeUsername(username);
+    if (!usernamePattern.hasMatch(canonicalUsername)) {
       return const LoginResult.invalidUsername();
     }
 
     final accounts = await loadAll();
-    final index = accounts.indexWhere(
-      (account) => account.username == username,
-    );
+    final matches = [
+      for (var i = 0; i < accounts.length; i++)
+        if (normalizeUsername(accounts[i].username) == canonicalUsername) i,
+    ];
+    // Refused rather than resolved: with two accounts differing only by case
+    // (only possible in data written before this rule), logging either of
+    // them in means choosing which one owns the name, and choosing wrong
+    // hands somebody the other person's friendships. See
+    // [findAllByUsername].
+    if (matches.length > 1) return const LoginResult.ambiguousUsername();
+    final index = matches.isEmpty ? -1 : matches.single;
     final now = DateTime.now().toUtc();
 
     if (index == -1) {
+      // Both checks before the Argon2id hash, which is the expensive part:
+      // there is no reason to spend 200ms deriving a key for a request that
+      // is about to be refused.
+      if (!allowCreate) return const LoginResult.noSuchAccount();
+      if (password.length < minPasswordLength) {
+        return const LoginResult.passwordTooShort();
+      }
       final hashed = await hashPassword(password);
       final account = Account(
         accountId: _generateId(),
-        username: username,
+        username: canonicalUsername,
         passwordHash: hashed.hash,
         passwordSalt: hashed.salt,
         argon2Params: hashed.params,
@@ -202,6 +341,11 @@ class AccountStore {
         createdAt: now,
       );
       accounts.add(account);
+      // A brand-new account is still a new home for this device, so the
+      // device leaves whatever account it was on before -- otherwise
+      // `findByDeviceNodeId` would keep answering with the old one and the
+      // account just created would be unusable from the device that made it.
+      _unlinkFromOtherAccounts(accounts, nodeId, keep: accounts.length - 1);
       await _save(accounts);
       return LoginResult.created(account);
     }
@@ -211,7 +355,12 @@ class AccountStore {
       password,
       account.storedPasswordHash,
     );
+    // Strictly before anything is unlinked or written: a wrong password must
+    // still leave this device exactly where it was, on whatever account it
+    // was already acting for.
     if (!passwordIsValid) return const LoginResult.wrongPassword();
+
+    final movedHere = _unlinkFromOtherAccounts(accounts, nodeId, keep: index);
 
     final existingIndex = account.devices.indexWhere(
       (device) => device.nodeId == nodeId,
@@ -223,8 +372,12 @@ class AccountStore {
       // never reshuffles a friend's reachability preference order
       // (`Friend.devicesByPreference`). What a re-login *does* refresh is
       // [DeviceLink.relayUrl]; if that hasn't changed either, nothing is
-      // written at all.
-      if (existing.relayUrl == relayUrl) return LoginResult.linked(account);
+      // written at all -- unless this login moved the device off another
+      // account, which is a change to somebody's file either way.
+      if (existing.relayUrl == relayUrl) {
+        if (movedHere) await _save(accounts);
+        return LoginResult.linked(account);
+      }
 
       final devices = [...account.devices];
       devices[existingIndex] = DeviceLink(
@@ -253,6 +406,38 @@ class AccountStore {
     accounts[index] = updated;
     await _save(accounts);
     return LoginResult.linked(updated);
+  }
+
+  /// Drops [nodeId] from every account in [accounts] except the one at
+  /// [keep], in place. Returns whether anything actually changed, which is
+  /// what tells the caller it now has to save even on an otherwise
+  /// no-op login.
+  ///
+  /// Only ever called with the target account's password already verified
+  /// (or the account being created right now by that same device), so this
+  /// can never be used to knock somebody else's device off their account.
+  /// Rewrites device lists only -- no account is ever deleted, so the
+  /// indices [_loginOrSignupLocked] is holding stay valid, and an account
+  /// left with no devices is simply one nobody is currently signed in on: its
+  /// password still works and re-links a device on the next login.
+  bool _unlinkFromOtherAccounts(
+    List<Account> accounts,
+    String nodeId, {
+    required int keep,
+  }) {
+    var changed = false;
+    for (var i = 0; i < accounts.length; i++) {
+      if (i == keep) continue;
+      final account = accounts[i];
+      if (!account.devices.any((device) => device.nodeId == nodeId)) continue;
+      accounts[i] = account.copyWith(
+        devices: account.devices
+            .where((device) => device.nodeId != nodeId)
+            .toList(),
+      );
+      changed = true;
+    }
+    return changed;
   }
 
   /// Unlinks [nodeId] from [accountId]'s device list, if it's currently

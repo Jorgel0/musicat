@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../core/embedded_server/default_relay.dart';
 import '../../../core/embedded_server/embedded_server.dart';
 import '../../../core/network/federation/account_client.dart';
 import '../../../core/network/federation/federation_client.dart';
@@ -81,6 +82,46 @@ final effectiveMusicatServerConfigProvider = Provider<MusicatServerConfig>((
     loading: () => raw.copyWith(host: ''),
     error: (error, stackTrace) => raw.copyWith(host: ''),
   );
+});
+
+/// Which relay this device's built-in server will connect to the next time
+/// it starts: the one the user typed if they typed one, this build's
+/// [defaultRelayUrl] otherwise, `null` when there is neither. See
+/// [resolveRelayUrl] — a stored value always wins, and an empty stored
+/// value means "use the default", never "no relay".
+///
+/// Reads the *stored* config rather than the effective one: this is about
+/// what was configured, not about what the currently-running server
+/// managed to connect to (that is `myNodeInfoProvider.relayUrl`, which the
+/// relay status row shows).
+final effectiveRelayUrlProvider = Provider<String?>((ref) {
+  final configured = ref.watch(
+    musicatServerConfigControllerProvider.select((c) => c.relayUrl),
+  );
+  return resolveRelayUrl(
+    configured,
+    defaultUrl: ref.watch(defaultRelayUrlProvider),
+  );
+});
+
+/// `true` when accounts have nowhere at all to go on this device: it runs
+/// the built-in server, and that server has no relay to reach — neither
+/// one the user configured nor one this build ships with. Signing in,
+/// friend requests and adding a friend by username are all impossible in
+/// that state, and the UI says so up front (see `account_screen.dart`)
+/// instead of letting the user discover it through a sign-in that fails
+/// with something that reads like a temporary glitch.
+///
+/// Deliberately `false` for a separately self-hosted server
+/// ([MusicatServerConfig.useEmbeddedServer] off): that server is
+/// configured through its own environment, and this app has no way to know
+/// what it has — claiming it has nothing would be a guess.
+final accountsHaveNoServerProvider = Provider<bool>((ref) {
+  final useEmbeddedServer = ref.watch(
+    musicatServerConfigControllerProvider.select((c) => c.useEmbeddedServer),
+  );
+  if (!useEmbeddedServer) return false;
+  return ref.watch(effectiveRelayUrlProvider) == null;
 });
 
 /// `null` when no Musicat Server is configured yet — the Friends screen

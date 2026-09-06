@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:musicat/core/embedded_server/default_relay.dart';
 import 'package:musicat/core/embedded_server/embedded_server.dart';
 import 'package:musicat/features/friends/domain/musicat_server_config.dart';
 import 'package:musicat/features/friends/presentation/friends_controller.dart';
@@ -353,6 +354,74 @@ void main() {
 
       await Future<void>.delayed(const Duration(milliseconds: 50));
       expect(container.read(friendsControllerProvider), const FriendsState());
+    });
+  });
+
+  group('which relay accounts get to use', () {
+    // Stands in for `defaultRelayUrl` — the single constant a build fills
+    // in to ship a relay with the app.
+    const shipped = 'ws://relay.test:8090/connect';
+
+    ProviderContainer containerWith({
+      required MusicatServerConfig config,
+      required String defaultRelay,
+    }) {
+      final container = ProviderContainer(
+        overrides: [
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(config),
+          ),
+          defaultRelayUrlProvider.overrideWithValue(defaultRelay),
+        ],
+      );
+      addTearDown(container.dispose);
+      return container;
+    }
+
+    test('a fresh install with a shipped relay has one, with nothing '
+        'configured', () {
+      final container = containerWith(config: _embedded, defaultRelay: shipped);
+
+      expect(container.read(effectiveRelayUrlProvider), shipped);
+      expect(container.read(accountsHaveNoServerProvider), isFalse);
+    });
+
+    test("a relay the user configured wins, and the build's own never "
+        'replaces it', () {
+      final container = containerWith(
+        config: _embedded.copyWith(relayUrl: 'wss://mine.example/connect'),
+        defaultRelay: shipped,
+      );
+
+      expect(
+        container.read(effectiveRelayUrlProvider),
+        'wss://mine.example/connect',
+      );
+      expect(container.read(accountsHaveNoServerProvider), isFalse);
+    });
+
+    test('nothing configured and nothing shipped is the one state where '
+        'accounts genuinely have nowhere to go', () {
+      final container = containerWith(config: _embedded, defaultRelay: '');
+
+      expect(container.read(effectiveRelayUrlProvider), isNull);
+      expect(container.read(accountsHaveNoServerProvider), isTrue);
+    });
+
+    test("a user's own relay is enough on its own, with nothing shipped", () {
+      final container = containerWith(
+        config: _embedded.copyWith(relayUrl: 'wss://mine.example/connect'),
+        defaultRelay: '',
+      );
+
+      expect(container.read(accountsHaveNoServerProvider), isFalse);
+    });
+
+    test('a separately self-hosted server is never claimed to have no '
+        'relay: this app cannot see how that server is configured', () {
+      final container = containerWith(config: _manual, defaultRelay: '');
+
+      expect(container.read(accountsHaveNoServerProvider), isFalse);
     });
   });
 }

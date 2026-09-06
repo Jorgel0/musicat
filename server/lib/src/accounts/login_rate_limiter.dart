@@ -19,6 +19,17 @@
 /// account. A future round could add IP-scoped limiting on top of this if
 /// it turns out to matter in practice (e.g. one caller spraying guesses
 /// across many different usernames).
+///
+/// **This class only ever sees *failures*, so it never throttled account
+/// creation** -- a signup succeeds on the first try, so no counter here ever
+/// moved for one. `account_creation_limiter.dart` covers that, per source
+/// address; the two stay separate because they count different things about
+/// different attacks.
+///
+/// Keyed by the *canonical* (lower-cased) username, which
+/// `account_routes.dart` normalizes before every call here: keying on the raw
+/// string would hand an attacker a fresh budget of guesses per
+/// capitalization of the same account.
 class LoginRateLimiter {
   LoginRateLimiter({
     this.maxAttempts = 5,

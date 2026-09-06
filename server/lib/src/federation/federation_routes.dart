@@ -116,7 +116,12 @@ Response _verificationErrorResponse(
 /// `DELETE /friends/<id>` is instant, local, and permanent: it also writes
 /// a [FriendTombstone] (see `friend_store.dart`), so no later device-list
 /// refresh can bring that friend back. Re-adding them explicitly (another
-/// pairing) clears it.
+/// pairing) clears it, **and cancels any revocation that removal had queued
+/// but not yet delivered** — including one queued under the account they
+/// were removed as, when the re-pair happens offline and can only record
+/// them device-pinned. Without that, the pair of actions the durable queue
+/// exists for (unfriend offline, change your mind offline) ended in a
+/// silently one-sided friendship the moment connectivity came back.
 ///
 /// When [revocations] is configured *and* the friend being removed is an
 /// **account-based** one, `DELETE /friends/<id>` additionally records a
@@ -295,23 +300,53 @@ Router buildFederationRouter(
       address: address,
       udpCandidate: udpCandidate as String?,
       relayUrl: relayUrl as String?,
+      // `relayUrlFromPairing` is deliberately not set here: `FriendStore.add`
+      // stamps it, the same way it decides `confirmedByAccountService`, so
+      // there is one place that knows what an entry written by pairing means
+      // rather than two that can drift.
     );
-    await friendStore.add(
-      confirmedAccountId == null
-          ? Friend.devicePinned(
-              nodeId: nodeId,
-              publicKeyBase64: publicKeyBase64,
-              address: address,
-              displayName: body['displayName'] as String?,
-              udpCandidate: udpCandidate,
-              relayUrl: relayUrl,
-            )
-          : Friend(
-              accountId: confirmedAccountId,
-              devices: [device],
-              displayName: body['displayName'] as String?,
-            ),
-    );
+    final friendToAdd = confirmedAccountId == null
+        ? Friend.devicePinned(
+            nodeId: nodeId,
+            publicKeyBase64: publicKeyBase64,
+            address: address,
+            displayName: body['displayName'] as String?,
+            udpCandidate: udpCandidate,
+            relayUrl: relayUrl,
+          )
+        : Friend(
+            accountId: confirmedAccountId,
+            devices: [device],
+            displayName: body['displayName'] as String?,
+          );
+
+    // Read *before* the add, because [FriendStore.add] clears the tombstone
+    // of the account it writes, and a tombstone is the only local record of
+    // which account a given device belonged to when it was removed. That
+    // mapping is what makes this work in the case it exists for: unfriending
+    // an account-based friend with no connectivity, then re-pairing with the
+    // same device while still offline, records a *device-pinned* friend under
+    // a different id entirely -- so cancelling by the new entry's accountId
+    // alone would miss the revocation queued under the old one.
+    final reAddedAccountIds = revocations == null
+        ? const <String>{}
+        : {
+            friendToAdd.accountId,
+            for (final tombstone in await friendStore.loadTombstones())
+              if (tombstone.deviceNodeIds.contains(nodeId)) tombstone.accountId,
+          };
+
+    await friendStore.add(friendToAdd);
+
+    // Strictly after the local add, mirroring `DELETE /friends/<id>`'s own
+    // ordering, and for the same reason: a crash in between must lose the
+    // *propagation*, never the local decision. Re-adding somebody has to
+    // cancel the revocation their removal queued -- otherwise connectivity
+    // returning delivers "we are not friends" for a friendship that is live
+    // again, the other side drops this node, and nothing anywhere reports
+    // it. One local file operation, no socket, so pairing stays instant and
+    // offline-safe (see [FriendRevocationService.cancel]).
+    await revocations?.cancel(reAddedAccountIds);
 
     if (udpCandidate != null) {
       final parts = udpCandidate.split(':');

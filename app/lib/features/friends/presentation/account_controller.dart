@@ -26,24 +26,34 @@ class AccountSessionController extends AsyncNotifier<MyAccount?> {
     return client.currentAccount();
   }
 
-  /// Signs in as [username], creating the account if that username is
-  /// free — one call, one flow (see [AccountClient.signIn]). Returns what
-  /// actually happened so the caller can say "account created" or
-  /// "signed in" truthfully.
+  /// Signs in as [username] — one call, one flow (see
+  /// [AccountClient.signIn]). Returns what actually happened so the caller
+  /// can say "account created" or "signed in" truthfully.
+  ///
+  /// [allowCreate] is passed straight through: the sign-in screen asks
+  /// with `false` first and only retries with `true` once the user has
+  /// confirmed they meant to create a new account, so a mistyped username
+  /// can no longer become one by accident.
   ///
   /// Lets [AccountClientException] out deliberately: the sign-in screen
   /// needs the status code to tell a wrong password from a lockout from
-  /// "accounts aren't reachable right now", and swallowing it here would
-  /// leave it nothing to tell them apart with.
+  /// "no account by that name" from "accounts aren't reachable right now",
+  /// and swallowing it here would leave it nothing to tell them apart
+  /// with.
   Future<SignInResult> signIn({
     required String username,
     required String password,
+    bool allowCreate = true,
   }) async {
     final client = ref.read(accountClientProvider);
     if (client == null) {
       throw const AccountClientException(0, 'Musicat Server not configured');
     }
-    final result = await client.signIn(username: username, password: password);
+    final result = await client.signIn(
+      username: username,
+      password: password,
+      allowCreate: allowCreate,
+    );
     // Re-read rather than synthesise a session from `result`: the server
     // is the thing that persisted it, and its answer includes `loggedInAt`.
     state = AsyncData(await client.currentAccount());

@@ -3,8 +3,10 @@ import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:http/http.dart' as http;
+import 'package:musicat_server/src/accounts/account_creation_limiter.dart';
 import 'package:musicat_server/src/accounts/account_routes.dart';
 import 'package:musicat_server/src/accounts/account_store.dart';
+import 'package:musicat_server/src/accounts/password_hashing.dart';
 import 'package:musicat_server/src/accounts/device_notifier.dart';
 import 'package:musicat_server/src/accounts/friend_request_store.dart';
 import 'package:musicat_server/src/accounts/login_nonce_store.dart';
@@ -192,7 +194,7 @@ void main() {
         'already has an account or not -- the account-enumeration concern '
         'this endpoint is designed around', () async {
       final identity = await newIdentity();
-      await signUp('alice', 'hunter2', identity);
+      await signUp('alice', 'hunter2-ok', identity);
 
       final existing = await http.post(
         Uri.parse('$baseUrl/login/start'),
@@ -227,7 +229,7 @@ void main() {
 
         final response = await completeLogin(
           username: 'alice',
-          password: 'hunter2',
+          password: 'hunter2-ok',
           identity: identity,
         );
 
@@ -248,11 +250,11 @@ void main() {
         final identityA = await newIdentity();
         final identityB = await newIdentity();
 
-        await signUp('alice', 'hunter2', identityA);
+        await signUp('alice', 'hunter2-ok', identityA);
 
         final second = await completeLogin(
           username: 'alice',
-          password: 'hunter2',
+          password: 'hunter2-ok',
           identity: identityB,
         );
 
@@ -295,10 +297,348 @@ void main() {
       final identity = await newIdentity();
       final response = await completeLogin(
         username: 'ab',
-        password: 'hunter2',
+        password: 'hunter2-ok',
         identity: identity,
       );
       expect(response.statusCode, 400);
+    });
+  });
+
+  group('POST /login/complete -- one device, one account', () {
+    test('signing in as a second account moves this device off the first, so '
+        'the second is actually usable', () async {
+      final device = await newIdentity();
+      final firstAccountId = await signUp('alice', 'hunter2-ok', device);
+
+      final second = await completeLogin(
+        username: 'bob',
+        password: 'hunter3-ok',
+        identity: device,
+      );
+
+      expect(second.statusCode, 201);
+      final secondAccountId =
+          (jsonDecode(second.body) as Map<String, dynamic>)['accountId']
+              as String;
+      expect(secondAccountId, isNot(firstAccountId));
+
+      // The lookup every signed account request authenticates through: this
+      // device is bob now, so bob's own routes answer instead of `403 Cannot
+      // act as another account`, which is where this used to dead-end with
+      // no way out from the app.
+      final byDevice = await http.get(
+        Uri.parse('$baseUrl/by-device/${device.nodeId}'),
+      );
+      expect(
+        (jsonDecode(byDevice.body) as Map<String, dynamic>)['accountId'],
+        secondAccountId,
+      );
+
+      final path = '/$secondAccountId/friend-requests';
+      final listed = await http.get(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(device, method: 'GET', path: path),
+      );
+      expect(listed.statusCode, 200);
+
+      // And the account it left is intact, minus this device.
+      expect((await accountStore.findById(firstAccountId))!.devices, isEmpty);
+    });
+  });
+
+  group('POST /login/complete -- usernames are case-insensitive', () {
+    test('a different capitalization signs in to the same account rather '
+        'than creating a second one', () async {
+      final phone = await newIdentity();
+      final accountId = await signUp('jorge', 'hunter2-ok', phone);
+
+      final desktop = await newIdentity();
+      final response = await completeLogin(
+        username: 'Jorge',
+        password: 'hunter2-ok',
+        identity: desktop,
+      );
+
+      expect(response.statusCode, 200);
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      expect(body['accountId'], accountId);
+      // Echoed back canonical, whatever was typed.
+      expect(body['username'], 'jorge');
+      expect(await accountStore.loadAll(), hasLength(1));
+    });
+
+    test('the nonce and the rate limiter are keyed canonically too, so a '
+        'handshake that mixes capitalizations still works and a lockout '
+        'cannot be dodged by shifting case', () async {
+      final owner = await newIdentity();
+      await signUp('jorge', 'correct-password', owner);
+
+      // login/start as `JORGE`, login/complete as `jorge`.
+      final nonce = await startLogin('JORGE');
+      final intruder = await newIdentity();
+      final signature = await Ed25519().sign(nonce, keyPair: intruder.keyPair);
+      Future<http.Response> guess(String username) async => http.post(
+        Uri.parse('$baseUrl/login/complete'),
+        body: jsonEncode({
+          'username': username,
+          'password': 'wrong-password',
+          'nodeId': intruder.nodeId,
+          'publicKeyBase64': await intruder.publicKeyBase64(),
+          'signatureOverNonce': base64Encode(signature.bytes),
+        }),
+      );
+      expect((await guess('jorge')).statusCode, 401);
+
+      // Three wrong passwords is this file's configured lockout, spread
+      // across three spellings of the one account.
+      for (final spelling in ['Jorge', 'JORGE']) {
+        await completeLogin(
+          username: spelling,
+          password: 'wrong-password',
+          identity: intruder,
+        );
+      }
+
+      final lockedOut = await completeLogin(
+        username: 'JoRgE',
+        password: 'correct-password',
+        identity: owner,
+      );
+      expect(lockedOut.statusCode, 429);
+    });
+
+    test('409s a username two pre-existing accounts hold in different cases, '
+        'rather than picking one', () async {
+      final phone = await newIdentity();
+      await signUp('jorge', 'hunter2-ok', phone);
+      // Written straight to the file, because it is the only way this state
+      // can exist at all now -- it is data from before the rule.
+      final file = File('${accountsDataDir.path}/accounts.json');
+      final raw = jsonDecode(file.readAsStringSync()) as List<dynamic>;
+      final clone = Map<String, dynamic>.from(raw.single as Map)
+        ..['accountId'] = 'the-other-jorge'
+        ..['username'] = 'Jorge'
+        ..['devices'] = <dynamic>[];
+      file.writeAsStringSync(jsonEncode([...raw, clone]));
+
+      final response = await completeLogin(
+        username: 'jorge',
+        password: 'hunter2-ok',
+        identity: await newIdentity(),
+      );
+
+      expect(response.statusCode, 409);
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      expect(body['code'], 'ambiguous_username');
+      expect(body['error'], contains('capitalization'));
+      // Neither account was merged, renamed or dropped.
+      expect(await accountStore.loadAll(), hasLength(2));
+    });
+  });
+
+  group('POST /login/complete -- creating an account is opt-in', () {
+    test(
+      'allowCreate: false 404s an unknown username and creates nothing',
+      () async {
+        final identity = await newIdentity();
+        final nonce = await startLogin('nobody');
+        final signature = await Ed25519().sign(
+          nonce,
+          keyPair: identity.keyPair,
+        );
+
+        final response = await http.post(
+          Uri.parse('$baseUrl/login/complete'),
+          body: jsonEncode({
+            'username': 'nobody',
+            'password': 'hunter2-ok',
+            'nodeId': identity.nodeId,
+            'publicKeyBase64': await identity.publicKeyBase64(),
+            'signatureOverNonce': base64Encode(signature.bytes),
+            'allowCreate': false,
+          }),
+        );
+
+        expect(response.statusCode, 404);
+        final body = jsonDecode(response.body) as Map<String, dynamic>;
+        expect(body['code'], 'no_such_account');
+        expect(body['error'], isNotEmpty);
+        expect(await accountStore.loadAll(), isEmpty);
+      },
+    );
+
+    test('the same call without the flag still signs up -- the default is '
+        'unchanged, so nothing existing breaks', () async {
+      final response = await completeLogin(
+        username: 'nobody',
+        password: 'hunter2-ok',
+        identity: await newIdentity(),
+      );
+
+      expect(response.statusCode, 201);
+    });
+
+    test(
+      'allowCreate: false logs in normally to an account that exists',
+      () async {
+        final phone = await newIdentity();
+        await signUp('alice', 'hunter2-ok', phone);
+        final desktop = await newIdentity();
+        final nonce = await startLogin('alice');
+        final signature = await Ed25519().sign(nonce, keyPair: desktop.keyPair);
+
+        final response = await http.post(
+          Uri.parse('$baseUrl/login/complete'),
+          body: jsonEncode({
+            'username': 'alice',
+            'password': 'hunter2-ok',
+            'nodeId': desktop.nodeId,
+            'publicKeyBase64': await desktop.publicKeyBase64(),
+            'signatureOverNonce': base64Encode(signature.bytes),
+            'allowCreate': false,
+          }),
+        );
+
+        expect(response.statusCode, 200);
+      },
+    );
+
+    test('400s a new account whose password is under the minimum, naming it, '
+        'and tells that apart from an invalid username by code', () async {
+      final tooShort = await completeLogin(
+        username: 'alice',
+        password: 'a' * (minPasswordLength - 1),
+        identity: await newIdentity(),
+      );
+
+      expect(tooShort.statusCode, 400);
+      final body = jsonDecode(tooShort.body) as Map<String, dynamic>;
+      expect(body['code'], 'password_too_short');
+      expect(body['error'], contains('$minPasswordLength'));
+      expect(await accountStore.loadAll(), isEmpty);
+
+      final badUsername = await completeLogin(
+        username: 'ab',
+        password: 'hunter2-ok',
+        identity: await newIdentity(),
+      );
+      expect(badUsername.statusCode, 400);
+      expect(
+        (jsonDecode(badUsername.body) as Map<String, dynamic>)['code'],
+        'invalid_username',
+      );
+    });
+
+    test('an existing short password still logs in -- the floor applies to '
+        'creation only', () async {
+      // The only way to have one: created before the floor existed.
+      final phone = await newIdentity();
+      await signUp('alice', 'hunter2-ok', phone);
+      final file = File('${accountsDataDir.path}/accounts.json');
+      final hashed = await hashPassword('x');
+      final raw = jsonDecode(file.readAsStringSync()) as List<dynamic>;
+      final account = Map<String, dynamic>.from(raw.single as Map)
+        ..['passwordHashBase64'] = base64Encode(hashed.hash)
+        ..['passwordSaltBase64'] = base64Encode(hashed.salt)
+        ..['argon2Params'] = hashed.params.toJson();
+      file.writeAsStringSync(jsonEncode([account]));
+
+      final response = await completeLogin(
+        username: 'alice',
+        password: 'x',
+        identity: await newIdentity(),
+      );
+
+      expect(response.statusCode, 200);
+    });
+  });
+
+  group('POST /login/complete -- creating accounts is rate-limited', () {
+    late HttpServer cappedServer;
+    late String cappedUrl;
+
+    setUp(() async {
+      final router = buildAccountRouter(
+        accountStore,
+        friendRequestStore,
+        // One per window, so the cap is observable without making dozens of
+        // real Argon2id round trips -- the same reason the shared
+        // `LoginRateLimiter` above is configured small.
+        accountCreationLimiter: AccountCreationLimiter(maxCreations: 1),
+      );
+      cappedServer = await shelf_io.serve(router.call, 'localhost', 0);
+      cappedUrl = 'http://localhost:${cappedServer.port}';
+    });
+
+    tearDown(() => cappedServer.close(force: true));
+
+    Future<http.Response> signUpAt(String username) async {
+      final identity = await newIdentity();
+      final start = await http.post(
+        Uri.parse('$cappedUrl/login/start'),
+        body: jsonEncode({'username': username}),
+      );
+      final nonce = base64Decode(
+        (jsonDecode(start.body) as Map<String, dynamic>)['nonceBase64']
+            as String,
+      );
+      final signature = await Ed25519().sign(nonce, keyPair: identity.keyPair);
+      return http.post(
+        Uri.parse('$cappedUrl/login/complete'),
+        body: jsonEncode({
+          'username': username,
+          'password': 'hunter2-ok',
+          'nodeId': identity.nodeId,
+          'publicKeyBase64': await identity.publicKeyBase64(),
+          'signatureOverNonce': base64Encode(signature.bytes),
+        }),
+      );
+    }
+
+    test(
+      'a caller past the cap is refused before any password is hashed',
+      () async {
+        expect((await signUpAt('alice')).statusCode, 201);
+
+        final refused = await signUpAt('bob');
+
+        expect(refused.statusCode, 429);
+        expect(
+          (jsonDecode(refused.body) as Map<String, dynamic>)['code'],
+          'too_many_new_accounts',
+        );
+        expect(await accountStore.findByUsername('bob'), isNull);
+      },
+    );
+
+    test('logging in to an account that already exists is never charged '
+        'against the creation cap', () async {
+      expect((await signUpAt('alice')).statusCode, 201);
+      expect((await signUpAt('bob')).statusCode, 429);
+
+      // Same address, same exhausted budget, but this creates nothing.
+      final identity = await newIdentity();
+      final start = await http.post(
+        Uri.parse('$cappedUrl/login/start'),
+        body: jsonEncode({'username': 'alice'}),
+      );
+      final nonce = base64Decode(
+        (jsonDecode(start.body) as Map<String, dynamic>)['nonceBase64']
+            as String,
+      );
+      final signature = await Ed25519().sign(nonce, keyPair: identity.keyPair);
+      final response = await http.post(
+        Uri.parse('$cappedUrl/login/complete'),
+        body: jsonEncode({
+          'username': 'alice',
+          'password': 'hunter2-ok',
+          'nodeId': identity.nodeId,
+          'publicKeyBase64': await identity.publicKeyBase64(),
+          'signatureOverNonce': base64Encode(signature.bytes),
+        }),
+      );
+
+      expect(response.statusCode, 200);
     });
   });
 
@@ -313,7 +653,7 @@ void main() {
         Uri.parse('$baseUrl/login/complete'),
         body: jsonEncode({
           'username': 'alice',
-          'password': 'hunter2',
+          'password': 'hunter2-ok',
           'nodeId': 'not-the-real-fingerprint',
           'publicKeyBase64': await identity.publicKeyBase64(),
           'signatureOverNonce': base64Encode(signature.bytes),
@@ -338,7 +678,7 @@ void main() {
         Uri.parse('$baseUrl/login/complete'),
         body: jsonEncode({
           'username': 'alice',
-          'password': 'hunter2',
+          'password': 'hunter2-ok',
           'nodeId': identity.nodeId,
           'publicKeyBase64': await identity.publicKeyBase64(),
           'signatureOverNonce': base64Encode(signature.bytes),
@@ -354,7 +694,7 @@ void main() {
       final nonce = await startLogin('alice');
       final first = await completeLogin(
         username: 'alice',
-        password: 'hunter2',
+        password: 'hunter2-ok',
         identity: identityA,
         nonceOverride: nonce,
       );
@@ -366,7 +706,7 @@ void main() {
         Uri.parse('$baseUrl/login/complete'),
         body: jsonEncode({
           'username': 'alice',
-          'password': 'hunter2',
+          'password': 'hunter2-ok',
           'nodeId': identityB.nodeId,
           'publicKeyBase64': await identityB.publicKeyBase64(),
           'signatureOverNonce': base64Encode(signature.bytes),
@@ -402,7 +742,7 @@ void main() {
         Uri.parse('$expiringBaseUrl/login/complete'),
         body: jsonEncode({
           'username': 'alice',
-          'password': 'hunter2',
+          'password': 'hunter2-ok',
           'nodeId': identity.nodeId,
           'publicKeyBase64': await identity.publicKeyBase64(),
           'signatureOverNonce': base64Encode(signature.bytes),
@@ -457,7 +797,7 @@ void main() {
   group('GET /by-device/<nodeId>', () {
     test('resolves a linked device to its accountId', () async {
       final identity = await newIdentity();
-      final accountId = await signUp('alice', 'hunter2', identity);
+      final accountId = await signUp('alice', 'hunter2-ok', identity);
 
       final response = await http.get(
         Uri.parse('$baseUrl/by-device/${identity.nodeId}'),
@@ -483,10 +823,10 @@ void main() {
       () async {
         final identityA = await newIdentity();
         final identityB = await newIdentity();
-        final accountId = await signUp('alice', 'hunter2', identityA);
+        final accountId = await signUp('alice', 'hunter2-ok', identityA);
         await completeLogin(
           username: 'alice',
-          password: 'hunter2',
+          password: 'hunter2-ok',
           identity: identityB,
         );
 
@@ -511,7 +851,7 @@ void main() {
 
     test('a device can unlink itself', () async {
       final identityA = await newIdentity();
-      final accountId = await signUp('alice', 'hunter2', identityA);
+      final accountId = await signUp('alice', 'hunter2-ok', identityA);
 
       final path = '/$accountId/devices/${identityA.nodeId}';
       final headers = await signedHeaders(
@@ -531,10 +871,10 @@ void main() {
       'an unrelated account cannot unlink another account\'s device (403)',
       () async {
         final identityA = await newIdentity();
-        final accountIdAlice = await signUp('alice', 'hunter2', identityA);
+        final accountIdAlice = await signUp('alice', 'hunter2-ok', identityA);
 
         final identityC = await newIdentity();
-        await signUp('carol', 'hunter3', identityC);
+        await signUp('carol', 'hunter3-ok', identityC);
 
         final path = '/$accountIdAlice/devices/${identityA.nodeId}';
         final headers = await signedHeaders(
@@ -557,7 +897,7 @@ void main() {
 
     test('an unauthenticated request is rejected with 401', () async {
       final identityA = await newIdentity();
-      final accountId = await signUp('alice', 'hunter2', identityA);
+      final accountId = await signUp('alice', 'hunter2-ok', identityA);
 
       final response = await http.delete(
         Uri.parse('$baseUrl/$accountId/devices/${identityA.nodeId}'),
@@ -567,7 +907,7 @@ void main() {
 
     test('unlinking an already-unlinked nodeId is a no-op 204', () async {
       final identityA = await newIdentity();
-      final accountId = await signUp('alice', 'hunter2', identityA);
+      final accountId = await signUp('alice', 'hunter2-ok', identityA);
 
       final path = '/$accountId/devices/never-linked';
       final headers = await signedHeaders(
@@ -590,9 +930,9 @@ void main() {
       final aliceIdentity = await newIdentity();
       final aliceId = await signUp('alice', 'pw-alice', aliceIdentity);
       final bobIdentity = await newIdentity();
-      final bobId = await signUp('bob', 'pw-bob', bobIdentity);
+      final bobId = await signUp('bob', 'pw-bob-ok', bobIdentity);
       final carolIdentity = await newIdentity();
-      await signUp('carol', 'pw-carol', carolIdentity);
+      await signUp('carol', 'pw-carol!', carolIdentity);
 
       // Before any friend request: devices are not visible to bob.
       final beforePath = '/$aliceId/devices';
@@ -701,7 +1041,7 @@ void main() {
       final aliceIdentity = await newIdentity();
       final aliceId = await signUp('alice', 'pw-alice', aliceIdentity);
       final bobIdentity = await newIdentity();
-      final bobId = await signUp('bob', 'pw-bob', bobIdentity);
+      final bobId = await signUp('bob', 'pw-bob-ok', bobIdentity);
 
       final sendPath = '/$aliceId/friend-requests';
       final sendBody = jsonEncode({'toUsername': 'bob'});
@@ -769,6 +1109,33 @@ void main() {
       expect(response.statusCode, 400);
     });
 
+    test('resolves the recipient case-insensitively, so a friend request to '
+        '"ALICE" reaches alice instead of 404ing', () async {
+      final aliceIdentity = await newIdentity();
+      final aliceId = await signUp('alice', 'pw-alice', aliceIdentity);
+      final bobIdentity = await newIdentity();
+      final bobId = await signUp('bob', 'pw-bob-ok', bobIdentity);
+
+      final path = '/$bobId/friend-requests';
+      final body = jsonEncode({'toUsername': 'ALICE'});
+      final response = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(
+          bobIdentity,
+          method: 'POST',
+          path: path,
+          body: body,
+        ),
+        body: body,
+      );
+
+      expect(response.statusCode, 201);
+      expect(
+        (jsonDecode(response.body) as Map<String, dynamic>)['toAccountId'],
+        aliceId,
+      );
+    });
+
     test('cannot send a friend request to an unknown username', () async {
       final aliceIdentity = await newIdentity();
       final aliceId = await signUp('alice', 'pw-alice', aliceIdentity);
@@ -793,7 +1160,7 @@ void main() {
       final aliceIdentity = await newIdentity();
       await signUp('alice', 'pw-alice', aliceIdentity);
       final bobIdentity = await newIdentity();
-      final bobId = await signUp('bob', 'pw-bob', bobIdentity);
+      final bobId = await signUp('bob', 'pw-bob-ok', bobIdentity);
 
       // alice authenticates herself but claims to be acting as bob.
       final path = '/$bobId/friend-requests';
@@ -816,7 +1183,7 @@ void main() {
   group('GET /<accountId>/devices', () {
     test('an account can always see its own device list', () async {
       final identity = await newIdentity();
-      final accountId = await signUp('alice', 'hunter2', identity);
+      final accountId = await signUp('alice', 'hunter2-ok', identity);
 
       final path = '/$accountId/devices';
       final headers = await signedHeaders(identity, method: 'GET', path: path);
@@ -830,7 +1197,7 @@ void main() {
 
     test('404s an accountId that does not exist', () async {
       final identity = await newIdentity();
-      await signUp('alice', 'hunter2', identity);
+      await signUp('alice', 'hunter2-ok', identity);
 
       final path = '/does-not-exist/devices';
       final headers = await signedHeaders(identity, method: 'GET', path: path);
@@ -844,7 +1211,7 @@ void main() {
 
     test('401s an unauthenticated request', () async {
       final identity = await newIdentity();
-      final accountId = await signUp('alice', 'hunter2', identity);
+      final accountId = await signUp('alice', 'hunter2-ok', identity);
 
       final response = await http.get(Uri.parse('$baseUrl/$accountId/devices'));
       expect(response.statusCode, 401);
@@ -904,8 +1271,8 @@ void main() {
         'recipient\'s -- the gap listAddressedTo alone leaves', () async {
       final aliceIdentity = await newIdentity();
       final bobIdentity = await newIdentity();
-      final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
-      final bobId = await signUp('bob', 'hunter2', bobIdentity);
+      final aliceId = await signUp('alice', 'hunter2-ok', aliceIdentity);
+      final bobId = await signUp('bob', 'hunter2-ok', bobIdentity);
 
       final requestId = await sendFriendRequest(aliceIdentity, aliceId, 'bob');
       await respond(bobIdentity, bobId, requestId, 'accept');
@@ -938,13 +1305,13 @@ void main() {
       final aliceIdentity = await newIdentity();
       final aliceSecondDevice = await newIdentity();
       final bobIdentity = await newIdentity();
-      final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
-      final bobId = await signUp('bob', 'hunter2', bobIdentity);
+      final aliceId = await signUp('alice', 'hunter2-ok', aliceIdentity);
+      final bobId = await signUp('bob', 'hunter2-ok', bobIdentity);
       // Alice logs in on a second device, so her list is worth inlining.
       expect(
         (await completeLogin(
           username: 'alice',
-          password: 'hunter2',
+          password: 'hunter2-ok',
           identity: aliceSecondDevice,
         )).statusCode,
         200,
@@ -982,8 +1349,8 @@ void main() {
         'accounts', () async {
       final aliceIdentity = await newIdentity();
       final bobIdentity = await newIdentity();
-      final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
-      final bobId = await signUp('bob', 'hunter2', bobIdentity);
+      final aliceId = await signUp('alice', 'hunter2-ok', aliceIdentity);
+      final bobId = await signUp('bob', 'hunter2-ok', bobIdentity);
       final requestId = await sendFriendRequest(aliceIdentity, aliceId, 'bob');
       await respond(bobIdentity, bobId, requestId, 'accept');
 
@@ -1003,9 +1370,9 @@ void main() {
       final aliceIdentity = await newIdentity();
       final bobIdentity = await newIdentity();
       final carolIdentity = await newIdentity();
-      final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
-      final bobId = await signUp('bob', 'hunter2', bobIdentity);
-      await signUp('carol', 'hunter2', carolIdentity);
+      final aliceId = await signUp('alice', 'hunter2-ok', aliceIdentity);
+      final bobId = await signUp('bob', 'hunter2-ok', bobIdentity);
+      await signUp('carol', 'hunter2-ok', carolIdentity);
 
       // Pending: never accepted.
       await sendFriendRequest(aliceIdentity, aliceId, 'carol');
@@ -1024,8 +1391,8 @@ void main() {
       () async {
         final aliceIdentity = await newIdentity();
         final bobIdentity = await newIdentity();
-        final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
-        final bobId = await signUp('bob', 'hunter2', bobIdentity);
+        final aliceId = await signUp('alice', 'hunter2-ok', aliceIdentity);
+        final bobId = await signUp('bob', 'hunter2-ok', bobIdentity);
 
         final aliceToBob = await sendFriendRequest(
           aliceIdentity,
@@ -1048,8 +1415,8 @@ void main() {
         'account', () async {
       final aliceIdentity = await newIdentity();
       final bobIdentity = await newIdentity();
-      final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
-      await signUp('bob', 'hunter2', bobIdentity);
+      final aliceId = await signUp('alice', 'hunter2-ok', aliceIdentity);
+      await signUp('bob', 'hunter2-ok', bobIdentity);
 
       expect(
         (await http.get(Uri.parse('$baseUrl/$aliceId/friends'))).statusCode,
@@ -1081,8 +1448,8 @@ void main() {
 
         final aliceIdentity = await newIdentity();
         final bobIdentity = await newIdentity();
-        final aliceId = await signUp('alice', 'hunter2', aliceIdentity);
-        final bobId = await signUp('bob', 'hunter2', bobIdentity);
+        final aliceId = await signUp('alice', 'hunter2-ok', aliceIdentity);
+        final bobId = await signUp('bob', 'hunter2-ok', bobIdentity);
         final requestId = await sendFriendRequest(
           aliceIdentity,
           aliceId,
@@ -1133,8 +1500,8 @@ void main() {
     setUp(() async {
       alicePhone = await newIdentity();
       bobPhone = await newIdentity();
-      aliceId = await signUp('alice', 'hunter2', alicePhone);
-      bobId = await signUp('bob', 'hunter2', bobPhone);
+      aliceId = await signUp('alice', 'hunter2-ok', alicePhone);
+      bobId = await signUp('bob', 'hunter2-ok', bobPhone);
     });
 
     Future<http.Response> revoke(
@@ -1235,7 +1602,7 @@ void main() {
         "somebody else's friendships", () async {
       await makeFriends();
       final carolPhone = await newIdentity();
-      await signUp('carol', 'hunter2', carolPhone);
+      await signUp('carol', 'hunter2-ok', carolPhone);
 
       final response = await revoke(carolPhone, aliceId, bobId);
 
@@ -1283,7 +1650,7 @@ void main() {
       expect(
         (await completeLogin(
           username: 'alice',
-          password: 'hunter2',
+          password: 'hunter2-ok',
           identity: aliceDesktop,
         )).statusCode,
         200,
@@ -1371,7 +1738,7 @@ void main() {
       expect(
         (await completeLogin(
           username: 'alice',
-          password: 'hunter2',
+          password: 'hunter2-ok',
           identity: aliceLaptop,
         )).statusCode,
         200,
@@ -1442,7 +1809,7 @@ void main() {
       // ...and what a mutual friend sees, which is the disclosure that
       // actually matters and the one that makes this friendship usable.
       final bobIdentity = await newIdentity();
-      final bobId = await signUp('bob', 'pw-bob', bobIdentity);
+      final bobId = await signUp('bob', 'pw-bob-ok', bobIdentity);
       await befriend(
         fromIdentity: aliceIdentity,
         fromId: aliceId,
@@ -1541,7 +1908,7 @@ void main() {
       final aliceIdentity = await newIdentity();
       final aliceId = await signUp('alice', 'pw-alice', aliceIdentity);
       final bobIdentity = await newIdentity();
-      final bobId = await signUp('bob', 'pw-bob', bobIdentity);
+      final bobId = await signUp('bob', 'pw-bob-ok', bobIdentity);
 
       final sendPath = '/$aliceId/friend-requests';
       final sendBody = jsonEncode({'toUsername': 'bob'});
@@ -1613,7 +1980,7 @@ void main() {
         password: 'pw-alice',
         identity: aliceDesktop,
       );
-      bobId = await signUp('bob', 'pw-bob', bobPhone);
+      bobId = await signUp('bob', 'pw-bob-ok', bobPhone);
       notifier.pushes.clear();
     });
 

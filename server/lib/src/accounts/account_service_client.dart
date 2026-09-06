@@ -31,9 +31,31 @@ enum AccountLoginOutcome {
   /// the account service locks out for a while (ADR 0048).
   rateLimited,
 
-  /// `400` from the username format rule shared with the username directory
-  /// (`usernamePattern`). Only reachable on signup.
+  /// `400`: the account service refused the credentials themselves. Two
+  /// shapes reach it, both only on signup -- the username format rule shared
+  /// with the username directory (`usernamePattern`), and a new password
+  /// shorter than the service's minimum. They are one outcome because they
+  /// need one response from the app (show the service's own message and let
+  /// the user fix it); [AccountLoginResult.error] is what tells them apart
+  /// in words.
   invalidUsername,
+
+  /// `404`: no account holds this username, and the caller asked not to
+  /// create one (`allowCreate: false`). The signal an app uses to ask "create
+  /// a new account?" instead of silently making one out of a typo.
+  noSuchAccount,
+
+  /// `409`: two accounts on the service hold this username in different
+  /// cases (only possible in data written before usernames were
+  /// case-insensitive), and it refuses to guess which one the caller means.
+  ///
+  /// **Deliberately not folded into [failed].** Retrying cannot help and no
+  /// amount of waiting changes it -- an operator has to fix `accounts.json`
+  /// -- so telling the user "the service is having a moment, try again" would
+  /// be the one piece of advice guaranteed to be useless. That is precisely
+  /// the point of detecting the collision instead of silently shadowing one
+  /// of the two accounts: somebody has to be told.
+  ambiguousUsername,
 
   /// The account service never answered at all: connection refused, DNS
   /// failure, or [AccountServiceClient.timeout] elapsed. A condition of the
@@ -60,6 +82,7 @@ class AccountLoginResult {
     this.accountId,
     this.username,
     this.error,
+    this.code,
   });
 
   const AccountLoginResult.created({
@@ -80,8 +103,11 @@ class AccountLoginResult {
          username: username,
        );
 
-  const AccountLoginResult.failure(AccountLoginOutcome outcome, {String? error})
-    : this._(outcome, error: error);
+  const AccountLoginResult.failure(
+    AccountLoginOutcome outcome, {
+    String? error,
+    String? code,
+  }) : this._(outcome, error: error, code: code);
 
   final AccountLoginOutcome outcome;
   final String? accountId;
@@ -94,6 +120,14 @@ class AccountLoginResult {
   /// Never contains anything the caller submitted (the account service never
   /// echoes a password back), so it is safe to forward to the app.
   final String? error;
+
+  /// The account service's own machine-readable `code` beside that message
+  /// (`account_routes.dart`'s login codes), or `null` from a service too old
+  /// to send one. This is what a caller should *branch* on -- notably to tell
+  /// the two `400`s apart, an invalid username from a too-short password --
+  /// instead of matching on [error]'s wording, which is prose and may be
+  /// rewritten at any time.
+  final String? code;
 
   bool get isSuccess =>
       outcome == AccountLoginOutcome.created ||
@@ -250,6 +284,12 @@ class AccountServiceClient {
   /// `logRequests()` and every proxy in between record paths and query
   /// strings but not bodies).
   ///
+  /// [allowCreate] defaults to `true` -- what this method has always done.
+  /// Passing `false` asks the account service to answer
+  /// [AccountLoginOutcome.noSuchAccount] instead of creating an account for a
+  /// username nobody holds, which is how an app turns a typo into a question
+  /// rather than into a second, empty account.
+  ///
   /// [relayUrl] is this node's own currently-connected relay endpoint, if it
   /// has one, and login is the *only* place it is ever published: the account
   /// service records it against this device (see [DeviceLink.relayUrl]) so
@@ -274,6 +314,7 @@ class AccountServiceClient {
     required String username,
     required String password,
     String? relayUrl,
+    bool allowCreate = true,
   }) async {
     final List<int> nonce;
     try {
@@ -322,6 +363,13 @@ class AccountServiceClient {
               // relay, so an older account service that doesn't know this
               // field sees the exact request it always did.
               if (relayUrl != null && relayUrl.isNotEmpty) 'relayUrl': relayUrl,
+              // Same rule: only sent when it is not the default, so a
+              // request that allows creation is byte-for-byte the one this
+              // client has always sent. An account service too old to know
+              // the field would ignore it and create the account anyway --
+              // which is why this is a *first* call the app follows up, not
+              // a guarantee it relies on.
+              if (!allowCreate) 'allowCreate': false,
             }),
           )
           .timeout(timeout);
@@ -335,21 +383,37 @@ class AccountServiceClient {
     // Everything from here on is the service having answered, so a rejection
     // is never reported as it being down.
     final message = _errorMessageOf(complete);
+    final code = _errorCodeOf(complete);
     switch (complete.statusCode) {
       case 429:
         return AccountLoginResult.failure(
           AccountLoginOutcome.rateLimited,
           error: message,
+          code: code,
         );
       case 401:
         return AccountLoginResult.failure(
           AccountLoginOutcome.wrongPassword,
           error: message,
+          code: code,
         );
       case 400:
         return AccountLoginResult.failure(
           AccountLoginOutcome.invalidUsername,
           error: message,
+          code: code,
+        );
+      case 404:
+        return AccountLoginResult.failure(
+          AccountLoginOutcome.noSuchAccount,
+          error: message,
+          code: code,
+        );
+      case 409:
+        return AccountLoginResult.failure(
+          AccountLoginOutcome.ambiguousUsername,
+          error: message,
+          code: code,
         );
       case 200:
       case 201:
@@ -376,6 +440,7 @@ class AccountServiceClient {
         return AccountLoginResult.failure(
           AccountLoginOutcome.failed,
           error: message,
+          code: code,
         );
     }
   }
@@ -384,12 +449,21 @@ class AccountServiceClient {
   /// `null` if it didn't send one in that shape. Never includes the raw body
   /// as a fallback: an unexpected body could be anything at all, and this
   /// value is forwarded to the app.
-  String? _errorMessageOf(http.Response response) {
+  String? _errorMessageOf(http.Response response) =>
+      _errorFieldOf(response, 'error');
+
+  /// The account service's own machine-readable `{"code": ...}`, or `null`
+  /// from an older service (or any route that doesn't send one -- only the
+  /// login path does).
+  String? _errorCodeOf(http.Response response) =>
+      _errorFieldOf(response, 'code');
+
+  String? _errorFieldOf(http.Response response, String field) {
     try {
       final body = jsonDecode(response.body);
-      if (body is Map<String, dynamic>) return body['error'] as String?;
+      if (body is Map<String, dynamic>) return body[field] as String?;
     } catch (_) {
-      // Deliberately silent: a non-JSON body just means there's no message.
+      // Deliberately silent: a non-JSON body just means there's nothing here.
     }
     return null;
   }

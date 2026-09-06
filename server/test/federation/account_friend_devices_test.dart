@@ -438,6 +438,58 @@ void main() {
       expect(accountServiceCalls, ['/accounts/$aliceAccountId/devices']);
     });
 
+    test('a friend the service permanently refuses to answer about does not '
+        'stop the sweep -- everybody after them still refreshes', () async {
+      // Carol is an account-based friend this node holds who is *not* a
+      // mutual friend on the account service, so `GET /<carol>/devices` is a
+      // permanent `403`. That is not hypothetical: it is what `POST
+      // /api/v1/federation/friends` with a confirmed accountId creates (ADR
+      // 0049), and it sits at the same place in the list on every sweep.
+      final carolDevice = await newIdentity('carol');
+      final carolAccountId = await login(
+        'carol',
+        'hunter2-correct',
+        carolDevice,
+      );
+      // Rewritten so Carol comes *first*: `add` appends, and the whole bug is
+      // that the friend after the refusal never gets looked at.
+      final alice = (await friendStore.findByAccountId(aliceAccountId))!;
+      await friendStore.remove(aliceAccountId);
+      await friendStore.forgetRemoval(aliceAccountId);
+      await friendStore.add(
+        Friend(
+          accountId: carolAccountId,
+          devices: [await deviceOf(carolDevice, address: 'carol.example:8080')],
+          displayName: 'Carol',
+        ),
+      );
+      await friendStore.add(alice);
+      await login('alice', 'hunter2-correct', aliceDesktop);
+      accountServiceCalls.clear();
+
+      expect(await refresher.refreshAll(), 1);
+
+      // It asked about both, in order, rather than giving up at Carol.
+      expect(accountServiceCalls, [
+        '/accounts/$carolAccountId/devices',
+        '/accounts/$aliceAccountId/devices',
+      ]);
+      expect(
+        (await friendStore.findByAccountId(
+          aliceAccountId,
+        ))!.devices.map((d) => d.nodeId),
+        {alicePhone.nodeId, aliceDesktop.nodeId},
+        reason:
+            'the 403 was read as "the service is down" and abandoned the '
+            'sweep, so every friend after it never refreshed again',
+      );
+      // Carol's own cache is untouched: a refusal teaches this node nothing.
+      expect(
+        (await friendStore.findByAccountId(carolAccountId))!.devices,
+        hasLength(1),
+      );
+    });
+
     test('leaves the cache exactly as it was when the account service is '
         'unreachable -- no false rejections', () async {
       await accountServer.close(force: true);
@@ -588,19 +640,76 @@ void main() {
       expect(merged.single.udpCandidate, isNull);
     });
 
-    test('prefers a locally-learned relay over the authoritative one', () {
+    test('prefers a relay learned by pairing over the authoritative one', () {
       final merged = mergeFriendDevices(
         const [
           FriendDevice(
             nodeId: 'node-1',
             publicKeyBase64: 'key-1',
             relayUrl: 'ws://paired-relay.example/connect',
+            relayUrlFromPairing: true,
           ),
         ],
         [authoritative(relayUrl: 'ws://account-service-says.example/connect')],
       );
 
       expect(merged.single.relayUrl, 'ws://paired-relay.example/connect');
+      // ...and stays flagged as paired, so the *next* merge prefers it too.
+      expect(merged.single.relayUrlFromPairing, isTrue);
+    });
+
+    test('does NOT prefer a cached relay that itself came from the account '
+        'service -- that is the freeze this flag exists to prevent', () {
+      // Exactly what a previous merge writes back: the authoritative value,
+      // cached, with no pairing behind it.
+      final merged = mergeFriendDevices(
+        const [
+          FriendDevice(
+            nodeId: 'node-1',
+            publicKeyBase64: 'key-1',
+            relayUrl: 'ws://relay-ONE.example/connect',
+          ),
+        ],
+        [authoritative(relayUrl: 'ws://relay-TWO.example/connect')],
+      );
+
+      expect(merged.single.relayUrl, 'ws://relay-TWO.example/connect');
+      expect(merged.single.relayUrlFromPairing, isFalse);
+    });
+
+    test('a device whose relay the account service has cleared loses it, '
+        'rather than keeping a copy of an endpoint nobody is on', () {
+      final merged = mergeFriendDevices(
+        const [
+          FriendDevice(
+            nodeId: 'node-1',
+            publicKeyBase64: 'key-1',
+            relayUrl: 'ws://relay-ONE.example/connect',
+          ),
+        ],
+        [authoritative()],
+      );
+
+      expect(merged.single.relayUrl, isNull);
+    });
+
+    test('an entry written before provenance was recorded is treated as '
+        'unpaired, so a frozen relay self-corrects on the next sync', () {
+      // `friends.json` as this version reads one written by the last: a
+      // device row with a relayUrl and no `relayUrlFromPairing` key at all.
+      final legacy = FriendDevice.fromJson({
+        'nodeId': 'node-1',
+        'publicKeyBase64': 'key-1',
+        'relayUrl': 'ws://relay-ONE.example/connect',
+      });
+      expect(legacy.relayUrlFromPairing, isFalse);
+
+      final merged = mergeFriendDevices(
+        [legacy],
+        [authoritative(relayUrl: 'ws://relay-TWO.example/connect')],
+      );
+
+      expect(merged.single.relayUrl, 'ws://relay-TWO.example/connect');
     });
 
     test('falls back to the authoritative relay when the cached device has '
@@ -667,15 +776,22 @@ void main() {
 
     test('does not overwrite the relay this node learned by pairing with '
         'that same device', () async {
-      // The locally-cached phone was paired with, and reported a relay then.
-      await friendStore.updateDevices(aliceAccountId, [
-        FriendDevice(
-          nodeId: alicePhone.nodeId,
-          publicKeyBase64: await alicePhone.publicKeyBase64(),
-          address: 'alice.example:8080',
-          relayUrl: 'ws://paired-relay.example:8090/connect',
+      // The locally-cached phone was paired with, and reported a relay then
+      // -- which is what `FriendStore.add` records, provenance and all.
+      await friendStore.add(
+        Friend(
+          accountId: aliceAccountId,
+          devices: [
+            FriendDevice(
+              nodeId: alicePhone.nodeId,
+              publicKeyBase64: await alicePhone.publicKeyBase64(),
+              address: 'alice.example:8080',
+              relayUrl: 'ws://paired-relay.example:8090/connect',
+            ),
+          ],
+          displayName: 'Alice',
         ),
-      ]);
+      );
       // Alice re-logs in from that same phone, now publishing a different one.
       await login(
         'alice',
@@ -690,6 +806,58 @@ void main() {
       expect(
         cached!.deviceFor(alicePhone.nodeId)!.relayUrl,
         'ws://paired-relay.example:8090/connect',
+      );
+
+      // Twice, because once proves nothing here: the merge writes the cache
+      // it reads, so a rule expressed as "keep whatever is cached" holds on
+      // the first pass and freezes on every one after it.
+      await refresher.refreshAll();
+      expect(
+        (await friendStore.findByAccountId(
+          aliceAccountId,
+        ))!.deviceFor(alicePhone.nodeId)!.relayUrl,
+        'ws://paired-relay.example:8090/connect',
+      );
+    });
+
+    test('follows the account service when that friend changes relays -- it '
+        'does NOT freeze at whatever the first sync saw', () async {
+      // Alice's desktop, which this node has never paired with: the account
+      // service is its only source of reachability, so a frozen value here
+      // means permanently unreachable.
+      await login(
+        'alice',
+        'hunter2-correct',
+        aliceDesktop,
+        relayUrl: 'ws://relay-ONE.example:8090/connect',
+      );
+      await refresher.refreshAll();
+      expect(
+        (await friendStore.findByAccountId(
+          aliceAccountId,
+        ))!.deviceFor(aliceDesktop.nodeId)!.relayUrl,
+        'ws://relay-ONE.example:8090/connect',
+      );
+
+      // She moves to a different relay and logs in again, which is the only
+      // way the account service ever learns one.
+      await login(
+        'alice',
+        'hunter2-correct',
+        aliceDesktop,
+        relayUrl: 'ws://relay-TWO.example:8090/connect',
+      );
+
+      await refresher.refreshAll();
+
+      expect(
+        (await friendStore.findByAccountId(
+          aliceAccountId,
+        ))!.deviceFor(aliceDesktop.nodeId)!.relayUrl,
+        'ws://relay-TWO.example:8090/connect',
+        reason:
+            "the second sync kept the first sync's own value, which is the "
+            'freeze that leaves an account-only friend unreachable for good',
       );
     });
 

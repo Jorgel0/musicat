@@ -8,8 +8,13 @@ import 'package:musicat_server/src/accounts/account_service_client.dart';
 import 'package:musicat_server/src/accounts/account_session_store.dart';
 import 'package:musicat_server/src/accounts/account_store.dart';
 import 'package:musicat_server/src/accounts/friend_request_store.dart';
+import 'package:musicat_server/src/federation/federation_routes.dart';
+import 'package:musicat_server/src/federation/friend.dart';
 import 'package:musicat_server/src/federation/friend_revocation.dart';
+import 'package:musicat_server/src/federation/friend_store.dart';
+import 'package:musicat_server/src/federation/pairing_code_store.dart';
 import 'package:musicat_server/src/federation/request_signing.dart';
+import 'package:musicat_server/src/nat/udp_puncher.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
@@ -250,6 +255,24 @@ void main() {
       expect(await queue.loadAll(), isEmpty);
     });
 
+    test('dropAllFor drops every entry for a friend, whatever account it was '
+        'queued as, and leaves the rest alone', () async {
+      await queue.enqueue(friendAccountId: 'friend-1', asAccountId: 'me');
+      await queue.enqueue(
+        friendAccountId: 'friend-1',
+        asAccountId: 'me-before',
+      );
+      await queue.enqueue(friendAccountId: 'friend-2', asAccountId: 'me');
+
+      expect(await queue.dropAllFor({'friend-1'}), 2);
+
+      final left = await queue.loadAll();
+      expect(left, hasLength(1));
+      expect(left.single.friendAccountId, 'friend-2');
+      // Nothing to drop is not an error, and writes nothing.
+      expect(await queue.dropAllFor({'friend-1'}), 0);
+    });
+
     test(
       'a corrupt file reads as an empty queue rather than throwing',
       () async {
@@ -481,6 +504,29 @@ void main() {
       );
     });
 
+    test('cancel() forgets what is owed for a friend, so a re-add cannot be '
+        'undone by a revocation still in the queue', () async {
+      await logIn();
+      await befriendAlice();
+      await queue.enqueue(
+        friendAccountId: aliceAccountId,
+        asAccountId: myAccountId,
+      );
+      accountServiceCalls.clear();
+
+      expect(await revocations.cancel([aliceAccountId]), 1);
+
+      expect(await queue.loadAll(), isEmpty);
+      // Cancelling is local disk only: it never tells the account service
+      // anything, and the friendship it was about is untouched.
+      expect(accountServiceCalls, isEmpty);
+      expect(
+        await friendRequestStore.areMutualFriends(myAccountId, aliceAccountId),
+        isTrue,
+      );
+      expect(await revocations.drain(), 0);
+    });
+
     test(
       'two concurrent drains do not send the same revocation twice',
       () async {
@@ -503,5 +549,192 @@ void main() {
         expect(await queue.loadAll(), isEmpty);
       },
     );
+  });
+
+  /// The scenario the durable queue exists for, played all the way through
+  /// against the real routes: unfriend with no connectivity, change your mind
+  /// with no connectivity, then come back online. Before this, the queued
+  /// revocation still went out and quietly ended the friendship on the other
+  /// side only.
+  group('re-adding cancels what the removal queued', () {
+    late FriendStore friendStore;
+    late UdpPuncher puncher;
+    late HttpServer nodeServer;
+    late String nodeUrl;
+
+    setUp(() async {
+      friendStore = FriendStore(nodeDir);
+      puncher = UdpPuncher(identity: myDevice, friendStore: friendStore);
+      await puncher.bind();
+      final router = Router()
+        ..mount(
+          '/api/v1/federation/',
+          buildFederationRouter(
+            friendStore,
+            RequestVerifier(friendStore),
+            PairingCodeStore(),
+            puncher,
+            accountService: accountService,
+            revocations: revocations,
+          ).call,
+        );
+      nodeServer = await shelf_io.serve(router.call, 'localhost', 0);
+      nodeUrl = 'http://localhost:${nodeServer.port}/api/v1/federation';
+    });
+
+    tearDown(() async {
+      await nodeServer.close(force: true);
+      await puncher.close();
+    });
+
+    /// Alice pairs with this node by redeeming a code, exactly as her own
+    /// server would -- optionally claiming her account, which this node only
+    /// believes if the account service is up to confirm it.
+    Future<http.Response> alicePairs({String? claimingAccountId}) async {
+      final code =
+          (jsonDecode(
+                    (await http.post(Uri.parse('$nodeUrl/pairing-codes'))).body,
+                  )
+                  as Map<String, dynamic>)['code']
+              as String;
+      return http.post(
+        Uri.parse('$nodeUrl/friends'),
+        body: jsonEncode({
+          'code': code,
+          'nodeId': alicePhone.nodeId,
+          'publicKeyBase64': await alicePhone.publicKeyBase64(),
+          'address': 'alice.example:8080',
+          'accountId': ?claimingAccountId,
+        }),
+      );
+    }
+
+    Future<http.Response> unfriend(String id) =>
+        http.delete(Uri.parse('$nodeUrl/friends/$id'));
+
+    test('re-pairing offline, after unfriending offline, means nothing is '
+        'sent once the network comes back', () async {
+      await logIn();
+      await befriendAlice();
+      await friendStore.add(
+        Friend(
+          accountId: aliceAccountId,
+          devices: [
+            FriendDevice(
+              nodeId: alicePhone.nodeId,
+              publicKeyBase64: await alicePhone.publicKeyBase64(),
+              address: 'alice.example:8080',
+            ),
+          ],
+          displayName: 'alice',
+        ),
+      );
+
+      // On a plane. The removal is instant and local either way, and what it
+      // owes the account service goes on the durable queue.
+      final port = accountServer.port;
+      await accountServer.close(force: true);
+      expect((await unfriend(aliceAccountId)).statusCode, 204);
+      await settleFailedOnce();
+      expect(await queue.loadAll(), hasLength(1));
+
+      // Still on the plane, they make up and pair again. With the account
+      // service unreachable the claim cannot be confirmed, so this lands as
+      // an ordinary device-pinned friend under a completely different id --
+      // which is why cancelling by the new entry's accountId alone is not
+      // enough.
+      final paired = await alicePairs(claimingAccountId: aliceAccountId);
+      expect(paired.statusCode, 201);
+      expect(
+        (jsonDecode(paired.body) as Map<String, dynamic>)['accountId'],
+        isNull,
+      );
+      expect(
+        await friendStore.findByDeviceNodeId(alicePhone.nodeId),
+        isNotNull,
+      );
+
+      expect(
+        await queue.loadAll(),
+        isEmpty,
+        reason:
+            're-adding somebody must cancel the revocation their removal '
+            'queued, or the friendship silently ends on their side only',
+      );
+
+      // The plane lands.
+      final router = Router()
+        ..mount(
+          '/accounts/',
+          buildAccountRouter(accountStore, friendRequestStore).call,
+        );
+      accountServer = await shelf_io.serve(router.call, 'localhost', port);
+      accountServiceCalls.clear();
+
+      expect(await revocations.drain(), 0);
+      expect(accountServiceCalls, isEmpty);
+      expect(
+        await friendRequestStore.areMutualFriends(myAccountId, aliceAccountId),
+        isTrue,
+        reason:
+            'the queued revocation went out anyway and unfriended her on '
+            'the account service, while this node still holds her',
+      );
+    });
+
+    test('re-pairing with the account service up cancels it too, by the '
+        'account the pair is confirmed under', () async {
+      await logIn();
+      await befriendAlice();
+      await friendStore.add(
+        Friend(
+          accountId: aliceAccountId,
+          devices: [
+            FriendDevice(
+              nodeId: alicePhone.nodeId,
+              publicKeyBase64: await alicePhone.publicKeyBase64(),
+              address: 'alice.example:8080',
+            ),
+          ],
+        ),
+      );
+      // Queued directly, so the removal's own unawaited drain cannot deliver
+      // it before the re-pair -- the race would make this test about timing
+      // rather than about cancelling.
+      await queue.enqueue(
+        friendAccountId: aliceAccountId,
+        asAccountId: myAccountId,
+      );
+
+      final paired = await alicePairs(claimingAccountId: aliceAccountId);
+      expect(paired.statusCode, 201);
+      expect(
+        (jsonDecode(paired.body) as Map<String, dynamic>)['accountId'],
+        aliceAccountId,
+      );
+
+      expect(await queue.loadAll(), isEmpty);
+      expect(await revocations.drain(), 0);
+      expect(
+        await friendRequestStore.areMutualFriends(myAccountId, aliceAccountId),
+        isTrue,
+      );
+    });
+
+    test('pairing with somebody who was never removed touches the queue of '
+        'whoever *is* owed a revocation, and nobody else', () async {
+      await logIn();
+      await befriendAlice();
+      await queue.enqueue(
+        friendAccountId: 'somebody-else',
+        asAccountId: myAccountId,
+      );
+
+      expect((await alicePairs()).statusCode, 201);
+
+      final owed = await queue.loadAll();
+      expect(owed, hasLength(1));
+      expect(owed.single.friendAccountId, 'somebody-else');
+    });
   });
 }

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:musicat/core/embedded_server/default_relay.dart';
 import 'package:musicat/core/embedded_server/embedded_server.dart';
 import 'package:musicat/features/friends/domain/musicat_server_config.dart';
 import 'package:musicat/features/friends/presentation/musicat_server_config_controller.dart';
@@ -85,6 +86,60 @@ void main() {
     });
   });
 
+  group('a fresh install, against a real embedded server', () {
+    late Directory supportDir;
+
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      supportDir = Directory.systemTemp.createTempSync(
+        'musicat_embedded_server_default_relay_test_',
+      );
+      PathProviderPlatform.instance = _TempDirPathProvider(supportDir.path);
+    });
+
+    tearDown(() => supportDir.deleteSync(recursive: true));
+
+    test(
+      'with nothing configured at all, the server this app really starts '
+      "is given the relay the build ships — the whole \"zero "
+      'configuration" claim, proven through the actual provider rather '
+      'than through the resolver alone',
+      () async {
+        final logLines = <String>[];
+        final previousDebugPrint = debugPrint;
+        debugPrint = (String? message, {int? wrapWidth}) {
+          if (message != null) logLines.add(message);
+        };
+        // Nothing listens there, so the connection fails and the server
+        // carries on — which is fine: what this proves is *which* relay it
+        // reached for, with an untouched SharedPreferences behind it.
+        const shipped = 'ws://127.0.0.1:1/shipped-relay-for-testing';
+
+        final container = ProviderContainer(
+          overrides: [defaultRelayUrlProvider.overrideWithValue(shipped)],
+        );
+        addTearDown(container.dispose);
+
+        try {
+          await container.read(embeddedServerProvider.future);
+        } finally {
+          debugPrint = previousDebugPrint;
+        }
+
+        expect(
+          logLines,
+          contains(
+            '[MusicatServer] Relay: could not connect to $shipped '
+            '(continuing without it)',
+          ),
+        );
+      },
+      skip: (Platform.isLinux || Platform.isWindows)
+          ? false
+          : 'the embedded server only runs in-process on Linux/Windows',
+    );
+  });
+
   group('startEmbeddedServerIfSupported — relayUrl pass-through', () {
     test(
       'a configured relayUrl reaches startMusicatServer -- the '
@@ -155,6 +210,94 @@ void main() {
           ? false
           : 'startEmbeddedServerIfSupported only runs on Linux/Windows',
     );
+  });
+
+  group('the relay a fresh install actually uses', () {
+    // Stands in for `defaultRelayUrl`, the one constant a build fills in
+    // to ship a relay. Passed explicitly so both "this build ships one"
+    // and "it does not" are covered whichever way that constant happens
+    // to be set (it is empty today).
+    const shipped = 'ws://relay.test:8090/connect';
+
+    setUp(() => SharedPreferences.setMockInitialValues({}));
+
+    test('resolveRelayUrl: a relay the user typed always wins over the '
+        'one the build ships', () {
+      expect(
+        resolveRelayUrl('ws://mine.example:9000/connect', defaultUrl: shipped),
+        'ws://mine.example:9000/connect',
+      );
+    });
+
+    test('resolveRelayUrl: nothing configured means the shipped one, and '
+        'an empty value means the same thing rather than "no relay"', () {
+      expect(resolveRelayUrl(null, defaultUrl: shipped), shipped);
+      expect(resolveRelayUrl('', defaultUrl: shipped), shipped);
+    });
+
+    test('resolveRelayUrl: with no shipped relay either, there is genuinely '
+        'none — never a guess', () {
+      expect(resolveRelayUrl(null, defaultUrl: ''), isNull);
+      expect(resolveRelayUrl('', defaultUrl: ''), isNull);
+    });
+
+    test('a fresh install (nothing ever saved) reaches a working account '
+        'service with zero configuration', () async {
+      final relayUrl = await resolveEmbeddedServerRelayUrl(defaultUrl: shipped);
+
+      expect(relayUrl, shipped);
+      // The whole chain the account routes hang off: this is what
+      // `embeddedServerProvider` hands `startMusicatServer`, and what
+      // makes signing in possible at all.
+      expect(
+        accountServiceUrlForRelay(relayUrl),
+        'http://relay.test:8090/accounts',
+      );
+    });
+
+    test(
+      'someone who already typed their own relay keeps it, untouched',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'musicatServerRelayUrl': 'ws://mine.example:9000/connect',
+        });
+
+        expect(
+          await resolveEmbeddedServerRelayUrl(defaultUrl: shipped),
+          'ws://mine.example:9000/connect',
+        );
+      },
+    );
+
+    test('clearing the field goes back to the shipped relay, and never '
+        'writes that default into the saved config', () async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      // Exactly what the settings sheet saves when the field is emptied.
+      await container
+          .read(musicatServerConfigControllerProvider.notifier)
+          .save(
+            const MusicatServerConfig(
+              host: '',
+              port: 8080,
+              myPublicAddress: '',
+              useEmbeddedServer: true,
+            ),
+          );
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('musicatServerRelayUrl'), '');
+      expect(await resolveEmbeddedServerRelayUrl(defaultUrl: shipped), shipped);
+    });
+
+    test('with no relay anywhere, the embedded server runs without one and '
+        'derives no account service — this app before this round', () async {
+      final relayUrl = await resolveEmbeddedServerRelayUrl(defaultUrl: '');
+
+      expect(relayUrl, isNull);
+      expect(accountServiceUrlForRelay(relayUrl), isNull);
+    });
   });
 
   group('accountServiceUrlForRelay', () {

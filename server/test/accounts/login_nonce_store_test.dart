@@ -36,6 +36,38 @@ void main() {
     expect(store.redeem('alice'), isNull);
   });
 
+  test('expired nonces are swept, so an unauthenticated caller cannot grow '
+      'this map forever with made-up usernames', () async {
+    final store = LoginNonceStore(ttl: const Duration(milliseconds: 20));
+    for (var i = 0; i < 50; i++) {
+      store.generate('made-up-$i');
+    }
+    expect(store.pendingCount, 50);
+
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    // Any further `login/start` sweeps what has expired -- the map is
+    // bounded by "logins started in the last ttl", not by the process's
+    // lifetime.
+    store.generate('alice');
+
+    expect(store.pendingCount, 1);
+    expect(store.redeem('made-up-7'), isNull);
+    expect(store.redeem('alice'), isNotNull);
+  });
+
+  test('maxPending caps even un-expired nonces, so a flood costs bounded '
+      'memory rather than the process', () {
+    final store = LoginNonceStore(maxPending: 3);
+    for (var i = 0; i < 20; i++) {
+      store.generate('made-up-$i');
+    }
+
+    expect(store.pendingCount, lessThanOrEqualTo(3));
+    // The most recent attempt is always still redeemable: eviction takes
+    // whatever was closest to expiring.
+    expect(store.redeem('made-up-19'), isNotNull);
+  });
+
   test('nonces for different usernames are independent', () {
     final store = LoginNonceStore();
     final aliceNonce = store.generate('alice');

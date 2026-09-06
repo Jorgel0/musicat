@@ -276,6 +276,172 @@ void main() {
       );
     });
 
+    test(
+      'allowCreate: false 404s an unknown username instead of quietly '
+      'signing one up, and says so in a code the app can branch on',
+      () async {
+        await startNode(withAccountService: accountServiceUrl);
+
+        final response = await http.post(
+          Uri.parse(nodeUrl('/api/v1/account/login')),
+          body: jsonEncode({
+            'username': 'jorge',
+            'password': 'hunter2-ok',
+            'allowCreate': false,
+          }),
+        );
+
+        expect(response.statusCode, 404);
+        final body = jsonDecode(response.body) as Map<String, dynamic>;
+        expect(body['code'], 'no_such_account');
+        expect(body['error'], isNotEmpty);
+        expect(await accountStore.loadAll(), isEmpty);
+        expect(await AccountSessionStore(nodeDir).load(), isNull);
+
+        // ...and the same call with the flag flipped, which is what the app
+        // sends once the user has confirmed, creates it for real.
+        final confirmed = await http.post(
+          Uri.parse(nodeUrl('/api/v1/account/login')),
+          body: jsonEncode({
+            'username': 'jorge',
+            'password': 'hunter2-ok',
+            'allowCreate': true,
+          }),
+        );
+        expect(confirmed.statusCode, 200);
+        expect(
+          (jsonDecode(confirmed.body) as Map<String, dynamic>)['created'],
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'allowCreate: false signs in normally to an account that exists',
+      () async {
+        await startNode(withAccountService: accountServiceUrl);
+        expect(
+          (await logIn(username: 'jorge', password: 'hunter2-ok')).statusCode,
+          200,
+        );
+        await http.delete(Uri.parse(nodeUrl('/api/v1/account')));
+
+        final response = await http.post(
+          Uri.parse(nodeUrl('/api/v1/account/login')),
+          body: jsonEncode({
+            'username': 'jorge',
+            'password': 'hunter2-ok',
+            'allowCreate': false,
+          }),
+        );
+
+        expect(response.statusCode, 200);
+        expect(
+          (jsonDecode(response.body) as Map<String, dynamic>)['created'],
+          isFalse,
+        );
+      },
+    );
+
+    test('400s a too-short password on creation, naming the minimum, with a '
+        'code that tells it apart from an invalid username', () async {
+      await startNode(withAccountService: accountServiceUrl);
+
+      final response = await logIn(username: 'jorge', password: 'short');
+
+      expect(response.statusCode, 400);
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      expect(body['code'], 'password_too_short');
+      expect(body['error'], contains('8'));
+      expect(await accountStore.loadAll(), isEmpty);
+
+      final badUsername = await logIn(username: 'no', password: 'hunter2-ok');
+      expect(badUsername.statusCode, 400);
+      expect(
+        (jsonDecode(badUsername.body) as Map<String, dynamic>)['code'],
+        'invalid_username',
+      );
+    });
+
+    test('a different capitalization signs in to the same account, and the '
+        'canonical spelling is what comes back', () async {
+      await startNode(withAccountService: accountServiceUrl);
+      final first = await logIn(username: 'jorge', password: 'hunter2-ok');
+      final accountId =
+          (jsonDecode(first.body) as Map<String, dynamic>)['accountId'];
+
+      final second = await logIn(username: 'Jorge', password: 'hunter2-ok');
+
+      expect(second.statusCode, 200);
+      final body = jsonDecode(second.body) as Map<String, dynamic>;
+      expect(body['accountId'], accountId);
+      expect(body['username'], 'jorge');
+      expect(body['created'], isFalse);
+      expect(await accountStore.loadAll(), hasLength(1));
+    });
+
+    test('409s a username two accounts hold in different cases -- an operator '
+        'problem, never dressed up as a transient outage', () async {
+      await startNode(withAccountService: accountServiceUrl);
+      expect(
+        (await logIn(username: 'jorge', password: 'hunter2-ok')).statusCode,
+        200,
+      );
+      // Only reachable through data written before usernames were
+      // case-insensitive, so it is written the same way.
+      final file = File('${accountsDir.path}/accounts.json');
+      final raw = jsonDecode(file.readAsStringSync()) as List<dynamic>;
+      final clone = Map<String, dynamic>.from(raw.single as Map)
+        ..['accountId'] = 'the-other-jorge'
+        ..['username'] = 'Jorge'
+        ..['devices'] = <dynamic>[];
+      file.writeAsStringSync(jsonEncode([...raw, clone]));
+
+      final response = await logIn(username: 'jorge', password: 'hunter2-ok');
+
+      expect(
+        response.statusCode,
+        409,
+        reason:
+            'a 502 here would tell the user to wait and try again, which is '
+            'the one thing that can never fix this',
+      );
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      expect(body['code'], 'ambiguous_username');
+      expect(body['error'], contains('capitalization'));
+    });
+
+    test('signing in as a second account really switches this node over, '
+        'instead of stranding it acting as the first', () async {
+      await startNode(withAccountService: accountServiceUrl);
+      expect(
+        (await logIn(username: 'jorge', password: 'hunter2-ok')).statusCode,
+        200,
+      );
+
+      final second = await logIn(username: 'bob', password: 'hunter3-ok');
+
+      expect(second.statusCode, 200);
+      expect(
+        (jsonDecode(second.body) as Map<String, dynamic>)['created'],
+        isTrue,
+      );
+      final session = await AccountSessionStore(nodeDir).load();
+      expect(session!.username, 'bob');
+
+      // The symptom this fixes: every account route used to answer `403
+      // Cannot act as another account`, so the friend-request list stuck at
+      // `live: false, fetchedAt: null` forever, with "try again" advice that
+      // could never work.
+      final listed = await http.get(
+        Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+      );
+      expect(listed.statusCode, 200);
+      final body = jsonDecode(listed.body) as Map<String, dynamic>;
+      expect(body['live'], isTrue);
+      expect(body['fetchedAt'], isNotEmpty);
+    });
+
     test('a successful login has already synced the account friends by the '
         'time it answers', () async {
       await startNode(withAccountService: accountServiceUrl);
@@ -719,8 +885,8 @@ void main() {
       expect((friends.single as Map<String, dynamic>)['displayName'], 'alice');
     });
 
-    test('accepting cannot resurrect an account this device deliberately '
-        'removed -- Rule 2 has no exception here', () async {
+    test('accepting a request from someone this device removed really does '
+        'befriend them again -- an explicit accept is not a sync', () async {
       await withTwoAccounts();
       // The user unfriended Alice at some point. A tombstone says so.
       await FriendStore(nodeDir).remove(aliceAccountId);
@@ -734,15 +900,50 @@ void main() {
         Uri.parse(nodeUrl('/api/v1/account/friend-requests/$requestId/accept')),
       );
 
-      // The accept itself succeeds -- it is a fact about the *account*, and
-      // this device does not get to veto it on the service.
       expect(response.statusCode, 200);
-      // ...but this device still refuses to trust her locally, and only an
-      // explicit local re-add can change that.
+      // Before this, the accept answered exactly this `200`, the UI said
+      // "you are now friends", and locally nothing at all had happened --
+      // `addFromAccountService` refused the tombstoned account and said so
+      // to nobody. The only way back was pairing by code.
+      final friend = await FriendStore(nodeDir).findByAccountId(aliceAccountId);
+      expect(friend, isNotNull);
+      expect(await FriendStore(nodeDir).isRemoved(aliceAccountId), isFalse);
+      expect(
+        jsonDecode(
+          (await http.get(
+            Uri.parse(nodeUrl('/api/v1/federation/friends')),
+          )).body,
+        ),
+        hasLength(1),
+      );
+    });
+
+    test('...while a *sync* still refuses one -- removing her again holds '
+        'against every re-login, which is what Rule 2 actually says', () async {
+      await withTwoAccounts();
+      final sent = await aliceSendsMeARequest();
+      final requestId =
+          (jsonDecode(sent.body) as Map<String, dynamic>)['id'] as String;
+      await http.post(
+        Uri.parse(nodeUrl('/api/v1/account/friend-requests/$requestId/accept')),
+      );
+      expect(
+        await FriendStore(nodeDir).findByAccountId(aliceAccountId),
+        isNotNull,
+      );
+
+      // Now she is an accepted friend on the account service, so every sync
+      // from here on is handed her by the authoritative list -- and none of
+      // them may bring her back.
+      await FriendStore(nodeDir).remove(aliceAccountId);
+      final relogin = await logIn(username: 'jorge', password: 'hunter2-ok');
+      expect(relogin.statusCode, 200);
+
       expect(
         await FriendStore(nodeDir).findByAccountId(aliceAccountId),
         isNull,
       );
+      expect(await FriendStore(nodeDir).isRemoved(aliceAccountId), isTrue);
       expect(
         jsonDecode(
           (await http.get(
@@ -751,6 +952,46 @@ void main() {
         ),
         isEmpty,
       );
+    });
+
+    test(
+      'sending a request to someone this device removed forgets the '
+      'removal too -- the same explicit decision, from the other side',
+      () async {
+        await withTwoAccounts();
+        await FriendStore(nodeDir).remove(aliceAccountId);
+
+        final sent = await http.post(
+          Uri.parse(nodeUrl('/api/v1/account/friend-requests')),
+          body: jsonEncode({'toUsername': 'alice'}),
+        );
+        expect(sent.statusCode, 201);
+
+        // Nobody is a friend yet -- she still has to accept -- but the
+        // tombstone that would have made her acceptance a silent no-op is
+        // gone.
+        expect(await FriendStore(nodeDir).isRemoved(aliceAccountId), isFalse);
+        expect(await FriendStore(nodeDir).loadAll(), isEmpty);
+      },
+    );
+
+    test('declining leaves a removal exactly where it was -- saying no is '
+        'not an explicit yes', () async {
+      await withTwoAccounts();
+      await FriendStore(nodeDir).remove(aliceAccountId);
+      final sent = await aliceSendsMeARequest();
+      final requestId =
+          (jsonDecode(sent.body) as Map<String, dynamic>)['id'] as String;
+
+      final response = await http.post(
+        Uri.parse(
+          nodeUrl('/api/v1/account/friend-requests/$requestId/decline'),
+        ),
+      );
+
+      expect(response.statusCode, 200);
+      expect(await FriendStore(nodeDir).isRemoved(aliceAccountId), isTrue);
+      expect(await FriendStore(nodeDir).loadAll(), isEmpty);
     });
 
     test(

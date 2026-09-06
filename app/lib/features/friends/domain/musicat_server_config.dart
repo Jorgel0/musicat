@@ -74,9 +74,15 @@ class MusicatServerConfig {
   /// device's own LAN) when direct NAT hole-punching doesn't work for that
   /// pair of networks -- the same role the CLI/self-hosting path's own
   /// `MUSICAT_RELAY_URL` environment variable already plays (ADR 0035).
-  /// `null`/empty (the default) means no relay is configured; this project
-  /// has no baked-in default relay of its own to point at -- self-hosting
-  /// one is on the user, same as for a manually self-hosted server.
+  /// `null`/empty means "use whatever relay this build of Musicat ships
+  /// with" (`defaultRelayUrl`, `core/embedded_server/default_relay.dart`),
+  /// **not** "no relay": this field is an override for someone running
+  /// their own relay, and clearing it goes back to the built-in one rather
+  /// than to nothing. Only when this build ships no default either does the
+  /// embedded server genuinely run without a relay. Resolving the two is
+  /// `resolveRelayUrl`'s job, at server-start time -- the default is never
+  /// written back into this field, so a self-hoster's own value can never
+  /// be silently replaced.
   /// Ignored (but preserved) when [useEmbeddedServer] is `false`: a
   /// manually-configured remote server sets its own relay independently,
   /// through its own environment, not through this app.

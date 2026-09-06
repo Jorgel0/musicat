@@ -143,13 +143,25 @@ class FriendRequestsSnapshot {
 }
 
 class AccountClientException implements Exception {
-  const AccountClientException(this.statusCode, this.message);
+  const AccountClientException(this.statusCode, this.message, {this.code});
 
   final int statusCode;
   final String message;
 
+  /// The server's machine-readable reason, when it sent one (e.g.
+  /// `password_too_short`, `ambiguous_username`) — `null` for an older
+  /// node, or for anything that never reached the server at all.
+  ///
+  /// Branch on this, show [message]. The status alone is not enough: a
+  /// `400` is both "that username has characters we don't allow" and
+  /// "that password is too short to create an account with", and the two
+  /// need different help. Reading [message] to tell them apart works
+  /// until somebody rewords a sentence.
+  final String? code;
+
   @override
-  String toString() => 'AccountClientException($statusCode, $message)';
+  String toString() =>
+      'AccountClientException($statusCode, $message, code: $code)';
 }
 
 /// Talks to *this device's own* Musicat Server about the portable account
@@ -174,26 +186,40 @@ class AccountClient {
 
   final Dio _dio;
 
-  /// Signs in as [username], **creating the account if that username is
-  /// free** — one call, because the server has one endpoint: there is no
-  /// separate sign-up. [SignInResult.created] says which of the two just
-  /// happened.
+  /// Signs in as [username] — one call, because the server has one
+  /// endpoint: there is no separate sign-up. [SignInResult.created] says
+  /// which of the two just happened.
+  ///
+  /// [allowCreate] is what keeps a typo from quietly becoming a second,
+  /// empty account. With it `false`, an unknown username answers `404`
+  /// instead of creating anything, which is how the sign-in screen gets to
+  /// ask "no account called this yet — create it?" before anything exists.
+  /// Sent explicitly either way rather than relying on the route's own
+  /// default (`true`), so what this call means is readable at the call
+  /// site.
   ///
   /// By the time this returns, this device's server has already synced the
   /// account's friends, so `GET /api/v1/federation/friends` is up to date.
   ///
   /// Throws [AccountClientException] with the status the UI needs to tell
-  /// the cases apart: `401` wrong password, `429` too many attempts, `400`
-  /// an unusable username, `502`/`503` accounts unavailable right now (in
-  /// particular: *not* the user's fault).
+  /// the cases apart: `401` wrong password, `404` no such account (only
+  /// possible with [allowCreate] `false`), `429` too many attempts, `400`
+  /// a username the service will not accept *or* a password too short to
+  /// create an account with, `502`/`503` accounts unavailable right now
+  /// (in particular: *not* the user's fault).
   Future<SignInResult> signIn({
     required String username,
     required String password,
+    bool allowCreate = true,
   }) async {
     final response = await _handle(
       () => _dio.post<Map<String, dynamic>>(
         '/api/v1/account/login',
-        data: {'username': username, 'password': password},
+        data: {
+          'username': username,
+          'password': password,
+          'allowCreate': allowCreate,
+        },
       ),
     );
     return SignInResult.fromJson(response.data!);
@@ -268,6 +294,7 @@ class AccountClient {
       throw AccountClientException(
         e.response?.statusCode ?? 0,
         _errorMessage(e),
+        code: _errorCode(e),
       );
     }
   }
@@ -277,5 +304,13 @@ class AccountClient {
     if (data is Map && data['error'] is String) return data['error'] as String;
     if (data is String) return data;
     return e.message ?? 'Unknown error';
+  }
+
+  /// The `code` field the node sends beside `error`. Absent on an older
+  /// node, so every caller has to cope with `null` rather than assume it.
+  String? _errorCode(DioException e) {
+    final data = e.response?.data;
+    if (data is Map && data['code'] is String) return data['code'] as String;
+    return null;
   }
 }

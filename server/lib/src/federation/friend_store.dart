@@ -13,8 +13,9 @@ import 'friend.dart';
 /// silently undone by the next device-list refresh or friend sync ("I
 /// removed them and they came back"). Every path that could ever *learn*
 /// about a friend account from the account service must consult
-/// [FriendStore.isRemoved] first; only an explicit local re-add
-/// ([FriendStore.add], i.e. the user pairing/accepting again) clears one.
+/// [FriendStore.isRemoved] first; only an explicit *user action* clears one
+/// -- re-pairing ([FriendStore.add]) or answering a friend request in this
+/// person's favour ([FriendStore.forgetRemoval]). No sync ever does.
 class FriendTombstone {
   const FriendTombstone({
     required this.accountId,
@@ -74,9 +75,9 @@ class FriendStore {
   final Directory dataDirectory;
 
   /// Serializes every mutating call on *this* store instance ([add],
-  /// [addFromAccountService], [remove], [removeFromAccountService],
-  /// [setLocalNickname] and [updateDevices]) so their
-  /// load-mutate-save cycles can never interleave -- the same plain
+  /// [addFromAccountService], [forgetRemoval], [remove],
+  /// [removeFromAccountService], [setLocalNickname] and [updateDevices]) so
+  /// their load-mutate-save cycles can never interleave -- the same plain
   /// `Future`-chaining mutex `AccountStore._mutationLock` and
   /// `UsernameDirectoryStore._claimLock` already use, for the same reason
   /// (issue #8), and for the same scope: this only has to serialize
@@ -188,12 +189,18 @@ class FriendStore {
   }
 
   /// Adds [friend], **superseding** any existing entry that names the same
-  /// [Friend.accountId] *or* that shares any of [Friend.devices]' nodeIds.
+  /// [Friend.accountId] *or* that shares any of [Friend.devices]' nodeIds,
+  /// and stamping the entry as locally-established trust (see
+  /// [Friend.confirmedByAccountService] and
+  /// [FriendDevice.relayUrlFromPairing], both decided here rather than by the
+  /// caller).
   ///
-  /// This is the *explicit* local trust decision (redeeming a pairing code,
-  /// accepting a friend request), so it also clears any [FriendTombstone]
-  /// for that account: re-adding someone you previously removed has to
-  /// work. Nothing else clears a tombstone.
+  /// This is the *explicit* local trust decision (redeeming a pairing code),
+  /// so it also clears any [FriendTombstone] for that account: re-adding
+  /// someone you previously removed has to work. The only other thing that
+  /// clears one is [forgetRemoval], which is the same decision arriving by a
+  /// different route (the user accepting or sending a friend request); no
+  /// sync ever does.
   ///
   /// Superseding on a shared *device* nodeId, not just on the accountId,
   /// is what makes this refactor's headline migration path work: someone
@@ -224,10 +231,22 @@ class FriendStore {
           f.devices.any((device) => incomingNodeIds.contains(device.nodeId)),
     );
     // Whatever the caller passed, an entry written by *this* method is local
-    // trust: [Friend.confirmedByAccountService] is decided here, not by
-    // callers, so a friend the user paired with can never be mistaken for
-    // one a sync may later delete.
-    friends.add(friend.copyWith(confirmedByAccountService: false));
+    // trust, and both provenance flags are decided here rather than by
+    // callers, so neither can be got wrong from outside:
+    // [Friend.confirmedByAccountService] false, so a friend the user paired
+    // with can never be mistaken for one a sync may later delete; and every
+    // device's [FriendDevice.relayUrlFromPairing] true, since reaching this
+    // method means the device itself reported that relay directly to this
+    // node, which is exactly the provenance `mergeFriendDevices` prefers.
+    friends.add(
+      friend.copyWith(
+        confirmedByAccountService: false,
+        devices: [
+          for (final device in friend.devices)
+            device.copyWith(relayUrlFromPairing: true),
+        ],
+      ),
+    );
     // Tombstone first, friend list second: a crash between the two writes
     // must never leave a friend trusted while a tombstone still says they
     // were removed, which would be a trusted friend that every path
@@ -236,6 +255,42 @@ class FriendStore {
     await _clearTombstone(friend.accountId);
     await _save(friends);
   }
+
+  /// Forgets the [FriendTombstone] for [accountId], because the user has
+  /// **explicitly** decided to be friends with them again by some route that
+  /// isn't [add]. Returns whether there was one. Purely local, instant, and
+  /// safe with every network down.
+  ///
+  /// The tombstone rule is "no later *sync* may resurrect a removal", and it
+  /// had been implemented as "nothing may, ever", which quietly broke every
+  /// recovery path there is. Accepting a friend request from someone this
+  /// device once removed went through [addFromAccountService], which refuses
+  /// a tombstoned account inside its own lock: the account service said
+  /// `200`, the app said "you are now friends", and locally nothing at all
+  /// happened, with no way out but the pairing-code dance that accounts exist
+  /// to abolish. **An explicit user action is not a sync.**
+  ///
+  /// Callers must be exactly that -- a person tapping Accept, or sending a
+  /// friend request to a named username (`account_app_routes.dart` is the
+  /// only caller, on both). Anything reached from a timer, a poll or a relay
+  /// push must not call this: [addFromAccountService] and [updateDevices]
+  /// keep refusing tombstoned accounts, which is what still makes a removal
+  /// stick against everything that isn't the user.
+  ///
+  /// Deliberately *not* folded into [addFromAccountService] as a flag. The
+  /// refusal there is checked inside the store's lock precisely so no caller
+  /// can get it wrong, and a "unless the caller says otherwise" parameter on
+  /// it would be one `true` away from re-opening the resurrection race for
+  /// every sync. Clearing the tombstone first and letting the ordinary sync
+  /// path find nothing to refuse keeps that check absolute. The race it
+  /// leaves is the harmless direction: a [remove] landing between the two
+  /// re-tombstones the account and the adoption is refused -- the user's most
+  /// recent decision wins, which is also exactly how [add] behaves.
+  Future<bool> forgetRemoval(String accountId) => _locked(() async {
+    if (!await isRemoved(accountId)) return false;
+    await _clearTombstone(accountId);
+    return true;
+  });
 
   /// Adds a friend account **learned from the account service** rather than
   /// established locally — the only way a sync may ever *create* a friend,
@@ -350,8 +405,8 @@ class FriendStore {
   ///   the sync that would apply it goes through [addFromAccountService],
   ///   which refuses a tombstoned account -- so the two of you would agree
   ///   you are friends everywhere except on this node, forever, with no
-  ///   error anywhere. Nothing clears a tombstone but an explicit local
-  ///   [add].
+  ///   error anywhere. Nothing clears a tombstone but an explicit user
+  ///   action ([add] or [forgetRemoval]), and being unfriended is not one.
   /// Nothing is lost by not writing one: the account service is
   /// authoritative about this friendship, so the only way the friend comes
   /// back is the only way that *should* bring them back -- that same service

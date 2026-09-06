@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:shelf/shelf.dart';
@@ -8,6 +9,7 @@ import 'package:shelf_router/shelf_router.dart';
 import '../identity/node_identity.dart';
 import '../relay/username_directory_store.dart' show invalidUsernameFormatError;
 import 'account.dart';
+import 'account_creation_limiter.dart';
 import 'account_request_auth.dart';
 import 'account_store.dart';
 import 'device_notifier.dart';
@@ -22,10 +24,58 @@ Response _json(Object? body, {int status = 200}) => Response(
   headers: {'content-type': 'application/json'},
 );
 
-Response _error(String message, {int status = 400}) =>
-    _json({'error': message}, status: status);
+/// Every error this service sends: a human-readable [message], and -- on the
+/// login path -- a stable machine-readable [code] beside it.
+///
+/// The code exists because `400` is genuinely two different refusals here (a
+/// username that doesn't match the format rule, and a password shorter than
+/// [minPasswordLength]), and the only other way for an app to tell them apart
+/// is to match on the wording of [message] -- an implicit contract that
+/// rewording a string silently breaks. [message] stays the thing shown to a
+/// person; [code] is the thing branched on. Omitted (the key is simply
+/// absent) wherever a status already says everything, so no existing response
+/// shape changes.
+Response _error(String message, {int status = 400, String? code}) =>
+    _json({'error': message, 'code': ?code}, status: status);
+
+/// The stable `code` values `POST /login/complete` sends beside its
+/// `error` message -- the machine-readable half of that contract (see
+/// [_error]). Constants rather than inline strings so a rename is a compile
+/// error here and a grep everywhere else; the *values* are the wire contract
+/// and must not change once an app matches on them.
+///
+/// Only the login path has these. Every other route's status code already
+/// says everything its caller needs, and inventing codes nobody reads would
+/// be a contract to keep for no benefit.
+const String invalidUsernameCode = 'invalid_username';
+const String passwordTooShortCode = 'password_too_short';
+const String noSuchAccountCode = 'no_such_account';
+const String ambiguousUsernameCode = 'ambiguous_username';
+const String incorrectPasswordCode = 'incorrect_password';
+const String loginRateLimitedCode = 'rate_limited';
+const String tooManyNewAccountsCode = 'too_many_new_accounts';
+
+/// The two `401`s that are *not* a wrong password: the single-use nonce was
+/// missing/expired, and the proof of key control didn't check out. A caller
+/// cannot fix either by asking the user for a better password, which is
+/// exactly why they are told apart from [incorrectPasswordCode].
+const String loginExpiredCode = 'login_expired';
+const String loginInvalidProofCode = 'invalid_login_proof';
 
 Map<String, dynamic> _deviceJson(DeviceLink device) => device.toJson();
+
+/// The key [AccountCreationLimiter] counts against: the source address this
+/// request really arrived from, or a single shared bucket when there is none
+/// (a synthetic request with no socket behind it -- the same
+/// `shelf.io.connection_info` key `requireLocal` reads, and the same
+/// treatment of its absence: no special trust for a caller that can't be
+/// placed).
+String _clientKeyOf(Request request) {
+  final connectionInfo = request.context['shelf.io.connection_info'];
+  return connectionInfo is HttpConnectionInfo
+      ? connectionInfo.remoteAddress.address
+      : 'unknown';
+}
 
 /// Every account's current username, by accountId -- one file read, reused
 /// for every request in a response, instead of one [AccountStore.findById]
@@ -180,7 +230,8 @@ Future<Response> _respondOutcomeResponse(
 /// repeatable query.)
 ///
 /// `POST /login/complete` `{username, password, nodeId, publicKeyBase64,
-/// signatureOverNonce, relayUrl?}` -- verifies, in order: [loginRateLimiter] isn't
+/// signatureOverNonce, relayUrl?, allowCreate?}` -- verifies, in order:
+/// [loginRateLimiter] isn't
 /// currently locking this username out (`429`); a pending nonce from
 /// `login/start` exists for this exact username and hasn't expired or
 /// already been consumed (`401`, single-use exactly like
@@ -193,6 +244,44 @@ Future<Response> _respondOutcomeResponse(
 /// device (`200`) if it did (`401` "Incorrect password" on a wrong one,
 /// which also feeds [loginRateLimiter]). Never creates a second,
 /// conflicting account on a race (see `AccountStore._mutationLock`).
+///
+/// **Usernames are case-insensitive** ([normalizeUsername]) everywhere here:
+/// stored, matched, echoed back canonical, and used as the key for both the
+/// nonce and the rate limiter -- that last one matters, since a limiter keyed
+/// by the raw string would give an attacker a fresh five guesses per
+/// capitalization. `409` for the one case that cannot be resolved: two
+/// pre-existing accounts differing only by case, which this refuses to choose
+/// between rather than silently shadowing one (see
+/// [AccountStore.findAllByUsername]).
+///
+/// **`allowCreate` (optional, default `true`) makes account creation opt-in
+/// on the wire.** With `false`, a username that has no account is answered
+/// `404 {"error": ...}` and nothing is written or hashed; the app calls with
+/// `false` first and re-sends with `true` once the user has confirmed they
+/// really mean to create one. That default keeps every existing caller
+/// working unchanged. It is a mild account-existence oracle -- a `404`
+/// instead of a `201` says the name is free -- and that is acceptable here
+/// for exactly the reason ADR 0048 already accepted for `login/complete`'s
+/// outcome generally: reaching it costs a `login/start` round trip plus a
+/// real Ed25519 signature over that specific nonce per guess, which is a far
+/// higher bar than a cheap repeatable query, and `login/start` itself still
+/// leaks nothing.
+///
+/// **A new account's password must be at least [minPasswordLength]
+/// characters** (`400`, with the minimum named in the message). Creation
+/// only: an existing account's password is never length-checked, because
+/// refusing one written before this rule would lock its owner out of their
+/// own account.
+///
+/// **Creating an account is rate-limited per source address**
+/// ([accountCreationLimiter], `429`), which [loginRateLimiter] never covered:
+/// it counts failures, and a signup is a success. See
+/// [AccountCreationLimiter] for what that does and does not stop.
+///
+/// **A device ends up linked to exactly one account.** Logging in as a
+/// different account unlinks this device from whichever one it was on, which
+/// is what makes a second account on the same device usable at all -- see
+/// [AccountStore.findByDeviceNodeId].
 ///
 /// The optional `relayUrl` is the logging-in device's own relay endpoint,
 /// and **every login refreshes it**, including a re-login from an
@@ -278,10 +367,12 @@ Router buildAccountRouter(
   FriendRequestStore friendRequestStore, {
   LoginNonceStore? loginNonceStore,
   LoginRateLimiter? loginRateLimiter,
+  AccountCreationLimiter? accountCreationLimiter,
   DeviceNotifier? deviceNotifier,
 }) {
   final nonces = loginNonceStore ?? LoginNonceStore();
   final rateLimiter = loginRateLimiter ?? LoginRateLimiter();
+  final creationLimiter = accountCreationLimiter ?? AccountCreationLimiter();
   final router = Router();
 
   router.post('/login/start', (Request request) async {
@@ -297,7 +388,10 @@ Router buildAccountRouter(
       return _error('"username" is required');
     }
 
-    final nonce = nonces.generate(username);
+    // Keyed by the canonical spelling, so `login/complete` -- which
+    // normalizes the same way -- finds the nonce whichever case the caller
+    // used for either call.
+    final nonce = nonces.generate(normalizeUsername(username));
     return _json({'nonceBase64': base64Encode(nonce)});
   });
 
@@ -315,6 +409,7 @@ Router buildAccountRouter(
     final publicKeyBase64 = body['publicKeyBase64'];
     final signatureOverNonce = body['signatureOverNonce'];
     final relayUrl = body['relayUrl'];
+    final allowCreate = body['allowCreate'];
     if (username is! String || username.isEmpty) {
       return _error('"username" is required');
     }
@@ -337,20 +432,34 @@ Router buildAccountRouter(
     if (relayUrl != null && relayUrl is! String) {
       return _error('"relayUrl" must be a string if present');
     }
+    // Optional, and `true` when absent -- the behaviour this endpoint has
+    // always had, so every existing caller is unaffected. See this router's
+    // doc comment for what `false` buys and what it discloses.
+    if (allowCreate != null && allowCreate is! bool) {
+      return _error('"allowCreate" must be a boolean if present');
+    }
 
-    if (rateLimiter.isLockedOut(username)) {
+    // Every key below is the canonical spelling: usernames are
+    // case-insensitive, and a rate limiter keyed by the raw string would
+    // hand an attacker a fresh budget of guesses per capitalization of the
+    // same account.
+    final canonicalUsername = normalizeUsername(username);
+
+    if (rateLimiter.isLockedOut(canonicalUsername)) {
       return _error(
         'Too many failed attempts for this username. Try again later.',
         status: 429,
+        code: loginRateLimitedCode,
       );
     }
 
-    final nonce = nonces.redeem(username);
+    final nonce = nonces.redeem(canonicalUsername);
     if (nonce == null) {
       return _error(
         'No pending login for this username, or it expired -- call '
         '/accounts/login/start again',
         status: 401,
+        code: loginExpiredCode,
       );
     }
 
@@ -366,7 +475,11 @@ Router buildAccountRouter(
     }
 
     if (await nodeIdForPublicKey(publicKeyBytes) != nodeId) {
-      return _error('"nodeId" does not match "publicKeyBase64"', status: 401);
+      return _error(
+        '"nodeId" does not match "publicKeyBase64"',
+        status: 401,
+        code: loginInvalidProofCode,
+      );
     }
 
     final publicKey = SimplePublicKey(
@@ -379,31 +492,85 @@ Router buildAccountRouter(
       signature: signature,
     );
     if (!signatureIsValid) {
-      return _error('Invalid signature over the login nonce', status: 401);
+      return _error(
+        'Invalid signature over the login nonce',
+        status: 401,
+        code: loginInvalidProofCode,
+      );
+    }
+
+    // Whether this attempt is about to *create* an account, which
+    // [AccountCreationLimiter] throttles and an ordinary login must not be
+    // charged for. Read outside [AccountStore]'s lock and therefore
+    // advisory: a race here can only mean one creation slipping past the cap
+    // or one login briefly looking like a creation, and the definitive
+    // answer -- `result.outcome` below -- is what is actually recorded.
+    final wouldCreate =
+        await accountStore.findByUsername(canonicalUsername) == null;
+    final clientKey = _clientKeyOf(request);
+    if (wouldCreate && !creationLimiter.allows(clientKey)) {
+      return _error(
+        'Too many new accounts from this address. Try again later.',
+        status: 429,
+        code: tooManyNewAccountsCode,
+      );
     }
 
     final result = await accountStore.loginOrSignup(
-      username: username,
+      username: canonicalUsername,
       password: password,
       nodeId: nodeId,
       publicKeyBase64: publicKeyBase64,
       relayUrl: (relayUrl is String && relayUrl.isNotEmpty) ? relayUrl : null,
+      allowCreate: allowCreate as bool? ?? true,
     );
 
     switch (result.outcome) {
       case LoginOutcome.invalidUsername:
-        return _error(invalidUsernameFormatError, status: 400);
+        return _error(
+          invalidUsernameFormatError,
+          status: 400,
+          code: invalidUsernameCode,
+        );
+      case LoginOutcome.passwordTooShort:
+        return _error(
+          'Password must be at least $minPasswordLength characters',
+          status: 400,
+          code: passwordTooShortCode,
+        );
+      case LoginOutcome.noSuchAccount:
+        // Deliberately not fed to [rateLimiter]: this is not a guess at
+        // anybody's password, and counting it would let a stranger lock a
+        // *free* username out of being signed up for.
+        return _error(
+          'No account with that username',
+          status: 404,
+          code: noSuchAccountCode,
+        );
+      case LoginOutcome.ambiguousUsername:
+        return _error(
+          'This username is held by two accounts that differ only in '
+          'capitalization. An operator has to resolve that before either '
+          'can be used.',
+          status: 409,
+          code: ambiguousUsernameCode,
+        );
       case LoginOutcome.wrongPassword:
-        rateLimiter.recordFailure(username);
-        return _error('Incorrect password', status: 401);
+        rateLimiter.recordFailure(canonicalUsername);
+        return _error(
+          'Incorrect password',
+          status: 401,
+          code: incorrectPasswordCode,
+        );
       case LoginOutcome.created:
-        rateLimiter.recordSuccess(username);
+        rateLimiter.recordSuccess(canonicalUsername);
+        creationLimiter.record(clientKey);
         return _json(
           _loginResponseJson(result.account!, created: true),
           status: 201,
         );
       case LoginOutcome.linked:
-        rateLimiter.recordSuccess(username);
+        rateLimiter.recordSuccess(canonicalUsername);
         return _json(_loginResponseJson(result.account!, created: false));
     }
   });

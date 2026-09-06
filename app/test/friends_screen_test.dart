@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:musicat/core/embedded_server/default_relay.dart';
 import 'package:musicat/core/embedded_server/embedded_server.dart';
 import 'package:musicat/core/invite/invite_uri.dart';
 import 'package:musicat/core/invite/pending_invite.dart';
@@ -1267,5 +1268,251 @@ void main() {
         expect(client.addFriendCalls, isEmpty);
       },
     );
+  });
+
+  group('removing a friend is confirmed first', () {
+    /// One friend, plus a fake this test can ask what was actually
+    /// removed. `_FixedFriendsController` only fixes the *initial* state —
+    /// `removeFriend` still goes through the real controller and the real
+    /// client, which is the whole point here.
+    ({ProviderContainer container, FakeFederationClient client})
+    setUpOneFriend() {
+      const ada = FederationFriend(
+        nodeId: 'friend-1',
+        publicKeyBase64: 'pk1',
+        address: 'a.example:8080',
+        displayName: 'Ada',
+      );
+      final client = FakeFederationClient(friends: const [ada]);
+      final container = ProviderContainer(
+        overrides: [
+          signedOutAccountOverride,
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(_configured),
+          ),
+          federationClientProvider.overrideWithValue(client),
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(
+              const FriendsState(
+                friends: [
+                  FriendWithStatus(
+                    friend: ada,
+                    status: FriendConnectionStatus(connected: false),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      return (container: container, client: client);
+    }
+
+    testWidgets('asks first, naming who — and says what it costs', (
+      tester,
+    ) async {
+      final setup = setUpOneFriend();
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: setup.container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Remove friend'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove Ada?'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.textContaining(
+            'no longer be able to see anything you share',
+          ),
+        ),
+        findsOneWidget,
+      );
+      // Nothing has happened yet — the tap only opened the question.
+      expect(setup.client.removedNodeIds, isEmpty);
+    });
+
+    testWidgets('cancelling really cancels, and keeps the friend', (
+      tester,
+    ) async {
+      final setup = setUpOneFriend();
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: setup.container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Remove friend'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(setup.client.removedNodeIds, isEmpty);
+      expect(find.text('Ada'), findsOneWidget);
+    });
+
+    testWidgets('confirming removes exactly that friend, and says so', (
+      tester,
+    ) async {
+      final setup = setUpOneFriend();
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: setup.container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Remove friend'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Remove'));
+      await tester.pumpAndSettle();
+
+      expect(setup.client.removedNodeIds, ['friend-1']);
+      expect(find.text('Removed Ada.'), findsOneWidget);
+    });
+  });
+
+  group('the relay field is an override, not the only way to have one', () {
+    /// The settings sheet, with [defaultRelay] standing in for
+    /// `defaultRelayUrl` — the constant a build fills in to ship a relay.
+    Future<ProviderContainer> openSheet(
+      WidgetTester tester, {
+      required String defaultRelay,
+      String? configuredRelay,
+    }) async {
+      final client = FakeFederationClient();
+      final container = ProviderContainer(
+        overrides: [
+          signedOutAccountOverride,
+          defaultRelayUrlProvider.overrideWithValue(defaultRelay),
+          musicatServerConfigControllerProvider.overrideWith(
+            () => MusicatServerConfigController(
+              MusicatServerConfig(
+                host: '',
+                port: 8080,
+                myPublicAddress: 'me.example:8080',
+                useEmbeddedServer: true,
+                relayUrl: configuredRelay,
+              ),
+            ),
+          ),
+          federationClientProvider.overrideWithValue(client),
+          friendsControllerProvider.overrideWith(
+            () => _FixedFriendsController(const FriendsState()),
+          ),
+          embeddedServerProvider.overrideWith(
+            (ref) async => const EmbeddedServerInfo(port: 12345),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: FriendsScreen()),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Musicat Server settings'));
+      await tester.pumpAndSettle();
+      return container;
+    }
+
+    testWidgets('an empty field is offered as "use the one Musicat comes '
+        'with", not as "no relay"', (tester) async {
+      await openSheet(tester, defaultRelay: 'ws://relay.test:8090/connect');
+
+      final field = tester.widget<TextField>(
+        find.widgetWithText(TextField, 'Relay URL (optional)'),
+      );
+      expect(field.controller!.text, isEmpty);
+      expect(
+        field.decoration!.hintText,
+        contains('Leave it empty to use the one Musicat comes with'),
+      );
+    });
+
+    testWidgets('a build with no relay of its own says so in the field, '
+        'instead of implying one exists', (tester) async {
+      await openSheet(tester, defaultRelay: '');
+
+      final field = tester.widget<TextField>(
+        find.widgetWithText(TextField, 'Relay URL (optional)'),
+      );
+      expect(field.decoration!.hintText, contains('does not come with one'));
+    });
+
+    testWidgets('a relay the user set survives a default appearing in the '
+        'build: it is what is shown, kept, and used', (tester) async {
+      final container = await openSheet(
+        tester,
+        defaultRelay: 'ws://relay.test:8090/connect',
+        configuredRelay: 'wss://mine.example/connect',
+      );
+
+      final field = tester.widget<TextField>(
+        find.widgetWithText(TextField, 'Relay URL (optional)'),
+      );
+      expect(field.controller!.text, 'wss://mine.example/connect');
+
+      // Saving something else entirely leaves it exactly as it was.
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Your display name'),
+        'Jorge',
+      );
+      await tester.ensureVisible(find.widgetWithText(FilledButton, 'Save'));
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      expect(
+        container.read(musicatServerConfigControllerProvider).relayUrl,
+        'wss://mine.example/connect',
+      );
+      expect(
+        container.read(effectiveRelayUrlProvider),
+        'wss://mine.example/connect',
+      );
+    });
+
+    testWidgets('clearing it falls back to the build\'s own relay, and says '
+        'a restart is what makes that real', (tester) async {
+      final container = await openSheet(
+        tester,
+        defaultRelay: 'ws://relay.test:8090/connect',
+        configuredRelay: 'wss://mine.example/connect',
+      );
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Relay URL (optional)'),
+        '',
+      );
+      await tester.ensureVisible(find.widgetWithText(FilledButton, 'Save'));
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      // Nothing stored — and that means the shipped relay, not "none".
+      expect(
+        container.read(musicatServerConfigControllerProvider).relayUrl,
+        isNull,
+      );
+      expect(
+        container.read(effectiveRelayUrlProvider),
+        'ws://relay.test:8090/connect',
+      );
+      expect(
+        find.text('Saved. Restart Musicat to start using it.'),
+        findsOneWidget,
+      );
+    });
   });
 }
