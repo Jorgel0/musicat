@@ -1258,6 +1258,64 @@ void main() {
       expect(response.statusCode, 200);
     });
 
+    test('an account sees when each of its own devices last logged in, so two '
+        'devices of the same kind are still tellable apart', () async {
+      // The whole job of this list is "pick the phone you lost and revoke
+      // it". `deviceName` alone routinely cannot: two Linux desktops linked
+      // the same afternoon both read "Linux, added today". Recency is what
+      // separates them.
+      final identity = await newIdentity();
+      final accountId = await signUp('alice', 'hunter2-ok', identity);
+
+      final path = '/$accountId/devices';
+      final response = await http.get(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(identity, method: 'GET', path: path),
+      );
+
+      expect(response.statusCode, 200);
+      final devices =
+          (jsonDecode(response.body) as Map<String, dynamic>)['devices']
+              as List<dynamic>;
+      final own = devices.single as Map<String, dynamic>;
+      expect(own['lastLoginAt'], isNotNull);
+      expect(DateTime.parse(own['lastLoginAt'] as String).isUtc, isTrue);
+    });
+
+    test('a mutual friend reading the same route does NOT get a last-seen '
+        'signal for every one of your devices', () async {
+      // The keys are what a friend legitimately needs from this route (to
+      // verify your signatures). When you last picked up each of your
+      // devices is not, and this route is readable by every mutual friend.
+      final aliceDevice = await newIdentity();
+      final bobDevice = await newIdentity();
+      final aliceId = await signUp('alice', 'pw-alice', aliceDevice);
+      final bobId = await signUp('bob', 'pw-bob-ok', bobDevice);
+      await befriend(
+        fromIdentity: aliceDevice,
+        fromId: aliceId,
+        toUsername: 'bob',
+        toIdentity: bobDevice,
+        toId: bobId,
+      );
+
+      final path = '/$aliceId/devices';
+      final response = await http.get(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(bobDevice, method: 'GET', path: path),
+      );
+
+      expect(response.statusCode, 200);
+      final devices =
+          (jsonDecode(response.body) as Map<String, dynamic>)['devices']
+              as List<dynamic>;
+      final seen = devices.single as Map<String, dynamic>;
+      // Present and usable...
+      expect(seen['publicKeyBase64'], isNotNull);
+      // ...but the key is absent entirely, not merely null.
+      expect(seen.containsKey('lastLoginAt'), isFalse);
+    });
+
     test('404s an accountId that does not exist', () async {
       final identity = await newIdentity();
       await signUp('alice', 'hunter2-ok', identity);

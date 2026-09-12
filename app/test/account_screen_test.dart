@@ -68,7 +68,7 @@ Future<void> _pumpAccountScreen(
 /// the constant so both cases are covered whichever way it happens to be
 /// set in this build (it is empty today).
 ProviderContainer _containerWith(
-  FakeAccountClient client, {
+  FakeAccountClient? client, {
   MusicatServerConfig config = MusicatServerConfig.empty,
   String defaultRelay = 'ws://relay.test:8090/connect',
 }) {
@@ -250,8 +250,17 @@ void main() {
     });
 
     testWidgets('a build with no relay of its own says so plainly instead of '
-        'offering a form that cannot work', (tester) async {
-      final client = FakeAccountClient(existingUsernames: {'jorge'});
+        'offering a form that cannot work — on this device\'s own word, '
+        'not on a guess from its settings', (tester) async {
+      // `accountsAvailable: false` is what a node started without a relay
+      // (and so without an account service) actually reports, server ADR
+      // 0056. Before it existed this screen inferred the same thing from
+      // the relay setting, which is why the config below still says there
+      // is no relay — but the signal is what decides now.
+      final client = FakeAccountClient(
+        existingUsernames: {'jorge'},
+        accountsAvailable: false,
+      );
       final container = _containerWith(
         client,
         config: _freshInstall,
@@ -270,6 +279,47 @@ void main() {
       expect(find.widgetWithText(FilledButton, 'Continue'), findsNothing);
       expect(find.textContaining('invite code'), findsOneWidget);
       expect(client.signInCalls, isEmpty);
+    });
+
+    testWidgets('a device whose server *does* have accounts is offered the '
+        'form even with no relay in its own settings — the guess this '
+        'screen used to make would have refused it', (tester) async {
+      // The case the old inference could not see: a separately self-hosted
+      // server, configured entirely outside this app, that does have an
+      // account service. It says so, and that is the end of the question.
+      final client = FakeAccountClient(existingUsernames: {'jorge'});
+      final container = _containerWith(
+        client,
+        config: _selfHostedServer,
+        defaultRelay: '',
+      );
+
+      await _pumpAccountScreen(tester, container);
+
+      expect(find.text('Sign in or create an account'), findsOneWidget);
+      expect(find.textContaining('Accounts need a relay'), findsNothing);
+    });
+
+    testWidgets('with no server to ask yet, it falls back to what the '
+        'settings alone can say rather than claiming either way', (
+      tester,
+    ) async {
+      // The embedded server is still starting (or there is none): there is
+      // nobody to ask for the real signal. A build that ships a relay is
+      // still offered the form, so the prompt does not flicker on a cold
+      // start...
+      final starting = _containerWith(null, config: _freshInstall);
+      await _pumpAccountScreen(tester, starting);
+      expect(find.text('Sign in or create an account'), findsOneWidget);
+
+      // ...and one with no relay anywhere still says so, exactly as before.
+      final noRelay = _containerWith(
+        null,
+        config: _freshInstall,
+        defaultRelay: '',
+      );
+      await _pumpAccountScreen(tester, noRelay);
+      expect(find.text('Accounts need a relay'), findsOneWidget);
     });
 
     testWidgets('the user\'s own relay is enough on its own, with no relay '
@@ -477,6 +527,24 @@ void main() {
       expect(find.text('jorge'), findsOneWidget);
       // No account id anywhere on screen.
       expect(find.textContaining('acc-1'), findsNothing);
+    });
+
+    testWidgets('the device list is one tap away, named for what it is for', (
+      tester,
+    ) async {
+      final client = FakeAccountClient(
+        account: MyAccount(
+          accountId: 'acc-1',
+          username: 'jorge',
+          loggedInAt: DateTime.utc(2026, 9, 5),
+        ),
+      );
+      final container = _containerWith(client);
+
+      await _pumpAccountScreen(tester, container);
+
+      expect(find.text('Your devices'), findsOneWidget);
+      expect(find.textContaining('remove one you have lost'), findsOneWidget);
     });
 
     testWidgets('signing out says plainly that friends stay, and only then '

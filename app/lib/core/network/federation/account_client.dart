@@ -57,6 +57,112 @@ class SignInResult {
   );
 }
 
+/// One device linked to this account, as `GET /api/v1/account/devices`
+/// reports it (server ADR 0048/0056).
+///
+/// Fetched live every time and never cached anywhere in the app, on
+/// purpose: this list is what someone decides *what to revoke* from, and a
+/// stale one is a worse answer than no answer. The server takes the same
+/// position and fails rather than serving an old copy.
+class AccountDevice {
+  const AccountDevice({
+    required this.nodeId,
+    required this.linkedAt,
+    required this.isThisDevice,
+    this.deviceName,
+    this.lastLoginAt,
+  });
+
+  /// Needed to unlink this device and for nothing else. **Never rendered**:
+  /// a 64-character hex fingerprint is not something a person can recognise
+  /// a phone by, and showing one would be internal plumbing on screen.
+  final String nodeId;
+
+  /// When this device was linked to the account.
+  final DateTime linkedAt;
+
+  /// When this device last signed in, or `null` from a server too old to
+  /// say (and from a device row written before the field existed).
+  ///
+  /// This is what actually makes the list decidable. Two Linux desktops
+  /// linked the same afternoon both read "Linux · Added today", and the one
+  /// job this screen has is "pick the phone you lost and revoke it" — which
+  /// needs "used a minute ago" versus "not since June", not the date they
+  /// were both added.
+  ///
+  /// The account service sends it only to the account itself, never to a
+  /// friend, so nothing here leaks a last-seen signal to anyone else.
+  final DateTime? lastLoginAt;
+
+  /// The platform this device reported for itself at its last sign-in
+  /// (`Android`, `Linux`, ...), or `null` from a device that never sent one.
+  /// It is **not** a name anybody chose, and nothing here invents one — see
+  /// [label], which degrades to a plainly unknown-sounding phrase rather
+  /// than falling back to [nodeId].
+  final String? deviceName;
+
+  /// Whether this row is the device the app is running on — computed by
+  /// this device's own server, which is the only thing that can know it.
+  /// Defaults to `false` for a server too old to say, which costs the "This
+  /// device" marker but never mislabels another device as this one.
+  final bool isThisDevice;
+
+  /// What to show for this device. Deliberately not the [nodeId], and
+  /// deliberately not a made-up name.
+  String get label => deviceName ?? 'Unknown device';
+
+  factory AccountDevice.fromJson(Map<String, dynamic> json) => AccountDevice(
+    nodeId: json['nodeId'] as String,
+    linkedAt: DateTime.parse(json['linkedAt'] as String),
+    deviceName: json['deviceName'] as String?,
+    isThisDevice: json['isThisDevice'] as bool? ?? false,
+    lastLoginAt: json['lastLoginAt'] == null
+        ? null
+        : DateTime.parse(json['lastLoginAt'] as String),
+  );
+}
+
+/// What `GET /api/v1/account` says: who this device is signed in as, *and*
+/// whether signing in is possible here at all.
+///
+/// The second half is the capability signal ADR 0053 left open. Until it
+/// existed, `{"account": null}` meant both "you are signed out" and "this
+/// build has no relay, so there is nothing to sign in to", and the app had
+/// to guess between offering a form and explaining why there is none —
+/// letting the user find out through a sign-in that could only ever fail.
+class AccountStatus {
+  const AccountStatus({required this.accountsAvailable, this.account});
+
+  /// Who this device acts for, or `null` when nobody.
+  final MyAccount? account;
+
+  /// Whether this device's server has an account service to talk to at all.
+  /// `false` is a fact about configuration, not about the network: it never
+  /// means "temporarily unreachable" (the calls that can be report that
+  /// themselves).
+  final bool accountsAvailable;
+
+  /// The same device with nobody signed in — what a sign-out leaves behind.
+  /// Keeps [accountsAvailable], which a sign-out cannot change.
+  AccountStatus signedOut() =>
+      AccountStatus(accountsAvailable: accountsAvailable);
+
+  factory AccountStatus.fromJson(Map<String, dynamic> json) {
+    final account = json['account'];
+    return AccountStatus(
+      account: account == null
+          ? null
+          : MyAccount.fromJson(account as Map<String, dynamic>),
+      // Absent only from a node older than this field. Such a node either
+      // has an account service or does not, and the app cannot tell which
+      // — assuming it does keeps its behaviour exactly as it was before
+      // the flag existed, rather than newly telling those users that
+      // accounts are unavailable when they may not be.
+      accountsAvailable: json['accountsAvailable'] as bool? ?? true,
+    );
+  }
+}
+
 /// One friend request addressed to this account.
 class IncomingFriendRequest {
   const IncomingFriendRequest({
@@ -90,6 +196,54 @@ class IncomingFriendRequest {
       );
 }
 
+/// One friend request *this* account sent and is still waiting on.
+///
+/// A separate type from [IncomingFriendRequest] rather than one class with
+/// both usernames nullable: the two are answered differently (one is
+/// accept/decline, the other is "wait, or take it back") and the person
+/// named on each is a different person. Keeping them apart makes it
+/// impossible to render one as the other.
+class OutgoingFriendRequest {
+  const OutgoingFriendRequest({
+    required this.id,
+    required this.status,
+    this.toUsername,
+    this.sentAt,
+  });
+
+  final String id;
+
+  /// Who it was sent to. Nullable on the wire for the same reason
+  /// [IncomingFriendRequest.fromUsername] is — see [toLabel].
+  final String? toUsername;
+
+  /// `pending`/`accepted`/`declined`/`cancelled`. Parsed as a plain string
+  /// so a status this build has never heard of is simply "not pending"
+  /// rather than a crash.
+  final String status;
+
+  /// When it was sent, if the service said. Shown because "sent three days
+  /// ago" is most of what tells "they have not got round to it" apart from
+  /// "this never arrived".
+  final DateTime? sentAt;
+
+  /// What to actually show for the recipient — never a made-up name, and
+  /// never their raw account identifier.
+  String get toLabel => toUsername ?? 'Someone';
+
+  bool get isPending => status == 'pending';
+
+  factory OutgoingFriendRequest.fromJson(Map<String, dynamic> json) =>
+      OutgoingFriendRequest(
+        id: json['id'] as String,
+        toUsername: json['toUsername'] as String?,
+        status: json['status'] as String,
+        sentAt: json['createdAt'] == null
+            ? null
+            : DateTime.parse(json['createdAt'] as String),
+      );
+}
+
 /// The answer to "what friend requests am I sitting on", *plus* how much
 /// this device actually knows right now.
 ///
@@ -103,10 +257,24 @@ class FriendRequestsSnapshot {
   const FriendRequestsSnapshot({
     required this.requests,
     required this.live,
+    this.outgoing = const [],
     this.fetchedAt,
   });
 
   final List<IncomingFriendRequest> requests;
+
+  /// The ones this account *sent* and is still waiting on. They come from
+  /// the same single fetch as [requests], which is why one [live]/
+  /// [fetchedAt] pair honestly describes both: a screen showing "they are
+  /// waiting on you" beside "you are waiting on them" is never mixing two
+  /// different moments.
+  ///
+  /// Empty from a server too old to send the key at all, which is
+  /// indistinguishable from genuinely having sent nobody a request. That is
+  /// the same degradation the server documents, and it is safe here: an
+  /// empty list only ever hides a "waiting for an answer" row, it never
+  /// claims anything.
+  final List<OutgoingFriendRequest> outgoing;
 
   /// When this device last managed a real fetch — `null` if it never has.
   final DateTime? fetchedAt;
@@ -126,6 +294,13 @@ class FriendRequestsSnapshot {
       if (request.isPending) request,
   ];
 
+  /// Requests still waiting on the other person — the ones there is
+  /// anything to say about, or to take back.
+  List<OutgoingFriendRequest> get pendingOutgoing => [
+    for (final request in outgoing)
+      if (request.isPending) request,
+  ];
+
   /// A signed-out (or account-less) device: nothing known, nothing claimed.
   static const empty = FriendRequestsSnapshot(requests: [], live: false);
 
@@ -134,6 +309,10 @@ class FriendRequestsSnapshot {
         requests: [
           for (final entry in (json['requests'] as List<dynamic>? ?? const []))
             IncomingFriendRequest.fromJson(entry as Map<String, dynamic>),
+        ],
+        outgoing: [
+          for (final entry in (json['outgoing'] as List<dynamic>? ?? const []))
+            OutgoingFriendRequest.fromJson(entry as Map<String, dynamic>),
         ],
         fetchedAt: json['fetchedAt'] == null
             ? null
@@ -225,16 +404,15 @@ class AccountClient {
     return SignInResult.fromJson(response.data!);
   }
 
-  /// Who this device is signed in as, or `null` if nobody. Answered by the
-  /// server from its own disk, so it keeps working when nothing else about
-  /// accounts does.
-  Future<MyAccount?> currentAccount() async {
+  /// Who this device is signed in as, and whether it could sign in to
+  /// anything at all — see [AccountStatus]. Answered by the server from its
+  /// own disk and its own configuration, with no network call of its own,
+  /// so it keeps working when nothing else about accounts does.
+  Future<AccountStatus> accountStatus() async {
     final response = await _handle(
       () => _dio.get<Map<String, dynamic>>('/api/v1/account'),
     );
-    final account = response.data?['account'];
-    if (account == null) return null;
-    return MyAccount.fromJson(account as Map<String, dynamic>);
+    return AccountStatus.fromJson(response.data!);
   }
 
   /// Signs this device out. Idempotent, and deliberately leaves this
@@ -285,6 +463,68 @@ class AccountClient {
         '/api/v1/account/friend-requests/$requestId/decline',
       ),
     );
+  }
+
+  /// Takes back a request *this* account sent, while it is still waiting.
+  ///
+  /// **Not the same thing as unfriending**, and the UI must not read like
+  /// it: nobody is friends yet, nothing is removed, and no record is kept
+  /// that would stop the two of them becoming friends later. Ending an
+  /// actual friendship is [FederationClient.removeFriend], a different
+  /// action with its own confirmation.
+  ///
+  /// Throws [AccountClientException] `403` if this account did not send it
+  /// and `409` once the other person has already answered — at which point
+  /// there is nothing to take back, and if they said yes, they are a
+  /// friend.
+  Future<void> cancelFriendRequest(String requestId) async {
+    await _handle(
+      () => _dio.post<Map<String, dynamic>>(
+        '/api/v1/account/friend-requests/$requestId/cancel',
+      ),
+    );
+  }
+
+  /// Every device linked to this account, this one included (server ADR
+  /// 0056).
+  ///
+  /// Always a live fetch — the server caches nothing here and neither does
+  /// the app. A device list is what somebody decides what to revoke from,
+  /// and a stale one is a worse answer than an honest failure.
+  ///
+  /// Throws [AccountClientException] `409` when this device isn't signed
+  /// in, `503` when accounts are unavailable or the service could not be
+  /// reached, and `502` when it answered with something unusable.
+  Future<List<AccountDevice>> listDevices() async {
+    final response = await _handle(
+      () => _dio.get<Map<String, dynamic>>('/api/v1/account/devices'),
+    );
+    return [
+      for (final entry
+          in (response.data?['devices'] as List<dynamic>? ?? const []))
+        AccountDevice.fromJson(entry as Map<String, dynamic>),
+    ];
+  }
+
+  /// Unlinks [nodeId] from this account: it stops being able to act as the
+  /// account. The recovery path for a lost or stolen device.
+  ///
+  /// Returns whether *this* device is the one that was unlinked, in which
+  /// case the server has already cleared the local session and this device
+  /// is now signed out (friends untouched, exactly as an ordinary sign-out
+  /// leaves them). Read from the response rather than compared against a
+  /// nodeId here on purpose: the server says which of the two happened, so
+  /// nothing in the app has to infer it.
+  ///
+  /// The unlinked device is **not** told; it finds out when its next call
+  /// as this account fails.
+  Future<bool> unlinkDevice(String nodeId) async {
+    final response = await _handle(
+      () => _dio.delete<Map<String, dynamic>>(
+        '/api/v1/account/devices/${Uri.encodeComponent(nodeId)}',
+      ),
+    );
+    return response.data?['signedOut'] as bool? ?? false;
   }
 
   Future<Response<T>> _handle<T>(Future<Response<T>> Function() request) async {

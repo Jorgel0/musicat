@@ -23,9 +23,9 @@ class AccountHeaderTile extends ConsumerWidget {
     final session = ref.watch(accountSessionProvider);
     return session.maybeWhen(
       orElse: () => const SizedBox.shrink(),
-      data: (account) => account == null
+      data: (status) => status.account == null
           ? const _SignedOutTile()
-          : _SignedInTile(account: account),
+          : _SignedInTile(account: status.account!),
     );
   }
 }
@@ -87,7 +87,7 @@ class FriendRequestsSection extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // Signed out there is nothing to show and nothing to admit: friend
     // requests simply do not apply to this device.
-    final signedIn = ref.watch(accountSessionProvider).value != null;
+    final signedIn = ref.watch(signedInAccountProvider) != null;
     if (!signedIn) return const SizedBox.shrink();
 
     return ref

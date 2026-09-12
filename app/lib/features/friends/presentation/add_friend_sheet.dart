@@ -273,7 +273,7 @@ class _AddFriendSheetState extends ConsumerState<AddFriendSheet> {
     final effectiveMode = hasRelay ? _mode : _AddFriendMode.address;
     // Signed in, the one-field path is the sheet; signed out, the sheet is
     // exactly what it has always been, with an offer to make it simpler.
-    final signedIn = ref.watch(accountSessionProvider).value != null;
+    final signedIn = ref.watch(signedInAccountProvider) != null;
 
     return Padding(
       padding: EdgeInsets.only(

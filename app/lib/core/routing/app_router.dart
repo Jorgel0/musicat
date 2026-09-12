@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../features/downloads/presentation/downloads_screen.dart';
+import '../../features/friends/presentation/account_devices_screen.dart';
 import '../../features/friends/presentation/account_screen.dart';
 import '../../features/friends/presentation/friend_detail_screen.dart';
 import '../../features/friends/presentation/friends_screen.dart';
@@ -91,6 +92,12 @@ GoRouter createAppRouter() => GoRouter(
         GoRoute(
           path: '/account',
           builder: (context, state) => const AccountScreen(),
+          routes: [
+            GoRoute(
+              path: 'devices',
+              builder: (context, state) => const AccountDevicesScreen(),
+            ),
+          ],
         ),
         GoRoute(
           path: '/friends',

@@ -16,6 +16,7 @@ import 'android_background_reachability_controller.dart';
 import 'friend_requests_section.dart';
 import 'friends_controller.dart';
 import 'musicat_server_config_controller.dart';
+import 'outgoing_friend_requests_section.dart';
 
 /// Wraps [FriendsScreen]'s body; the actual screen also needs to notice a
 /// pending friend invite (deep link, see `pending_invite.dart`) and open
@@ -108,6 +109,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen> {
               children: [
                 AccountHeaderTile(),
                 FriendRequestsSection(),
+                OutgoingFriendRequestsSection(),
                 Expanded(child: _FriendsList()),
               ],
             )

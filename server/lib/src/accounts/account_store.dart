@@ -345,6 +345,7 @@ class AccountStore {
             linkedAt: now,
             relayUrl: relayUrl,
             deviceName: deviceName,
+            lastLoginAt: now,
           ),
         ],
         createdAt: now,
@@ -369,7 +370,11 @@ class AccountStore {
     // was already acting for.
     if (!passwordIsValid) return const LoginResult.wrongPassword();
 
-    final movedHere = _unlinkFromOtherAccounts(accounts, nodeId, keep: index);
+    // Its return value (whether this login moved the device off another
+    // account) used to decide whether a write was needed at all. Every
+    // branch below now writes unconditionally, because each one stamps
+    // [DeviceLink.lastLoginAt], so there is nothing left to decide.
+    _unlinkFromOtherAccounts(accounts, nodeId, keep: index);
 
     final existingIndex = account.devices.indexWhere(
       (device) => device.nodeId == nodeId,
@@ -384,11 +389,14 @@ class AccountStore {
       // changed, nothing is written at all -- unless this login moved the
       // device off another account, which is a change to somebody's file
       // either way.
-      if (existing.relayUrl == relayUrl && existing.deviceName == deviceName) {
-        if (movedHere) await _save(accounts);
-        return LoginResult.linked(account);
-      }
-
+      // Every login now stamps [DeviceLink.lastLoginAt], so the
+      // "nothing changed, write nothing" shortcut that used to live here is
+      // gone on purpose: recency is the only thing that reliably tells two
+      // same-platform devices apart in the device list, and a value only
+      // written when something *else* changed would be exactly as useless
+      // as `linkedAt` already is. Logins are rare enough (once per device,
+      // then hardly ever) that one file write each is not a cost worth
+      // optimizing against that.
       final devices = [...account.devices];
       devices[existingIndex] = DeviceLink(
         nodeId: existing.nodeId,
@@ -396,6 +404,7 @@ class AccountStore {
         linkedAt: existing.linkedAt,
         relayUrl: relayUrl,
         deviceName: deviceName,
+        lastLoginAt: now,
       );
       final refreshed = account.copyWith(devices: devices);
       accounts[index] = refreshed;
@@ -412,6 +421,7 @@ class AccountStore {
           linkedAt: now,
           relayUrl: relayUrl,
           deviceName: deviceName,
+          lastLoginAt: now,
         ),
       ],
     );

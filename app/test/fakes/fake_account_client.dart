@@ -13,12 +13,24 @@ class FakeAccountClient implements AccountClient {
     this.account,
     FriendRequestsSnapshot? requests,
     Set<String> existingUsernames = const {},
+    List<AccountDevice> devices = const [],
+    this.accountsAvailable = true,
   }) : requests =
            requests ?? const FriendRequestsSnapshot(requests: [], live: true),
-       existingUsernames = {...existingUsernames};
+       existingUsernames = {...existingUsernames},
+       devices = [...devices];
 
   /// Who this fake is currently signed in as — `null` for signed out.
   MyAccount? account;
+
+  /// What `GET /api/v1/account` reports alongside [account]: whether this
+  /// node has an account service at all. `false` is a node with no relay,
+  /// where signing in could never work — see server ADR 0056.
+  bool accountsAvailable;
+
+  /// The devices this fake's account service says are linked, in the order
+  /// [listDevices] answers them.
+  List<AccountDevice> devices;
 
   /// What [listFriendRequests] answers, honesty flags included.
   FriendRequestsSnapshot requests;
@@ -41,13 +53,19 @@ class FakeAccountClient implements AccountClient {
   Object? listError;
   Object? sendError;
   Object? respondError;
+  Object? cancelError;
+  Object? devicesError;
+  Object? unlinkError;
 
   final List<({String username, String password, bool allowCreate})>
   signInCalls = [];
   final List<String> sentRequests = [];
   final List<({String id, bool accept})> respondCalls = [];
+  final List<String> cancelledRequests = [];
+  final List<String> unlinkedNodeIds = [];
   int signOutCalls = 0;
   int listCalls = 0;
+  int deviceListCalls = 0;
 
   @override
   Future<SignInResult> signIn({
@@ -86,7 +104,8 @@ class FakeAccountClient implements AccountClient {
   }
 
   @override
-  Future<MyAccount?> currentAccount() async => account;
+  Future<AccountStatus> accountStatus() async =>
+      AccountStatus(account: account, accountsAvailable: accountsAvailable);
 
   @override
   Future<void> signOut() async {
@@ -102,11 +121,29 @@ class FakeAccountClient implements AccountClient {
     return requests;
   }
 
+  /// Sends, and — like the real service, whose next answer includes it —
+  /// leaves it in [requests] as one this account is now waiting on. That is
+  /// what makes "the request I just sent is visible somewhere" testable
+  /// through the UI rather than by hand-editing a snapshot.
   @override
   Future<void> sendFriendRequest(String toUsername) async {
     sentRequests.add(toUsername);
     final error = sendError;
     if (error != null) throw error;
+    requests = FriendRequestsSnapshot(
+      requests: requests.requests,
+      outgoing: [
+        ...requests.outgoing,
+        OutgoingFriendRequest(
+          id: 'sent-${sentRequests.length}',
+          toUsername: toUsername,
+          status: 'pending',
+          sentAt: DateTime.now(),
+        ),
+      ],
+      fetchedAt: requests.fetchedAt ?? DateTime.utc(2026, 9, 5),
+      live: true,
+    );
   }
 
   @override
@@ -129,9 +166,59 @@ class FakeAccountClient implements AccountClient {
         for (final request in requests.requests)
           if (request.id != requestId) request,
       ],
+      outgoing: requests.outgoing,
       fetchedAt: requests.fetchedAt ?? DateTime.utc(2026, 9, 5),
       live: true,
     );
+  }
+
+  /// Withdraws a sent request, and — like the real route, which refreshes
+  /// before answering — drops it from the next [listFriendRequests] too.
+  /// [cancelError] is how a test walks the `403`/`409` legs for real.
+  @override
+  Future<void> cancelFriendRequest(String requestId) async {
+    cancelledRequests.add(requestId);
+    final error = cancelError;
+    if (error != null) throw error;
+    requests = FriendRequestsSnapshot(
+      requests: requests.requests,
+      outgoing: [
+        for (final request in requests.outgoing)
+          if (request.id != requestId) request,
+      ],
+      fetchedAt: requests.fetchedAt ?? DateTime.utc(2026, 9, 5),
+      live: true,
+    );
+  }
+
+  @override
+  Future<List<AccountDevice>> listDevices() async {
+    deviceListCalls++;
+    final error = devicesError;
+    if (error != null) throw error;
+    return devices;
+  }
+
+  /// Unlinks a device the way the real route does, *including* its return
+  /// value: `true` only when the device unlinked is the one asking, which
+  /// is also when the session goes. A test never has to compare node ids to
+  /// know which happened, and neither does the app.
+  @override
+  Future<bool> unlinkDevice(String nodeId) async {
+    unlinkedNodeIds.add(nodeId);
+    final error = unlinkError;
+    if (error != null) throw error;
+    final unlinked = devices.where((d) => d.nodeId == nodeId).toList();
+    devices = [
+      for (final device in devices)
+        if (device.nodeId != nodeId) device,
+    ];
+    final signedOut = unlinked.any((device) => device.isThisDevice);
+    if (signedOut) {
+      account = null;
+      requests = FriendRequestsSnapshot.empty;
+    }
+    return signedOut;
   }
 }
 

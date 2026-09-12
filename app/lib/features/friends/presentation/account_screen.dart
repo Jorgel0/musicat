@@ -4,7 +4,6 @@ import 'package:go_router/go_router.dart';
 
 import '../../../core/network/federation/account_client.dart';
 import 'account_controller.dart';
-import 'musicat_server_config_controller.dart';
 
 /// Sign in, or create an account, or see the one you're in — all one
 /// screen, because the server has exactly one call for the first two (see
@@ -39,15 +38,19 @@ class AccountScreen extends ConsumerWidget {
           ),
           // Signed out *and* nowhere to sign in to: say that, rather than
           // offering a form whose only possible outcome is a failure that
-          // reads like a passing glitch. See
-          // [accountsHaveNoServerProvider] — this is configuration this
-          // device can check locally, not something to find out over the
-          // network.
-          data: (account) => account == null
-              ? (ref.watch(accountsHaveNoServerProvider)
-                    ? const _NoServerForAccounts()
-                    : const _SignInForm())
-              : _SignedIn(account: account),
+          // reads like a passing glitch.
+          //
+          // `accountsAvailable` is this device's own server answering the
+          // question, from its own configuration and with no network call
+          // (server ADR 0056). It replaces the guess this screen used to
+          // make from the relay setting, which could not see a separately
+          // self-hosted server's configuration at all and so had to abstain
+          // on it — the open question ADR 0053 recorded.
+          data: (status) => status.account == null
+              ? (status.accountsAvailable
+                    ? const _SignInForm()
+                    : const _NoServerForAccounts())
+              : _SignedIn(account: status.account!),
         ),
       ),
     );
@@ -169,6 +172,23 @@ class _SignedIn extends ConsumerWidget {
             'with it on your other devices to keep the same friends there.',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 24),
+          // The way in to the device list, one tap from the sentence above
+          // that says other devices can join this account — which is
+          // exactly where somebody wonders which ones already have.
+          Card(
+            margin: EdgeInsets.zero,
+            child: ListTile(
+              leading: const Icon(Icons.devices_outlined),
+              title: const Text('Your devices'),
+              subtitle: const Text(
+                'See everything signed in to this account, and remove one '
+                'you have lost or stopped using',
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => context.push('/account/devices'),
+            ),
           ),
           const Spacer(),
           OutlinedButton.icon(

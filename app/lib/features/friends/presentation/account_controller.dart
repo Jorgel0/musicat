@@ -4,8 +4,8 @@ import '../../../core/network/federation/account_client.dart';
 import 'friends_controller.dart';
 import 'musicat_server_config_controller.dart';
 
-/// Who this device is signed in as (server ADR 0050), and the two actions
-/// that change that.
+/// Who this device is signed in as (server ADR 0050) — and whether it has
+/// anywhere to sign in to at all — plus the two actions that change that.
 ///
 /// An [AsyncNotifier] whose `build()` *is* the load, rather than a
 /// [Notifier] that kicks a fetch off on the side: writing to a provider
@@ -18,12 +18,23 @@ import 'musicat_server_config_controller.dart';
 /// "signed out": those are different facts, and this device's server
 /// answers "who am I" from its own disk, so a failure here means something
 /// is wrong locally rather than that nobody is signed in.
-class AccountSessionController extends AsyncNotifier<MyAccount?> {
+class AccountSessionController extends AsyncNotifier<AccountStatus> {
   @override
-  Future<MyAccount?> build() async {
+  Future<AccountStatus> build() async {
     final client = ref.watch(accountClientProvider);
-    if (client == null) return null;
-    return client.currentAccount();
+    // No server to ask yet: this device is still starting its own one, or
+    // has none at all. Fall back to what configuration alone can say about
+    // whether accounts are possible here — the pre-ADR-0056 guess, now
+    // reduced to just this window instead of being the only answer the app
+    // ever had. As soon as there is a server, its own
+    // `accountsAvailable` replaces it, and that one also covers the
+    // separately self-hosted case this guess deliberately abstains on.
+    if (client == null) {
+      return AccountStatus(
+        accountsAvailable: !ref.watch(accountsHaveNoServerProvider),
+      );
+    }
+    return client.accountStatus();
   }
 
   /// Signs in as [username] — one call, one flow (see
@@ -56,7 +67,7 @@ class AccountSessionController extends AsyncNotifier<MyAccount?> {
     );
     // Re-read rather than synthesise a session from `result`: the server
     // is the thing that persisted it, and its answer includes `loggedInAt`.
-    state = AsyncData(await client.currentAccount());
+    state = AsyncData(await client.accountStatus());
     // The server already synced this account's friends before answering
     // (server ADR 0050), so the list is stale in the app, not on disk —
     // invalidate rather than refresh so this costs nothing when the
@@ -72,12 +83,30 @@ class AccountSessionController extends AsyncNotifier<MyAccount?> {
     final client = ref.read(accountClientProvider);
     if (client == null) return;
     await client.signOut();
-    state = const AsyncData(null);
+    // Only the account goes; whether accounts are available here is a fact
+    // about this device's configuration, and signing out cannot change it.
+    state = AsyncData(
+      state.value?.signedOut() ?? const AccountStatus(accountsAvailable: true),
+    );
   }
+
+  /// Re-reads who this device is signed in as, after something outside this
+  /// controller ended the session — notably unlinking this very device from
+  /// its account (see `account_devices_controller.dart`), which the server
+  /// signs this node out of as part of the same call.
+  void reload() => ref.invalidateSelf();
 }
 
+/// Just "who is signed in on this device", which is what most of the UI
+/// actually asks. `null` while loading, on a failure, and when signed out —
+/// each of which the screens that care about the difference read from
+/// [accountSessionProvider] itself.
+final signedInAccountProvider = Provider<MyAccount?>(
+  (ref) => ref.watch(accountSessionProvider).value?.account,
+);
+
 final accountSessionProvider =
-    AsyncNotifierProvider<AccountSessionController, MyAccount?>(
+    AsyncNotifierProvider<AccountSessionController, AccountStatus>(
       AccountSessionController.new,
       // No hidden retry loop behind a failure. Riverpod's default is to
       // re-run a failed provider on a backoff timer; here that would mean
@@ -103,10 +132,11 @@ class FriendRequestsController extends AsyncNotifier<FriendRequestsSnapshot> {
   @override
   Future<FriendRequestsSnapshot> build() async {
     final client = ref.watch(accountClientProvider);
-    // Rebuilds whenever the session does, so signing in populates this and
-    // signing out empties it with no extra wiring.
-    final account = await ref.watch(accountSessionProvider.future);
-    if (client == null || account == null) {
+    // Rebuilds whenever the session does, so signing in populates this,
+    // and signing out — including by unlinking this device from its own
+    // account — empties it with no extra wiring.
+    final status = await ref.watch(accountSessionProvider.future);
+    if (client == null || status.account == null) {
       return FriendRequestsSnapshot.empty;
     }
     return client.listFriendRequests();
@@ -119,7 +149,7 @@ class FriendRequestsController extends AsyncNotifier<FriendRequestsSnapshot> {
     final client = ref.read(accountClientProvider);
     // Signed out, there is nothing to ask about and the server would only
     // answer 409 — see the routes' own doc comment (server ADR 0051).
-    final signedIn = ref.read(accountSessionProvider).value != null;
+    final signedIn = ref.read(accountSessionProvider).value?.account != null;
     if (client == null || !signedIn) return;
     state = await AsyncValue.guard(client.listFriendRequests);
   }
@@ -127,12 +157,45 @@ class FriendRequestsController extends AsyncNotifier<FriendRequestsSnapshot> {
   /// Sends a friend request to [toUsername] — the one-field, one-button
   /// path. Lets [AccountClientException] out so the caller can say
   /// something specific about a username nobody is using.
+  ///
+  /// Re-reads the lists afterwards so the request the user just sent shows
+  /// up as one they are waiting on, rather than disappearing into nothing
+  /// until the next time something happens to refresh. That vanishing act
+  /// is the whole problem outgoing requests exist to fix.
   Future<void> send(String toUsername) async {
     final client = ref.read(accountClientProvider);
     if (client == null) {
       throw const AccountClientException(0, 'Musicat Server not configured');
     }
     await client.sendFriendRequest(toUsername);
+    await refresh();
+  }
+
+  /// Takes back a request this account sent and is still waiting on.
+  ///
+  /// **Not unfriending**: nobody is friends yet and nothing is removed —
+  /// see [AccountClient.cancelFriendRequest]. Lets
+  /// [AccountClientException] out so the caller can say what happened, and
+  /// on the one failure that means the world moved on (`409`, they already
+  /// answered) re-reads both lists first, so by the time the user is told,
+  /// the screen already shows the truth.
+  Future<void> cancel(String requestId) async {
+    final client = ref.read(accountClientProvider);
+    if (client == null) {
+      throw const AccountClientException(0, 'Musicat Server not configured');
+    }
+    try {
+      await client.cancelFriendRequest(requestId);
+    } on AccountClientException catch (e) {
+      if (e.statusCode == 409) {
+        await refresh();
+        // They may have said yes, in which case this device's server has
+        // already added them — re-read rather than claim either way.
+        ref.invalidate(friendsControllerProvider);
+      }
+      rethrow;
+    }
+    await refresh();
   }
 
   /// Answers [requestId]. On accept, the new friend is already in the

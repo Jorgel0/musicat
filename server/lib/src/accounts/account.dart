@@ -16,6 +16,7 @@ class DeviceLink {
     required this.nodeId,
     required this.publicKeyBase64,
     required this.linkedAt,
+    this.lastLoginAt,
     this.relayUrl,
     this.deviceName,
   });
@@ -23,6 +24,23 @@ class DeviceLink {
   final String nodeId;
   final String publicKeyBase64;
   final DateTime linkedAt;
+
+  /// When this device last completed a login for the account.
+  ///
+  /// Exists because [deviceName] alone routinely cannot tell two devices
+  /// apart — two Linux desktops linked the same afternoon both read
+  /// "Linux · Added today", which is useless for the one job the device
+  /// list has: pick the phone you lost and revoke it. Recency is what
+  /// actually separates them ("used 3 minutes ago" versus "not since
+  /// June").
+  ///
+  /// **Disclosed only to the account itself**, never to mutual friends, who
+  /// can otherwise read `GET /<accountId>/devices`: they need the keys, not
+  /// a last-seen signal for each of your devices. See `account_routes.dart`.
+  ///
+  /// Null for a device row written before this field existed; the UI has to
+  /// cope with that rather than assume.
+  final DateTime? lastLoginAt;
 
   /// This device's own relay WebSocket endpoint (e.g.
   /// `ws://relay.example.com:8090/connect`) as it reported at its last
@@ -78,10 +96,18 @@ class DeviceLink {
   /// reinstall on a different OS) stops claiming the old one.
   final String? deviceName;
 
-  Map<String, dynamic> toJson() => {
+  /// [includeLastLogin] defaults to **false**, so a new wire surface omits
+  /// [lastLoginAt] unless it deliberately asks for it. That direction is
+  /// chosen on purpose: forgetting the flag on a friend-facing route would
+  /// leak a per-device last-seen signal to every mutual friend, whereas
+  /// forgetting it on a storage path merely loses a cosmetic field. Fail
+  /// toward the harmless mistake. Persistence ([Account.toJson]) and the
+  /// account's view of its *own* devices pass `true`.
+  Map<String, dynamic> toJson({bool includeLastLogin = false}) => {
     'nodeId': nodeId,
     'publicKeyBase64': publicKeyBase64,
     'linkedAt': linkedAt.toIso8601String(),
+    if (includeLastLogin) 'lastLoginAt': lastLoginAt?.toIso8601String(),
     'relayUrl': relayUrl,
     'deviceName': deviceName,
   };
@@ -95,6 +121,9 @@ class DeviceLink {
     nodeId: json['nodeId'] as String,
     publicKeyBase64: json['publicKeyBase64'] as String,
     linkedAt: DateTime.parse(json['linkedAt'] as String),
+    lastLoginAt: json['lastLoginAt'] == null
+        ? null
+        : DateTime.parse(json['lastLoginAt'] as String),
     relayUrl: json['relayUrl'] as String?,
     deviceName: json['deviceName'] as String?,
   );
@@ -157,7 +186,9 @@ class Account {
     'passwordHashBase64': base64Encode(passwordHash),
     'passwordSaltBase64': base64Encode(passwordSalt),
     'argon2Params': argon2Params.toJson(),
-    'devices': [for (final device in devices) device.toJson()],
+    'devices': [
+      for (final device in devices) device.toJson(includeLastLogin: true),
+    ],
     'createdAt': createdAt.toIso8601String(),
   };
 

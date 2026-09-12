@@ -68,7 +68,12 @@ const String loginInvalidProofCode = 'invalid_login_proof';
 /// service sends to that account's friends.
 const int maxDeviceNameLength = 64;
 
-Map<String, dynamic> _deviceJson(DeviceLink device) => device.toJson();
+/// [forSelf] is what gates [DeviceLink.lastLoginAt]: an account may see when
+/// each of its own devices last logged in, and a mutual friend reading the
+/// same route may not — they need the keys, not a last-seen signal per
+/// device. Not defaulted, so every call site has to state which it is.
+Map<String, dynamic> _deviceJson(DeviceLink device, {required bool forSelf}) =>
+    device.toJson(includeLastLogin: forSelf);
 
 /// The key [AccountCreationLimiter] counts against: the source address this
 /// request really arrived from, or a single shared bucket when there is none
@@ -177,7 +182,9 @@ Map<String, dynamic> _loginResponseJson(
   'accountId': account.accountId,
   'username': account.username,
   'created': created,
-  'devices': [for (final device in account.devices) _deviceJson(device)],
+  'devices': [
+    for (final device in account.devices) _deviceJson(device, forSelf: true),
+  ],
 };
 
 /// Authenticates [request]'s caller against [accountStore] via the
@@ -697,9 +704,13 @@ Router buildAccountRouter(
       }
     }
 
+    final forSelf = caller.accountId == accountId;
     return _json({
       'accountId': target.accountId,
-      'devices': [for (final device in target.devices) _deviceJson(device)],
+      'devices': [
+        for (final device in target.devices)
+          _deviceJson(device, forSelf: forSelf),
+      ],
     });
   });
 
