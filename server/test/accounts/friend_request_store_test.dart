@@ -302,6 +302,189 @@ void main() {
     });
   });
 
+  group('list -- direction', () {
+    test('outgoing lists what an account sent, which listAddressedTo could '
+        'never see', () async {
+      await store.send('alice', 'bob');
+      await store.send('alice', 'carol');
+      await store.send('dave', 'alice');
+
+      final sent = await store.list(
+        'alice',
+        direction: FriendRequestDirection.outgoing,
+      );
+
+      expect(sent.map((r) => r.toAccountId).toSet(), {'bob', 'carol'});
+    });
+
+    test('both returns each side once, and never a request twice', () async {
+      await store.send('alice', 'bob');
+      await store.send('carol', 'alice');
+      await store.send('bob', 'carol');
+
+      final all = await store.list(
+        'alice',
+        direction: FriendRequestDirection.both,
+      );
+
+      expect(all, hasLength(2));
+      expect(all.map((r) => r.id).toSet(), hasLength(2));
+    });
+
+    test(
+      'defaults to incoming, so every existing caller is unchanged',
+      () async {
+        await store.send('alice', 'bob');
+        await store.send('bob', 'alice');
+
+        expect((await store.list('alice')).map((r) => r.fromAccountId), [
+          'bob',
+        ]);
+      },
+    );
+
+    test('narrows an outgoing list by status too', () async {
+      final answered = await store.send('alice', 'bob');
+      await store.decline(answered.id, 'bob');
+      await store.send('alice', 'carol');
+
+      final pending = await store.list(
+        'alice',
+        direction: FriendRequestDirection.outgoing,
+        status: FriendRequestStatus.pending,
+      );
+
+      expect(pending, hasLength(1));
+      expect(pending.single.toAccountId, 'carol');
+    });
+  });
+
+  group('cancel', () {
+    test('flips a pending request to cancelled for its sender', () async {
+      final request = await store.send('alice', 'bob');
+
+      final (outcome, updated) = await store.cancel(request.id, 'alice');
+
+      expect(outcome, RespondOutcome.updated);
+      expect(updated!.status, FriendRequestStatus.cancelled);
+    });
+
+    test('keeps the row rather than deleting it -- absence is what a bug '
+        'produces, a withdrawal is a decision', () async {
+      final request = await store.send('alice', 'bob');
+
+      await store.cancel(request.id, 'alice');
+
+      final stored = await store.findById(request.id);
+      expect(stored, isNotNull);
+      expect(stored!.status, FriendRequestStatus.cancelled);
+      expect(await store.loadAll(), hasLength(1));
+    });
+
+    test('the recipient cannot cancel -- declining is their way out, and the '
+        'two are recorded differently', () async {
+      final request = await store.send('alice', 'bob');
+
+      final (outcome, unchanged) = await store.cancel(request.id, 'bob');
+
+      expect(outcome, RespondOutcome.forbidden);
+      expect(unchanged!.status, FriendRequestStatus.pending);
+      expect(
+        (await store.findById(request.id))!.status,
+        FriendRequestStatus.pending,
+      );
+    });
+
+    test('an unrelated account cannot cancel it either', () async {
+      final request = await store.send('alice', 'bob');
+
+      final (outcome, _) = await store.cancel(request.id, 'carol');
+
+      expect(outcome, RespondOutcome.forbidden);
+    });
+
+    test('404s an unknown request', () async {
+      final (outcome, request) = await store.cancel('no-such-id', 'alice');
+
+      expect(outcome, RespondOutcome.notFound);
+      expect(request, isNull);
+    });
+
+    test('conflicts once the other side has accepted -- that is a friendship '
+        'now, and ending one is revokeFriendship', () async {
+      final request = await store.send('alice', 'bob');
+      await store.accept(request.id, 'bob');
+
+      final (outcome, _) = await store.cancel(request.id, 'alice');
+
+      expect(outcome, RespondOutcome.conflict);
+      expect(await store.areMutualFriends('alice', 'bob'), isTrue);
+    });
+
+    test('cancelling twice is a no-op success, so a retry is free', () async {
+      final request = await store.send('alice', 'bob');
+      await store.cancel(request.id, 'alice');
+
+      final (outcome, updated) = await store.cancel(request.id, 'alice');
+
+      expect(outcome, RespondOutcome.alreadyInThatState);
+      expect(updated!.status, FriendRequestStatus.cancelled);
+    });
+
+    test('a cancelled request can never be accepted by replaying an old '
+        'accept', () async {
+      final request = await store.send('alice', 'bob');
+      await store.cancel(request.id, 'alice');
+
+      final (outcome, _) = await store.accept(request.id, 'bob');
+
+      expect(outcome, RespondOutcome.conflict);
+      expect(await store.areMutualFriends('alice', 'bob'), isFalse);
+    });
+
+    test('a new request can be sent after cancelling one', () async {
+      final first = await store.send('alice', 'bob');
+      await store.cancel(first.id, 'alice');
+
+      final second = await store.send('alice', 'bob');
+
+      expect(second.id, isNot(equals(first.id)));
+      expect(second.status, FriendRequestStatus.pending);
+    });
+
+    test(
+      'a cancelled request drops out of both sides\' pending lists',
+      () async {
+        final request = await store.send('alice', 'bob');
+        await store.cancel(request.id, 'alice');
+
+        expect(
+          await store.list('bob', status: FriendRequestStatus.pending),
+          isEmpty,
+        );
+        expect(
+          await store.list(
+            'alice',
+            direction: FriendRequestDirection.outgoing,
+            status: FriendRequestStatus.pending,
+          ),
+          isEmpty,
+        );
+      },
+    );
+
+    test('survives a restart as a cancelled row, not a missing one', () async {
+      final request = await store.send('alice', 'bob');
+      await store.cancel(request.id, 'alice');
+
+      final reloaded = FriendRequestStore(tempDir);
+      expect(
+        (await reloaded.findById(request.id))!.status,
+        FriendRequestStatus.cancelled,
+      );
+    });
+  });
+
   test('two concurrent send() calls for the same (from, to) pair result in '
       'exactly one persisted pending request', () async {
     final results = await Future.wait([

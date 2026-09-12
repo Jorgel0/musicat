@@ -6,9 +6,11 @@ import 'package:cryptography/cryptography.dart';
 import 'package:http/http.dart' as http;
 import 'package:musicat_server/src/accounts/device_notifier.dart';
 import 'package:musicat_server/src/identity/node_identity.dart';
+import 'package:musicat_server/src/relay/build_info.dart';
 import 'package:musicat_server/src/relay/relay_hub.dart';
 import 'package:musicat_server/src/relay/relay_protocol.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
+import 'package:shelf_router/shelf_router.dart';
 import 'package:test/test.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -407,6 +409,108 @@ void main() {
           AccountEvent.friendRequests,
         ),
         returnsNormally,
+      );
+    });
+  });
+  group('GET /version', () {
+    test(
+      'reports the commit, its date and this process\'s start time',
+      () async {
+        final response = await http.get(Uri.parse('$httpUrl/version'));
+
+        expect(response.statusCode, 200);
+        final body = jsonDecode(response.body) as Map<String, dynamic>;
+        expect(body.keys.toSet(), {'commit', 'commitTime', 'startedAt'});
+        // Running from a checkout, so there is no substituted commit -- and
+        // the honest answer is null rather than a literal placeholder.
+        expect(body['commit'], isNull);
+        expect(DateTime.parse(body['startedAt'] as String), isNotNull);
+      },
+    );
+
+    test('needs no authentication of any kind -- a version nobody can read '
+        'without a credential is a version nobody checks', () async {
+      final response = await http.get(Uri.parse('$httpUrl/version'));
+
+      expect(response.statusCode, 200);
+      expect(response.headers['content-type'], contains('application/json'));
+    });
+
+    test('reports the build it was constructed with, not one read at request '
+        'time', () async {
+      final deployed = RelayHub(
+        buildInfo: BuildInfo(
+          commit: 'c' * 40,
+          commitTime: DateTime.utc(2026, 9, 6, 20, 40, 7),
+          startedAt: DateTime.utc(2026, 9, 6, 21),
+        ),
+      );
+      final deployedServer = await shelf_io.serve(
+        deployed.buildRouter().call,
+        'localhost',
+        0,
+      );
+      addTearDown(() => deployedServer.close(force: true));
+
+      final response = await http.get(
+        Uri.parse('http://localhost:${deployedServer.port}/version'),
+      );
+
+      expect(jsonDecode(response.body), {
+        'commit': 'c' * 40,
+        'commitTime': '2026-09-06T20:40:07.000Z',
+        'startedAt': '2026-09-06T21:00:00.000Z',
+      });
+    });
+
+    test('is reachable on the *real mounted* server -- the route-ordering '
+        'trap this codebase has already hit twice', () async {
+      // Mounted exactly the way `bin/relay.dart` mounts it: the account
+      // service under its own prefix first, then the hub at the root, whose
+      // own catch-all '/<nodeId>/<path>' is the thing that could swallow
+      // this. A router tested in isolation cannot catch that.
+      final mountedRouter = Router()
+        ..mount('/accounts/', Router().call)
+        ..mount('/', hub.buildRouter().call);
+      final mounted = await shelf_io.serve(mountedRouter.call, 'localhost', 0);
+      addTearDown(() => mounted.close(force: true));
+
+      final response = await http.get(
+        Uri.parse('http://localhost:${mounted.port}/version'),
+      );
+
+      expect(response.statusCode, 200);
+      expect((jsonDecode(response.body) as Map<String, dynamic>).keys.toSet(), {
+        'commit',
+        'commitTime',
+        'startedAt',
+      });
+      // ...and the sibling it might have shadowed still resolves to its own
+      // handler through the same mount.
+      final lookup = await http.get(
+        Uri.parse(
+          'http://localhost:${mounted.port}/directory/lookup'
+          '?username=nobody-claimed-this',
+        ),
+      );
+      expect(lookup.statusCode, 404);
+      expect(
+        (jsonDecode(lookup.body) as Map<String, dynamic>)['error'],
+        'Username not found',
+      );
+    });
+
+    test('a node connected as some other nodeId cannot make /version mean '
+        'anything else -- forwarding stays two segments deep', () async {
+      final (channel, _) = await authenticate(identity);
+      addTearDown(() => channel.sink.close());
+
+      final response = await http.get(Uri.parse('$httpUrl/version'));
+
+      expect(response.statusCode, 200);
+      expect(
+        (jsonDecode(response.body) as Map<String, dynamic>).keys,
+        contains('commit'),
       );
     });
   });

@@ -8,6 +8,7 @@ import 'package:musicat_server/src/accounts/account_routes.dart';
 import 'package:musicat_server/src/accounts/account_store.dart';
 import 'package:musicat_server/src/accounts/password_hashing.dart';
 import 'package:musicat_server/src/accounts/device_notifier.dart';
+import 'package:musicat_server/src/accounts/friend_request.dart';
 import 'package:musicat_server/src/accounts/friend_request_store.dart';
 import 'package:musicat_server/src/accounts/login_nonce_store.dart';
 import 'package:musicat_server/src/accounts/login_rate_limiter.dart';
@@ -93,6 +94,7 @@ void main() {
     required String password,
     required NodeIdentity identity,
     List<int>? nonceOverride,
+    String? deviceName,
   }) async {
     final nonce = nonceOverride ?? await startLogin(username);
     final signature = await Ed25519().sign(nonce, keyPair: identity.keyPair);
@@ -104,6 +106,7 @@ void main() {
         'nodeId': identity.nodeId,
         'publicKeyBase64': await identity.publicKeyBase64(),
         'signatureOverNonce': base64Encode(signature.bytes),
+        'deviceName': ?deviceName,
       }),
     );
   }
@@ -2021,6 +2024,558 @@ void main() {
   /// The push is a nudge and nothing else: these assert *who* is told, and
   /// `relay_hub_test.dart`/`relay_client_test.dart` assert *what* is sent
   /// (an opaque event kind, no payload).
+  group('outgoing friend requests', () {
+    late NodeIdentity aliceDevice;
+    late NodeIdentity bobDevice;
+    late String aliceId;
+    late String bobId;
+
+    setUp(() async {
+      aliceDevice = await newIdentity();
+      bobDevice = await newIdentity();
+      aliceId = await signUp('alice', 'pw-alice', aliceDevice);
+      bobId = await signUp('bob', 'pw-bob-ok', bobDevice);
+    });
+
+    Future<String> send(NodeIdentity as, String meId, String toUsername) async {
+      final path = '/$meId/friend-requests';
+      final body = jsonEncode({'toUsername': toUsername});
+      final response = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(
+          as,
+          method: 'POST',
+          path: path,
+          body: body,
+        ),
+        body: body,
+      );
+      expect(response.statusCode, 201);
+      return (jsonDecode(response.body) as Map<String, dynamic>)['id']
+          as String;
+    }
+
+    Future<http.Response> listRaw(
+      NodeIdentity as,
+      String meId, {
+      String? direction,
+      String? status,
+    }) async {
+      final path = '/$meId/friend-requests';
+      final query = {'direction': ?direction, 'status': ?status};
+      final uri = Uri.parse(
+        '$baseUrl$path',
+      ).replace(queryParameters: query.isEmpty ? null : query);
+      return http.get(
+        uri,
+        headers: await signedHeaders(as, method: 'GET', path: path),
+      );
+    }
+
+    Future<List<Map<String, dynamic>>> list(
+      NodeIdentity as,
+      String meId, {
+      String? direction,
+      String? status,
+    }) async {
+      final response = await listRaw(
+        as,
+        meId,
+        direction: direction,
+        status: status,
+      );
+      expect(response.statusCode, 200);
+      return [
+        for (final entry in jsonDecode(response.body) as List<dynamic>)
+          entry as Map<String, dynamic>,
+      ];
+    }
+
+    test('direction=outgoing lists what I sent, with the recipient\'s '
+        'username -- an accountId is not something to show a human', () async {
+      final requestId = await send(aliceDevice, aliceId, 'bob');
+
+      final outgoing = await list(aliceDevice, aliceId, direction: 'outgoing');
+
+      expect(outgoing, hasLength(1));
+      expect(outgoing.single['id'], requestId);
+      expect(outgoing.single['toUsername'], 'bob');
+      expect(outgoing.single['toAccountId'], bobId);
+      expect(outgoing.single['fromUsername'], 'alice');
+      expect(outgoing.single['status'], 'pending');
+    });
+
+    test('the default is still incoming, so a request I sent does not show '
+        'up in the list every existing caller asks for', () async {
+      await send(aliceDevice, aliceId, 'bob');
+
+      expect(await list(aliceDevice, aliceId), isEmpty);
+      expect(await list(bobDevice, bobId), hasLength(1));
+    });
+
+    test(
+      'the two directions really are different sides of the same row',
+      () async {
+        await send(aliceDevice, aliceId, 'bob');
+
+        expect(await list(bobDevice, bobId, direction: 'outgoing'), isEmpty);
+        expect(
+          await list(bobDevice, bobId, direction: 'incoming'),
+          hasLength(1),
+        );
+      },
+    );
+
+    test('direction=both answers with both lists in one round trip, and '
+        'never a request twice', () async {
+      final carolDevice = await newIdentity();
+      final carolId = await signUp('carol', 'pw-carol!', carolDevice);
+      final sent = await send(aliceDevice, aliceId, 'bob');
+      final received = await send(carolDevice, carolId, 'alice');
+
+      final both = await list(aliceDevice, aliceId, direction: 'both');
+
+      expect(both.map((r) => r['id']).toSet(), {sent, received});
+    });
+
+    test('narrows an outgoing list by status, so an answered request stops '
+        'being shown as waiting', () async {
+      final requestId = await send(aliceDevice, aliceId, 'bob');
+      final declinePath = '/$bobId/friend-requests/$requestId/decline';
+      await http.post(
+        Uri.parse('$baseUrl$declinePath'),
+        headers: await signedHeaders(
+          bobDevice,
+          method: 'POST',
+          path: declinePath,
+        ),
+      );
+
+      expect(
+        await list(
+          aliceDevice,
+          aliceId,
+          direction: 'outgoing',
+          status: 'pending',
+        ),
+        isEmpty,
+      );
+      expect(
+        await list(
+          aliceDevice,
+          aliceId,
+          direction: 'outgoing',
+          status: 'declined',
+        ),
+        hasLength(1),
+      );
+    });
+
+    test('400s an unrecognized direction rather than quietly answering with '
+        'the default', () async {
+      final response = await listRaw(
+        aliceDevice,
+        aliceId,
+        direction: 'sideways',
+      );
+
+      expect(response.statusCode, 400);
+      expect(
+        (jsonDecode(response.body) as Map<String, dynamic>)['error'],
+        contains('direction'),
+      );
+    });
+
+    test('401s an unauthenticated caller and 403s one acting as another '
+        'account, exactly as the incoming list does', () async {
+      expect(
+        (await http.get(
+          Uri.parse('$baseUrl/$aliceId/friend-requests?direction=outgoing'),
+        )).statusCode,
+        401,
+      );
+      expect(
+        (await listRaw(bobDevice, aliceId, direction: 'outgoing')).statusCode,
+        403,
+      );
+    });
+  });
+
+  group('POST /<me>/friend-requests/<requestId>/cancel', () {
+    late NodeIdentity aliceDevice;
+    late NodeIdentity bobDevice;
+    late String aliceId;
+    late String bobId;
+    late String requestId;
+
+    setUp(() async {
+      aliceDevice = await newIdentity();
+      bobDevice = await newIdentity();
+      aliceId = await signUp('alice', 'pw-alice', aliceDevice);
+      bobId = await signUp('bob', 'pw-bob-ok', bobDevice);
+
+      final path = '/$aliceId/friend-requests';
+      final body = jsonEncode({'toUsername': 'bob'});
+      final sent = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(
+          aliceDevice,
+          method: 'POST',
+          path: path,
+          body: body,
+        ),
+        body: body,
+      );
+      expect(sent.statusCode, 201);
+      requestId =
+          (jsonDecode(sent.body) as Map<String, dynamic>)['id'] as String;
+    });
+
+    Future<http.Response> cancel(NodeIdentity as, String meId) async {
+      final path = '/$meId/friend-requests/$requestId/cancel';
+      return http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(as, method: 'POST', path: path),
+      );
+    }
+
+    Future<List<dynamic>> pendingFor(
+      NodeIdentity as,
+      String meId,
+      String direction,
+    ) async {
+      final path = '/$meId/friend-requests';
+      final response = await http.get(
+        Uri.parse('$baseUrl$path?direction=$direction&status=pending'),
+        headers: await signedHeaders(as, method: 'GET', path: path),
+      );
+      expect(response.statusCode, 200);
+      return jsonDecode(response.body) as List<dynamic>;
+    }
+
+    test('the sender withdraws it, and it stops being pending for either '
+        'side', () async {
+      final response = await cancel(aliceDevice, aliceId);
+
+      expect(response.statusCode, 200);
+      expect(
+        (jsonDecode(response.body) as Map<String, dynamic>)['status'],
+        'cancelled',
+      );
+      expect(await pendingFor(bobDevice, bobId, 'incoming'), isEmpty);
+      expect(await pendingFor(aliceDevice, aliceId, 'outgoing'), isEmpty);
+    });
+
+    test('flips the row rather than deleting it -- a deliberate end must not '
+        'look like a lost row', () async {
+      await cancel(aliceDevice, aliceId);
+
+      final stored = await friendRequestStore.findById(requestId);
+      expect(stored, isNotNull);
+      expect(stored!.status, FriendRequestStatus.cancelled);
+    });
+
+    test('403s the recipient: declining is their way out, and the two are '
+        'recorded differently on purpose', () async {
+      final response = await cancel(bobDevice, bobId);
+
+      expect(response.statusCode, 403);
+      expect(await pendingFor(bobDevice, bobId, 'incoming'), hasLength(1));
+    });
+
+    test('403s an unrelated third account, whichever <me> it claims', () async {
+      final carolDevice = await newIdentity();
+      final carolId = await signUp('carol', 'pw-carol!', carolDevice);
+
+      // Authenticated as carol, acting as alice: refused before anything
+      // else is even looked at.
+      expect((await cancel(carolDevice, aliceId)).statusCode, 403);
+      // Authenticated as carol, acting as carol, on somebody else's request.
+      expect((await cancel(carolDevice, carolId)).statusCode, 403);
+      expect(
+        (await friendRequestStore.findById(requestId))!.status,
+        FriendRequestStatus.pending,
+      );
+    });
+
+    test('401s an unauthenticated caller', () async {
+      final response = await http.post(
+        Uri.parse('$baseUrl/$aliceId/friend-requests/$requestId/cancel'),
+      );
+
+      expect(response.statusCode, 401);
+    });
+
+    test('404s an unknown request id', () async {
+      final path = '/$aliceId/friend-requests/no-such-request/cancel';
+      final response = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(aliceDevice, method: 'POST', path: path),
+      );
+
+      expect(response.statusCode, 404);
+    });
+
+    test('409s once the other side accepted -- that is a friendship now, and '
+        'ending one of those is DELETE /<me>/friends/<accountId>', () async {
+      final acceptPath = '/$bobId/friend-requests/$requestId/accept';
+      await http.post(
+        Uri.parse('$baseUrl$acceptPath'),
+        headers: await signedHeaders(
+          bobDevice,
+          method: 'POST',
+          path: acceptPath,
+        ),
+      );
+
+      final response = await cancel(aliceDevice, aliceId);
+
+      expect(response.statusCode, 409);
+      expect(await friendRequestStore.areMutualFriends(aliceId, bobId), isTrue);
+    });
+
+    test('cancelling twice is a no-op 200, so a retry costs nothing', () async {
+      expect((await cancel(aliceDevice, aliceId)).statusCode, 200);
+
+      final again = await cancel(aliceDevice, aliceId);
+
+      expect(again.statusCode, 200);
+      expect(
+        (jsonDecode(again.body) as Map<String, dynamic>)['status'],
+        'cancelled',
+      );
+    });
+
+    test('the recipient can no longer accept a cancelled request, even with '
+        'its id in hand', () async {
+      await cancel(aliceDevice, aliceId);
+
+      final acceptPath = '/$bobId/friend-requests/$requestId/accept';
+      final accepted = await http.post(
+        Uri.parse('$baseUrl$acceptPath'),
+        headers: await signedHeaders(
+          bobDevice,
+          method: 'POST',
+          path: acceptPath,
+        ),
+      );
+
+      expect(accepted.statusCode, 409);
+      expect(
+        await friendRequestStore.areMutualFriends(aliceId, bobId),
+        isFalse,
+      );
+    });
+
+    test('a fresh request can be sent afterwards -- withdrawing is not a '
+        'block', () async {
+      await cancel(aliceDevice, aliceId);
+
+      final path = '/$aliceId/friend-requests';
+      final body = jsonEncode({'toUsername': 'bob'});
+      final resent = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(
+          aliceDevice,
+          method: 'POST',
+          path: path,
+          body: body,
+        ),
+        body: body,
+      );
+
+      expect(resent.statusCode, 201);
+      final body2 = jsonDecode(resent.body) as Map<String, dynamic>;
+      expect(body2['id'], isNot(requestId));
+      expect(body2['status'], 'pending');
+      expect(await pendingFor(bobDevice, bobId, 'incoming'), hasLength(1));
+    });
+
+    test('is reachable on the *real mounted* server, and shadows neither '
+        'accept nor decline', () async {
+      // Mounted exactly the way bin/relay.dart mounts it: four-segment
+      // sibling routes under one prefix are precisely where shelf_router's
+      // registration-order matching has bitten this codebase before.
+      final mountedRouter = Router()
+        ..mount(
+          '/accounts/',
+          buildAccountRouter(accountStore, friendRequestStore).call,
+        );
+      final mounted = await shelf_io.serve(mountedRouter.call, 'localhost', 0);
+      addTearDown(() => mounted.close(force: true));
+      final mountedUrl = 'http://localhost:${mounted.port}';
+
+      final cancelPath = '/accounts/$aliceId/friend-requests/$requestId/cancel';
+      final cancelled = await http.post(
+        Uri.parse('$mountedUrl$cancelPath'),
+        headers: await signedHeaders(
+          aliceDevice,
+          method: 'POST',
+          path: cancelPath,
+        ),
+      );
+      expect(cancelled.statusCode, 200);
+      expect(
+        (jsonDecode(cancelled.body) as Map<String, dynamic>)['status'],
+        'cancelled',
+      );
+
+      // ...and its siblings still resolve to their own handlers: a `409` here
+      // is the *decline* handler refusing an already-cancelled request, not
+      // some other route answering.
+      final declinePath = '/accounts/$bobId/friend-requests/$requestId/decline';
+      final declined = await http.post(
+        Uri.parse('$mountedUrl$declinePath'),
+        headers: await signedHeaders(
+          bobDevice,
+          method: 'POST',
+          path: declinePath,
+        ),
+      );
+      expect(declined.statusCode, 409);
+    });
+  });
+
+  group("a device's deviceName", () {
+    Future<Map<String, dynamic>> deviceOf(
+      NodeIdentity as,
+      String accountId,
+      String nodeId,
+    ) async {
+      final path = '/$accountId/devices';
+      final response = await http.get(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(as, method: 'GET', path: path),
+      );
+      expect(response.statusCode, 200);
+      final devices =
+          (jsonDecode(response.body) as Map<String, dynamic>)['devices']
+              as List<dynamic>;
+      return devices.cast<Map<String, dynamic>>().firstWhere(
+        (device) => device['nodeId'] == nodeId,
+      );
+    }
+
+    test('is recorded at login and reported in the device list', () async {
+      final device = await newIdentity();
+      final response = await completeLogin(
+        username: 'alice',
+        password: 'hunter2-ok',
+        identity: device,
+        deviceName: 'Android',
+      );
+      expect(response.statusCode, 201);
+      final accountId =
+          (jsonDecode(response.body) as Map<String, dynamic>)['accountId']
+              as String;
+
+      expect(
+        (await deviceOf(device, accountId, device.nodeId))['deviceName'],
+        'Android',
+      );
+    });
+
+    test(
+      'is null for a node that sends none -- nothing invents a name',
+      () async {
+        final device = await newIdentity();
+        final accountId = await signUp('alice', 'hunter2-ok', device);
+
+        expect(
+          (await deviceOf(device, accountId, device.nodeId))['deviceName'],
+          isNull,
+        );
+      },
+    );
+
+    test('is refreshed by every login, including back to null', () async {
+      final device = await newIdentity();
+      final created = await completeLogin(
+        username: 'alice',
+        password: 'hunter2-ok',
+        identity: device,
+        deviceName: 'Linux',
+      );
+      final accountId =
+          (jsonDecode(created.body) as Map<String, dynamic>)['accountId']
+              as String;
+
+      await completeLogin(
+        username: 'alice',
+        password: 'hunter2-ok',
+        identity: device,
+        deviceName: 'macOS',
+      );
+      expect(
+        (await deviceOf(device, accountId, device.nodeId))['deviceName'],
+        'macOS',
+      );
+
+      await completeLogin(
+        username: 'alice',
+        password: 'hunter2-ok',
+        identity: device,
+      );
+      expect(
+        (await deviceOf(device, accountId, device.nodeId))['deviceName'],
+        isNull,
+      );
+    });
+
+    test('400s an absurdly long one, without creating the account -- this '
+        'string ends up in other people\'s responses', () async {
+      final device = await newIdentity();
+
+      final response = await completeLogin(
+        username: 'alice',
+        password: 'hunter2-ok',
+        identity: device,
+        deviceName: 'x' * 65,
+      );
+
+      expect(response.statusCode, 400);
+      expect(
+        (jsonDecode(response.body) as Map<String, dynamic>)['error'],
+        contains('deviceName'),
+      );
+      expect(await accountStore.findByUsername('alice'), isNull);
+    });
+
+    test('a mutual friend sees it, and nobody else does', () async {
+      final aliceDevice = await newIdentity();
+      final bobDevice = await newIdentity();
+      final carolDevice = await newIdentity();
+      final aliceId = await signUp('alice', 'pw-alice', aliceDevice);
+      final bobId = await signUp('bob', 'pw-bob-ok', bobDevice);
+      await signUp('carol', 'pw-carol!', carolDevice);
+      await completeLogin(
+        username: 'alice',
+        password: 'pw-alice',
+        identity: aliceDevice,
+        deviceName: 'Android',
+      );
+      await befriend(
+        fromIdentity: aliceDevice,
+        fromId: aliceId,
+        toUsername: 'bob',
+        toIdentity: bobDevice,
+        toId: bobId,
+      );
+
+      expect(
+        (await deviceOf(bobDevice, aliceId, aliceDevice.nodeId))['deviceName'],
+        'Android',
+      );
+
+      final path = '/$aliceId/devices';
+      final stranger = await http.get(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(carolDevice, method: 'GET', path: path),
+      );
+      expect(stranger.statusCode, 403);
+    });
+  });
+
   group('pushing over the relay tunnel', () {
     late NodeIdentity alicePhone;
     late NodeIdentity aliceDesktop;
@@ -2104,6 +2659,64 @@ void main() {
       await settlePushes();
 
       expect(notifier.pushes.map((p) => p.nodeId), [bobPhone.nodeId]);
+    });
+
+    test('cancelling nudges the recipient -- who is still being shown a '
+        'request that no longer exists -- and the sender\'s own other '
+        'devices', () async {
+      final requestId = await sendRequestFromAliceToBob();
+      notifier.pushes.clear();
+
+      final path = '/$aliceId/friend-requests/$requestId/cancel';
+      final cancelled = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(alicePhone, method: 'POST', path: path),
+      );
+      expect(cancelled.statusCode, 200);
+      await settlePushes(atLeast: 3);
+
+      expect(notifier.pushes.map((p) => p.nodeId).toSet(), {
+        bobPhone.nodeId,
+        alicePhone.nodeId,
+        aliceDesktop.nodeId,
+      });
+    });
+
+    test('a refused cancel nudges nobody, so it is no free way to make '
+        'another account poll', () async {
+      final requestId = await sendRequestFromAliceToBob();
+      notifier.pushes.clear();
+
+      // Bob tries to cancel a request he received: 403, no state change.
+      final path = '/$bobId/friend-requests/$requestId/cancel';
+      final refused = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(bobPhone, method: 'POST', path: path),
+      );
+      expect(refused.statusCode, 403);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(notifier.pushes, isEmpty);
+    });
+
+    test('a second, already-cancelled cancel nudges nobody either', () async {
+      final requestId = await sendRequestFromAliceToBob();
+      final path = '/$aliceId/friend-requests/$requestId/cancel';
+      await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(alicePhone, method: 'POST', path: path),
+      );
+      await settlePushes(atLeast: 3);
+      notifier.pushes.clear();
+
+      final again = await http.post(
+        Uri.parse('$baseUrl$path'),
+        headers: await signedHeaders(alicePhone, method: 'POST', path: path),
+      );
+      expect(again.statusCode, 200);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(notifier.pushes, isEmpty);
     });
 
     test('a refused action nudges nobody', () async {

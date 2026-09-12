@@ -52,7 +52,8 @@ import 'friend_revocation.dart';
 ///
 /// Five minutes costs 288 ticks a day, each one a signed
 /// `GET /<me>/friends` plus a signed
-/// `GET /<me>/friend-requests?status=pending` — 576 small requests, on the
+/// `GET /<me>/friend-requests?status=pending&direction=both` — 576 small
+/// requests, on the
 /// order of a few hundred KB a day even with a long friend list, and zero
 /// bytes for a node that never logged in. That is
 /// defensible on a real mobile data plan (the constraint Jorge set for the
@@ -157,9 +158,13 @@ class AccountUpdatePoller {
   /// `pendingFriendRequestsOf` collapses unreachable, refused and malformed
   /// into one `null` (see its doc comment), and all three mean the same thing
   /// here: this node learned nothing, so it forgets nothing.
+  ///
+  /// Both directions come from that one call and are stored together, so a
+  /// poll costs exactly what it did before outgoing requests were listable at
+  /// all: one signed GET, not two.
   Future<void> _refreshPendingRequests(String accountId) async {
     final requests = await accountService.pendingFriendRequestsOf(accountId);
     if (requests == null) return;
-    pendingRequests.store(requests);
+    pendingRequests.store(requests.incoming, outgoing: requests.outgoing);
   }
 }

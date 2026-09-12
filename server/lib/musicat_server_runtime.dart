@@ -427,6 +427,10 @@ Future<MusicatServerHandle> startMusicatServer({
   // clean 503 on login and on every friend-request route, while still
   // reporting and clearing a session from local disk.
   final accountAppRouter = buildAccountAppRouter(
+    // This node's own device identifier, so `GET /api/v1/account/devices` can
+    // mark which row is this one and `DELETE .../devices/<nodeId>` can
+    // recognize a self-unlink and clear the local session with it.
+    nodeId: identity.nodeId,
     sessionStore: sessionStore,
     // Not for adding friends -- that stays the sync's job -- but so an
     // explicit accept/send can forget a removal the user has plainly changed

@@ -516,7 +516,11 @@ void main() {
       final response = await http.get(Uri.parse(nodeUrl('/api/v1/account')));
 
       expect(response.statusCode, 200);
-      expect(jsonDecode(response.body), {'account': null});
+      // Asserting the `account` field rather than the whole map: this test
+      // is about "nobody is signed in", and `accountsAvailable` alongside it
+      // is a separate question with its own tests below.
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      expect(body['account'], isNull);
     });
 
     test('reports the current session, from local disk, with the account '
@@ -572,10 +576,11 @@ void main() {
         204,
       );
       expect(
-        jsonDecode(
-          (await http.get(Uri.parse(nodeUrl('/api/v1/account')))).body,
-        ),
-        {'account': null},
+        (jsonDecode(
+              (await http.get(Uri.parse(nodeUrl('/api/v1/account')))).body,
+            )
+            as Map<String, dynamic>)['account'],
+        isNull,
       );
       expect(
         (await http.delete(Uri.parse(nodeUrl('/api/v1/account')))).statusCode,

@@ -17,6 +17,7 @@ class DeviceLink {
     required this.publicKeyBase64,
     required this.linkedAt,
     this.relayUrl,
+    this.deviceName,
   });
 
   final String nodeId;
@@ -54,22 +55,48 @@ class DeviceLink {
   /// to, which costs them a wasted `502` per attempt.
   final String? relayUrl;
 
+  /// Something a human can tell this device apart by in a device list -- the
+  /// **platform label the node reported for itself** at its last login
+  /// (`Android`, `Linux`, `macOS`, ...), or `null` from a node too old to
+  /// send one.
+  ///
+  /// Deliberately the platform and *not* the hostname, which is the obvious
+  /// thing to send and the wrong one: a hostname is frequently a person's own
+  /// name, and this field is disclosed to every mutual friend by the same two
+  /// routes that disclose [relayUrl]. The platform is the least identifying
+  /// thing that still answers the question a device list is for ("which of
+  /// these is my old phone?"), and where it isn't enough -- two Android
+  /// devices on one account -- `linkedAt` is what separates them.
+  ///
+  /// It is **not a name the user chose**, and nothing here invents one: the
+  /// node knows its own platform and nothing else about itself. A
+  /// user-editable label would be a real improvement and is a different
+  /// feature, needing a way to set it and a rule for who may.
+  ///
+  /// Refreshed on every login exactly like [relayUrl], including back to
+  /// `null`, so a device that moved between platforms (a restored backup, a
+  /// reinstall on a different OS) stops claiming the old one.
+  final String? deviceName;
+
   Map<String, dynamic> toJson() => {
     'nodeId': nodeId,
     'publicKeyBase64': publicKeyBase64,
     'linkedAt': linkedAt.toIso8601String(),
     'relayUrl': relayUrl,
+    'deviceName': deviceName,
   };
 
-  /// Reads either shape: a row written by this version, or one written
-  /// before [relayUrl] existed (every `accounts.json` on disk today), which
-  /// simply has no such key and loads with a `null` relay -- the same
-  /// nullable-field-defaulting pattern `Friend.fromJson` already relies on.
+  /// Reads every shape this row has ever had: one written by this version,
+  /// one written before [deviceName] existed, and one written before
+  /// [relayUrl] did (every `accounts.json` on disk today) -- a missing key
+  /// simply loads as `null`, the same nullable-field-defaulting pattern
+  /// `Friend.fromJson` already relies on.
   factory DeviceLink.fromJson(Map<String, dynamic> json) => DeviceLink(
     nodeId: json['nodeId'] as String,
     publicKeyBase64: json['publicKeyBase64'] as String,
     linkedAt: DateTime.parse(json['linkedAt'] as String),
     relayUrl: json['relayUrl'] as String?,
+    deviceName: json['deviceName'] as String?,
   );
 }
 

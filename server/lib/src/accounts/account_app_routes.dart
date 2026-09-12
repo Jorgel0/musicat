@@ -94,25 +94,41 @@ Response _loginFailureResponse(AccountLoginResult result) {
 /// A friend-request action's failure, translated into a status this node's
 /// app can act on -- the same exhaustive-switch shape (and the same reason
 /// for it) as [_loginFailureResponse] above.
+///
+/// Each arm also carries a machine-readable `code`, for the same reason the
+/// login path has had one since ADR 0053: a `503` from here is *either* "this
+/// build has no account service at all" or "there is one and it did not
+/// answer", and an app that cannot tell them apart has to guess between "set
+/// a relay first" and "try again in a moment". [requireSession] emits
+/// [_noAccountServiceCode] for the first; everything reaching this function
+/// has an account service, so its `503` is always the second.
 Response _friendRequestFailureResponse(FriendRequestActionResult result) {
-  final (status, fallback) = switch (result.outcome) {
-    FriendRequestActionOutcome.notFound => (404, 'Not found'),
+  final (status, fallback, code) = switch (result.outcome) {
+    FriendRequestActionOutcome.notFound => (404, 'Not found', 'not_found'),
     FriendRequestActionOutcome.forbidden => (
       403,
       'The account service refused this action',
+      'forbidden',
     ),
     FriendRequestActionOutcome.conflict => (
       409,
       'That friend request has already been answered',
+      'conflict',
     ),
-    FriendRequestActionOutcome.invalid => (400, 'Invalid friend request'),
+    FriendRequestActionOutcome.invalid => (
+      400,
+      'Invalid friend request',
+      'invalid_request',
+    ),
     FriendRequestActionOutcome.serviceUnreachable => (
       503,
       'Could not reach the account service',
+      'service_unreachable',
     ),
     FriendRequestActionOutcome.failed => (
       502,
       'The account service could not complete this action',
+      'service_failed',
     ),
     // Unreachable: only ever called for a failure.
     FriendRequestActionOutcome.ok => throw StateError('not a failure'),
@@ -120,8 +136,27 @@ Response _friendRequestFailureResponse(FriendRequestActionResult result) {
   // The service's own message where it sent one: it is more specific than
   // anything guessable here ("Unknown username" versus "Unknown friend
   // request" are both 404s), and it never contains a credential.
-  return _error(result.error ?? fallback, status: status);
+  return _error(result.error ?? fallback, status: status, code: code);
 }
+
+/// This node was never pointed at an account service: accounts are not
+/// available here at all, and no amount of retrying changes that.
+///
+/// Told apart from [_serviceUnreachableCode] everywhere, because they need
+/// opposite things from a person -- configuration versus patience -- and both
+/// arrive as `503`. `GET /api/v1/account`'s `accountsAvailable` is how an app
+/// asks the same question without provoking a failure first.
+const String _noAccountServiceCode = 'no_account_service';
+
+/// There is an account service configured, and this node could not reach it.
+const String _serviceUnreachableCode = 'service_unreachable';
+
+/// The account service answered, but with something unusable.
+const String _serviceFailedCode = 'service_failed';
+
+/// This node has an account service but is not logged in to any account. Not
+/// a `401`: the caller is authorized, this node has nobody to act as.
+const String _notLoggedInCode = 'not_logged_in';
 
 /// Builds this node's own app-facing `/api/v1/account/*` routes: which
 /// portable account (ADR 0048) this device is logged in as.
@@ -190,14 +225,23 @@ Response _friendRequestFailureResponse(FriendRequestActionResult result) {
 /// | 503 | `no_account_service` | this node has none configured |
 /// | 503 | `service_unreachable` | it has one and could not reach it |
 ///
-/// `GET /` — `{"account": {accountId, username, loggedInAt} | null}`, always
-/// `200`. A `null` field rather than a `404` is how this API already says
-/// "nothing here" for a single optional thing (`GET
-/// /api/v1/soulseek/downloads-directory` answers `{"directory": ... | null}`
-/// the same way), and it keeps "not logged in" distinguishable from "that
-/// route doesn't exist" without the app having to special-case a status.
-/// Answered from local disk: reading who you are must not need the account
-/// service (Rule 1).
+/// `GET /` — `{"account": {accountId, username, loggedInAt} | null,
+/// "accountsAvailable": bool}`, always `200`. A `null` field rather than a
+/// `404` is how this API already says "nothing here" for a single optional
+/// thing (`GET /api/v1/soulseek/downloads-directory` answers
+/// `{"directory": ... | null}` the same way), and it keeps "not logged in"
+/// distinguishable from "that route doesn't exist" without the app having to
+/// special-case a status. Answered from local disk: reading who you are must
+/// not need the account service (Rule 1).
+///
+/// **`accountsAvailable` is the capability signal ADR 0053 left open**, and
+/// it is additive — `account` is unchanged in name, shape and meaning. It is
+/// `false` on a node started with no `accountServiceUrl`, where
+/// `{"account": null}` never meant "sign in" but "there is nothing here to
+/// sign in to", and the app previously had to guess which. It says nothing
+/// about whether that service is reachable *right now* (this route makes no
+/// network call, ever); the routes that do call it report that through their
+/// `code`, `service_unreachable` versus `no_account_service`.
 ///
 /// `DELETE /` — clears the session; `204` whether or not there was one, like
 /// every other `DELETE` here. **It deliberately leaves [FriendStore]
@@ -223,16 +267,26 @@ Response _friendRequestFailureResponse(FriendRequestActionResult result) {
 /// missing credential. `GET /api/v1/account` is how an app asks whether that
 /// is the case, and it never errors.
 ///
-/// `GET /friend-requests` — the still-pending requests addressed *to* this
-/// account, as `{requests: [...], fetchedAt, live}`. Fetches live from the
-/// account service and refreshes [pendingRequests] on the way past; if that
-/// fetch fails, answers `200` with the last snapshot this node holds and
-/// `live: false` instead of an error, so a dead relay degrades to a slightly
-/// stale list rather than a broken screen. `fetchedAt` is `null` exactly when
-/// this node has *never* successfully fetched, which is the one case an app
-/// must not render as "no friend requests". Each entry is verbatim what the
-/// account service returned (see [AccountFriendRequest]) — notably including
-/// `fromUsername`, since an accountId is not something to show a human.
+/// `GET /friend-requests` — the still-pending requests this account is on
+/// either side of, as `{requests: [...], outgoing: [...], fetchedAt, live}`.
+/// Fetches live from the account service and refreshes [pendingRequests] on
+/// the way past; if that fetch fails, answers `200` with the last snapshot
+/// this node holds and `live: false` instead of an error, so a dead relay
+/// degrades to a slightly stale list rather than a broken screen. `fetchedAt`
+/// is `null` exactly when this node has *never* successfully fetched, which
+/// is the one case an app must not render as "no friend requests". Each entry
+/// is verbatim what the account service returned (see [AccountFriendRequest])
+/// — notably including `fromUsername`/`toUsername`, since an accountId is not
+/// something to show a human.
+///
+/// **`outgoing` is additive**: `requests` keeps its exact existing meaning
+/// (the ones addressed *to* this account), and an app that ignores the new
+/// key behaves exactly as before. Both lists come from one upstream request
+/// (`direction=both`), so a poll costs what it always did and the single
+/// `live`/`fetchedAt` pair describes both honestly — two separate fetches
+/// would have let one list be older than the other while claiming otherwise.
+/// Against an account service too old to know `direction`, `outgoing` comes
+/// back empty rather than the call failing.
 ///
 /// `POST /friend-requests` `{toUsername}` — sends one; `201` with the
 /// created request. Idempotent upstream: sending again while one is still
@@ -248,6 +302,49 @@ Response _friendRequestFailureResponse(FriendRequestActionResult result) {
 /// `GET /api/v1/federation/friends` and there is nothing to poll for.
 /// Decline refreshes too, so the answered request is gone from
 /// [pendingRequests] immediately.
+///
+/// `POST /friend-requests/<id>/cancel` — withdraws one *this* account sent;
+/// `200` with the updated request, whose `status` is now `cancelled`. Only
+/// the sender may (the account service enforces it: `403` otherwise), and
+/// only while it is still pending (`409` once answered — a request the other
+/// side accepted is a friendship, and ending one of those is
+/// `DELETE /api/v1/federation/friends/<nodeId>`). Refreshes like decline, so
+/// the withdrawn request is out of `outgoing` by the time the app sees the
+/// response. It deliberately has **no local effect at all** beyond that: it
+/// is the undo of a send, not a decision to remove anybody, so it writes no
+/// tombstone.
+///
+/// ## Devices (this account's linked devices)
+///
+/// `GET /devices` — `{devices: [{nodeId, publicKeyBase64, linkedAt, relayUrl,
+/// deviceName, isThisDevice}, ...]}`, fetched live from the account service.
+/// `409`/`503` on no session/no account service like the friend-request
+/// routes; `503 service_unreachable` if the service didn't answer and `502`
+/// if it answered unusably. Nothing is cached: a stale list is a bad basis
+/// for deciding what to revoke, so this fails honestly instead.
+/// `deviceName` is the platform the node reported at its last login and may
+/// be `null`; `isThisDevice` is added here, since the account service cannot
+/// know which of the rows is asking.
+///
+/// `DELETE /devices/<nodeId>` — unlinks one; `200 {"signedOut": bool}`. This
+/// is the recovery path for a lost or stolen device that ADR 0048 shipped and
+/// nothing could reach.
+///
+/// **Unlinking the device you are on is allowed, and signs this node out**
+/// (`signedOut: true`), clearing the local session and the cached friend
+/// requests, but *never* the friend list — same rule as `DELETE
+/// /api/v1/account`. Refusing it was the alternative and is worse in both
+/// directions: it would make "remove this device from my account" impossible
+/// from the only device somebody has (the phone they are about to sell), and
+/// allowing it *without* clearing the session would leave this node believing
+/// it acts for an account that no longer knows it, so every signed call would
+/// quietly `401` with nothing on screen to explain why. A body rather than a
+/// `204` precisely so the app never has to infer which of the two happened.
+///
+/// The unlinked device itself is **not** told. Its own next sync simply
+/// starts failing, and it finds out at its next
+/// `GET /api/v1/account/devices`, which is an acceptable gap for a device you
+/// are revoking *because* you no longer control it.
 ///
 /// **Sending or accepting a friend request forgets any local removal of that
 /// person** (`adoptExplicitly` below), which is a correction of what this
@@ -274,8 +371,13 @@ Response _friendRequestFailureResponse(FriendRequestActionResult result) {
 /// this router can still be built (and still answer `GET`/`DELETE /`) on a
 /// node with no account service at all. [friendStore] is not: this node
 /// always has one, and the local half of an accept must not depend on
-/// remembering to pass it.
+/// remembering to pass it. Neither is [nodeId], this node's own device
+/// identifier: it is what `GET /devices` marks `isThisDevice` with and what
+/// `DELETE /devices/<nodeId>` recognizes as a self-unlink, and defaulting it
+/// to anything would make both of those quietly wrong rather than fail to
+/// compile.
 Router buildAccountAppRouter({
+  required String nodeId,
   required AccountSessionStore sessionStore,
   required FriendStore friendStore,
   AccountServiceClient? accountService,
@@ -374,7 +476,20 @@ Router buildAccountAppRouter({
     '/',
     requireLocal((Request request) async {
       final session = await sessionStore.load();
-      return _json({'account': session?.toJson()});
+      return _json({
+        'account': session?.toJson(),
+        // Purely additive: the existing `account` field keeps its exact
+        // meaning and its exact shape. Before this, `{"account": null}` was
+        // the answer both for "signed out" and for "this build has no account
+        // service at all", so an app had to guess between "sign in" and "there
+        // is nothing to sign in to" -- ADR 0053 flagged that as open.
+        //
+        // A configuration fact, not a reachability one: this route reads local
+        // disk and nothing else (Rule 1), so it says whether accounts exist
+        // *here*, never whether the service is up right now. Finding that out
+        // is what the routes that actually call it are for.
+        'accountsAvailable': accountService != null,
+      });
     }, appApiKey: appApiKey),
   );
 
@@ -398,7 +513,14 @@ Router buildAccountAppRouter({
     if (accountService == null) {
       return (
         null,
-        _error('No account service is configured for this node', status: 503),
+        _error(
+          'No account service is configured for this node',
+          status: 503,
+          // The distinction ADR 0053 left open: this `503` and the one for an
+          // account service that did not answer are the same status and
+          // opposite problems. See [_noAccountServiceCode].
+          code: _noAccountServiceCode,
+        ),
       );
     }
     final session = await sessionStore.load();
@@ -407,7 +529,11 @@ Router buildAccountAppRouter({
         null,
         // Not a 401: the caller is authorized, this node just isn't logged
         // in to anything. See this router's doc comment.
-        _error('This node is not logged in to any account', status: 409),
+        _error(
+          'This node is not logged in to any account',
+          status: 409,
+          code: _notLoggedInCode,
+        ),
       );
     }
     return (session.accountId, null);
@@ -451,13 +577,21 @@ Router buildAccountAppRouter({
       // A failed fetch never overwrites what this node already had (see
       // [PendingFriendRequestCache]): the user sees the last real answer,
       // marked as not live, rather than an empty list or an error page.
-      if (fetched != null) pendingRequests?.store(fetched);
+      if (fetched != null) {
+        pendingRequests?.store(fetched.incoming, outgoing: fetched.outgoing);
+      }
 
       final snapshot =
           pendingRequests?.current ?? const PendingFriendRequests.empty();
-      final requests = fetched ?? snapshot.requests;
+      final requests = fetched?.incoming ?? snapshot.requests;
+      final outgoing = fetched?.outgoing ?? snapshot.outgoing;
       return _json({
         'requests': [for (final entry in requests) entry.toJson()],
+        // Additive, and from the *same* fetch as `requests` above -- so the
+        // one `live`/`fetchedAt` pair honestly describes both lists, and an
+        // app showing "waiting on them" beside "they are waiting on you" is
+        // never mixing two different moments.
+        'outgoing': [for (final entry in outgoing) entry.toJson()],
         'fetchedAt': fetched != null
             ? DateTime.now().toUtc().toIso8601String()
             : snapshot.fetchedAt?.toIso8601String(),
@@ -537,6 +671,139 @@ Router buildAccountAppRouter({
   router.post(
     '/friend-requests/<requestId>/decline',
     respondHandler(accept: false),
+  );
+
+  router.post(
+    '/friend-requests/<requestId>/cancel',
+    requireLocal((Request request) async {
+      final requestId = request.params['requestId'];
+      if (requestId == null || requestId.isEmpty) {
+        return _error('"requestId" is required', code: 'invalid_request');
+      }
+
+      final (accountId, failure) = await requireSession();
+      if (failure != null) return failure;
+
+      final result = await accountService!.cancelFriendRequest(
+        accountId: accountId!,
+        requestId: requestId,
+      );
+      if (!result.isSuccess) return _friendRequestFailureResponse(result);
+
+      // Deliberately *not* wrapped in `adoptExplicitly`, unlike send and
+      // accept. Cancelling is the undo of a send, and undoing a send is not a
+      // decision to remove anybody: it must not write a tombstone, and there
+      // is nothing to forget either (the send already cleared any removal,
+      // and re-tombstoning here would silently break a later re-send).
+      //
+      // Refreshed like decline, so the withdrawn request is out of this
+      // node's cached outgoing list by the time the app sees this response
+      // rather than up to a poll interval later.
+      await accountUpdates?.refreshNow(force: true);
+
+      return _json(result.request!.toJson());
+    }, appApiKey: appApiKey),
+  );
+
+  router.get(
+    '/devices',
+    requireLocal((Request request) async {
+      final (accountId, failure) = await requireSession();
+      if (failure != null) return failure;
+
+      final fetched = await accountService!.fetchDevicesOf(accountId!);
+      // No cached fallback here, unlike the friend-request list: nothing
+      // stores a device list, and inventing a stale one for a screen whose
+      // whole purpose is deciding what to revoke would be worse than saying
+      // "ask again in a moment". The two `503`s stay distinguishable by
+      // `code`.
+      if (!fetched.reachable) {
+        return _error(
+          'Could not reach the account service',
+          status: 503,
+          code: _serviceUnreachableCode,
+        );
+      }
+      final devices = fetched.devices;
+      if (devices == null) {
+        return _error(
+          'The account service could not list this account\'s devices',
+          status: 502,
+          code: _serviceFailedCode,
+        );
+      }
+
+      return _json({
+        'devices': [
+          for (final device in devices)
+            {
+              ...device.toJson(),
+              // The one fact the account service cannot know and the app
+              // must not have to derive: which row is the device asking.
+              // Without it the UI cannot warn that removing *this* one signs
+              // you out here, which is the whole confusing case.
+              'isThisDevice': device.nodeId == nodeId,
+            },
+        ],
+      });
+    }, appApiKey: appApiKey),
+  );
+
+  router.delete(
+    '/devices/<targetNodeId>',
+    requireLocal((Request request) async {
+      final targetNodeId = request.params['targetNodeId'];
+      if (targetNodeId == null || targetNodeId.isEmpty) {
+        return _error('"nodeId" is required', code: 'invalid_request');
+      }
+
+      final (accountId, failure) = await requireSession();
+      if (failure != null) return failure;
+
+      final outcome = await accountService!.unlinkDevice(
+        accountId: accountId!,
+        nodeId: targetNodeId,
+      );
+      switch (outcome) {
+        case UnlinkDeviceOutcome.unreachable:
+          return _error(
+            'Could not reach the account service',
+            status: 503,
+            code: _serviceUnreachableCode,
+          );
+        case UnlinkDeviceOutcome.refused:
+          return _error(
+            'The account service refused to unlink that device',
+            status: 403,
+            code: 'forbidden',
+          );
+        case UnlinkDeviceOutcome.failed:
+          return _error(
+            'The account service could not unlink that device',
+            status: 502,
+            code: _serviceFailedCode,
+          );
+        case UnlinkDeviceOutcome.unlinked:
+          break;
+      }
+
+      // Unlinking the device you are standing on is allowed, and the local
+      // session goes with it -- see this router's doc comment for why
+      // refusing would have been the worse of the two options. Strictly
+      // *after* the service confirmed: clearing first and then failing would
+      // sign someone out of an account whose device list still lists them.
+      //
+      // Friends are untouched, exactly as `DELETE /api/v1/account` leaves
+      // them: this ends a device's authority to act for the account, and
+      // local trust established by pairing was never that account's to
+      // revoke.
+      final signedOut = targetNodeId == nodeId;
+      if (signedOut) {
+        await sessionStore.clear();
+        pendingRequests?.clear();
+      }
+      return _json({'signedOut': signedOut});
+    }, appApiKey: appApiKey),
   );
 
   return router;

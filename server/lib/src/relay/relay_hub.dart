@@ -11,6 +11,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../accounts/device_notifier.dart';
 import '../identity/node_identity.dart';
+import 'build_info.dart';
 import 'relay_protocol.dart';
 import 'username_directory_store.dart';
 
@@ -83,15 +84,30 @@ class RelayHub implements DeviceNotifier {
   /// ([InMemoryUsernameDirectory]) so existing callers that never had a data
   /// directory to begin with (unit tests, an ad hoc `RelayHub()`) keep
   /// working -- just without any claim surviving a restart.
+  ///
+  /// [buildInfo] is what `GET /version` reports, and defaults to reading the
+  /// `git archive`-substituted constants for this build ([BuildInfo]).
+  /// Resolved *here*, at construction, rather than per request: its
+  /// `startedAt` is meant to be this process's start time, and a value read
+  /// lazily on the first request would have been indistinguishable from that
+  /// right up until the moment somebody relied on it. A parameter only so
+  /// tests can assert on a known value.
   RelayHub({
     this.requestTimeout = const Duration(seconds: 20),
     Directory? dataDir,
+    BuildInfo? buildInfo,
   }) : usernames = dataDir != null
            ? UsernameDirectoryStore(dataDir)
-           : InMemoryUsernameDirectory();
+           : InMemoryUsernameDirectory(),
+       buildInfo = buildInfo ?? BuildInfo.forThisProcess();
 
   final Duration requestTimeout;
   final UsernameDirectory usernames;
+
+  /// Which commit this relay is running, as `GET /version` reports it -- see
+  /// [BuildInfo] for the three separate occasions a stale deployment
+  /// invalidated a round of "verified end to end".
+  final BuildInfo buildInfo;
   final Map<String, _Tunnel> _tunnels = {};
   final Random _random = Random.secure();
 
@@ -166,6 +182,16 @@ class RelayHub implements DeviceNotifier {
     // fingerprint), but registration order is what actually guarantees this
     // route wins, not that coincidence.
     router.get('/directory/lookup', _lookupUsername);
+    // Registered before the catch-all for exactly the reason spelled out
+    // above: '/<nodeId>/<path|[^]*>' would otherwise be free to match this
+    // too. It happens to need two segments, so a single-segment '/version'
+    // would survive being registered later -- but that is a coincidence of
+    // the current pattern, and registration order is what actually
+    // guarantees this route wins. Verified against the *real mounted*
+    // server (hub under '/', account service under '/accounts/', exactly as
+    // `bin/relay.dart` wires them) in `relay_hub_test.dart`, since mounting
+    // is where this class of mistake has hidden before.
+    router.get('/version', _version);
     router.all(
       '/<nodeId>/<path|[^]*>',
       (Request request, String nodeId, String path) =>
@@ -173,6 +199,14 @@ class RelayHub implements DeviceNotifier {
     );
     return router;
   }
+
+  /// Unauthenticated, like [_lookupUsername] below and for a stronger version
+  /// of the same reason: it discloses a commit hash of a public repository
+  /// and this process's start time, which is less than the relay tells any
+  /// stranger by answering at all -- and a version endpoint that needs a
+  /// credential is one nobody checks, which is the failure mode this is
+  /// entirely about. See [BuildInfo].
+  Future<Response> _version(Request request) async => _json(buildInfo.toJson());
 
   /// Plain, unauthenticated HTTP GET: read-only and no more sensitive than a
   /// nodeId itself (already routinely shared via QR codes/links), so it

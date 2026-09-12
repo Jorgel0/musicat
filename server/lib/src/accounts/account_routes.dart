@@ -62,6 +62,12 @@ const String tooManyNewAccountsCode = 'too_many_new_accounts';
 const String loginExpiredCode = 'login_expired';
 const String loginInvalidProofCode = 'invalid_login_proof';
 
+/// The longest `deviceName` `POST /login/complete` will record (see
+/// [DeviceLink.deviceName]). Generous for a platform label and small enough
+/// that a node cannot use its own device row to bloat the responses this
+/// service sends to that account's friends.
+const int maxDeviceNameLength = 64;
+
 Map<String, dynamic> _deviceJson(DeviceLink device) => device.toJson();
 
 /// The key [AccountCreationLimiter] counts against: the source address this
@@ -309,6 +315,13 @@ Future<Response> _respondOutcomeResponse(
 /// is what makes a second account on the same device usable at all -- see
 /// [AccountStore.findByDeviceNodeId].
 ///
+/// The optional `deviceName` is the logging-in device's own platform label
+/// (`Android`, `Linux`, ...), refreshed on every login on exactly the same
+/// terms as `relayUrl`, capped at [maxDeviceNameLength] characters, and
+/// returned by `GET /<accountId>/devices` so a person can tell their own
+/// devices apart before unlinking one. See [DeviceLink.deviceName] for why it
+/// is a platform and not a hostname.
+///
 /// The optional `relayUrl` is the logging-in device's own relay endpoint,
 /// and **every login refreshes it**, including a re-login from an
 /// already-linked device (sending none clears it). It is the one piece of
@@ -342,12 +355,22 @@ Future<Response> _respondOutcomeResponse(
 /// already `pending` in that exact direction, just returns the existing
 /// one unchanged (`201` either way; see `FriendRequestStore.send`).
 ///
-/// `GET /<me>/friend-requests?status=` -- authenticated as `<me>`; lists
-/// every request currently addressed *to* `<me>`, optionally narrowed to a
-/// single `status` (`pending`/`accepted`/`declined`; `400` for anything
-/// else). Every friend-request response here (this one, `send`, `accept`
-/// and `decline`) carries both sides' **usernames** alongside their
-/// accountIds -- see [AccountFriendRequest].
+/// `GET /<me>/friend-requests?status=&direction=` -- authenticated as
+/// `<me>`; lists the requests `<me>` is one side of, optionally narrowed to a
+/// single `status` (`pending`/`accepted`/`declined`/`revoked`/`cancelled`;
+/// `400` for anything else). Every friend-request response here (this one,
+/// `send`, `accept`, `decline` and `cancel`) carries both sides'
+/// **usernames** alongside their accountIds -- see [AccountFriendRequest].
+///
+/// **`direction` (optional, `incoming` when absent)** picks which side:
+/// `incoming` (addressed to `<me>` -- what this route has always returned,
+/// so no existing caller changes), `outgoing` (sent by `<me>`), or `both` in
+/// one answer. A parameter rather than a second route on purpose: the
+/// authentication, the `<me>` check, the status filter and the username
+/// projection are identical either way, and only the field compared to
+/// `<me>` differs -- two routes would duplicate all of that and be free to
+/// drift, and `both` in particular exists so an app showing both lists (which
+/// is every app) spends one signed round trip instead of two.
 ///
 /// `GET /<me>/friends` -- authenticated as `<me>`; every account `<me>`
 /// has an *accepted* friend request with, in either direction, as
@@ -381,13 +404,24 @@ Future<Response> _respondOutcomeResponse(
 /// been accepted/declined the *other* way; a no-op success if it's already
 /// in the exact state being requested.
 ///
+/// `POST /<me>/friend-requests/<requestId>/cancel` -- the mirror image:
+/// authenticated as `<me>`, which must be the request's **sender** (`403`
+/// otherwise, the recipient included -- their way out is `decline`, and the
+/// two are recorded as different statuses because they are different
+/// people's decisions). `404` for an unknown id, `409` once it has been
+/// answered (a request the other side accepted is a friendship now, and
+/// ending one of those is `DELETE /<me>/friends/<accountId>`), and a no-op
+/// `200` for one already cancelled, so a retry is free. The row is flipped
+/// to `cancelled`, never deleted -- see [FriendRequestStatus.cancelled].
+///
 /// [deviceNotifier] is optional and defaults to `null` -- with none, this
 /// service works exactly as it did before push existed, and every existing
 /// caller (and every node whose relay hosts no account service) keeps
 /// working unchanged. When one *is* given, `POST /<me>/friend-requests`, its
-/// `accept`/`decline` siblings and `DELETE /<me>/friends/<accountId>` nudge
-/// the affected accounts' devices afterwards; see [_notifyAccountDevices]
-/// for who is notified and why that push can never carry data.
+/// `accept`/`decline`/`cancel` siblings and `DELETE /<me>/friends/<accountId>`
+/// nudge the affected accounts' devices afterwards; see
+/// [_notifyAccountDevices] for who is notified and why that push can never
+/// carry data.
 Router buildAccountRouter(
   AccountStore accountStore,
   FriendRequestStore friendRequestStore, {
@@ -435,6 +469,7 @@ Router buildAccountRouter(
     final publicKeyBase64 = body['publicKeyBase64'];
     final signatureOverNonce = body['signatureOverNonce'];
     final relayUrl = body['relayUrl'];
+    final deviceName = body['deviceName'];
     final allowCreate = body['allowCreate'];
     if (username is! String || username.isEmpty) {
       return _error('"username" is required');
@@ -457,6 +492,20 @@ Router buildAccountRouter(
     // failing a login over it would be an absurd way to find out.
     if (relayUrl != null && relayUrl is! String) {
       return _error('"relayUrl" must be a string if present');
+    }
+    // Optional, same shape and same "empty means none" rule as relayUrl (see
+    // [DeviceLink.deviceName]). Length-capped because this string is
+    // node-supplied, stored in `accounts.json`, and handed to every mutual
+    // friend: a node that sent a megabyte of it would be writing into other
+    // people's responses, and no honest platform label is anywhere near this
+    // long.
+    if (deviceName != null && deviceName is! String) {
+      return _error('"deviceName" must be a string if present');
+    }
+    if (deviceName is String && deviceName.length > maxDeviceNameLength) {
+      return _error(
+        '"deviceName" must be at most $maxDeviceNameLength characters',
+      );
     }
     // Optional, and `true` when absent -- the behaviour this endpoint has
     // always had, so every existing caller is unaffected. See this router's
@@ -548,6 +597,9 @@ Router buildAccountRouter(
       nodeId: nodeId,
       publicKeyBase64: publicKeyBase64,
       relayUrl: (relayUrl is String && relayUrl.isNotEmpty) ? relayUrl : null,
+      deviceName: (deviceName is String && deviceName.isNotEmpty)
+          ? deviceName
+          : null,
       allowCreate: allowCreate as bool? ?? true,
     );
 
@@ -712,8 +764,25 @@ Router buildAccountRouter(
       }
     }
 
-    final requests = await friendRequestStore.listAddressedTo(
+    // Absent means `incoming`, which is what this route has always returned
+    // -- so every existing caller, including a node too old to know this
+    // parameter exists, is unaffected. See this router's doc comment for why
+    // outgoing requests are a direction here rather than a route of their
+    // own.
+    final directionParam = request.requestedUri.queryParameters['direction'];
+    FriendRequestDirection? direction;
+    if (directionParam != null) {
+      for (final candidate in FriendRequestDirection.values) {
+        if (candidate.name == directionParam) direction = candidate;
+      }
+      if (direction == null) {
+        return _error('Invalid "direction" query parameter');
+      }
+    }
+
+    final requests = await friendRequestStore.list(
       me,
+      direction: direction ?? FriendRequestDirection.incoming,
       status: status,
     );
     final usernames = await _usernamesById(accountStore);
@@ -859,11 +928,56 @@ Router buildAccountRouter(
     final (outcome, updated) = await friendRequestStore.decline(requestId, me);
     if (outcome == RespondOutcome.updated) {
       // Only `<me>`'s own devices: their pending list just shrank. The
-      // *sender* is deliberately not told -- there is nothing they could
-      // fetch (`GET /<me>/friend-requests` only ever lists requests
-      // addressed *to* the caller, so a declined outgoing request is not
-      // visible to them at all), so a push would be a pure "you were
-      // declined, right now" side channel in exchange for nothing.
+      // *sender* is deliberately still not told, even now that they can list
+      // their own outgoing requests: a push here would be a "you were
+      // declined, this second" side channel, and the thing it would save them
+      // is one poll interval of a row they can no longer act on anyway (a
+      // declined request simply stops appearing in their pending outgoing
+      // list). Cancel below is the mirror case and *does* push, because there
+      // the person who needs telling is the one still being shown a prompt.
+      unawaited(_notifyAccountDevices(accountStore, deviceNotifier, me));
+    }
+    return _respondOutcomeResponse(outcome, updated, accountStore);
+  });
+
+  // Four segments with `friend-requests` and `cancel` both pinned, exactly
+  // like its `accept`/`decline` siblings above -- it overlaps none of them,
+  // and registration order among the three is irrelevant because they differ
+  // in their final literal segment. Registered here rather than beside them
+  // for readability only.
+  router.post('/<me>/friend-requests/<requestId>/cancel', (
+    Request request,
+    String me,
+    String requestId,
+  ) async {
+    final body = await request.readAsString();
+    final caller = await _authenticateCaller(request, accountStore, body: body);
+    if (caller == null) {
+      return _error('Authentication required', status: 401);
+    }
+    if (caller.accountId != me) {
+      return _error('Cannot act as another account', status: 403);
+    }
+
+    final (outcome, updated) = await friendRequestStore.cancel(requestId, me);
+    if (outcome == RespondOutcome.updated) {
+      // The recipient first, and they are the point: until they re-fetch they
+      // are still being shown, and can still accept, a request that no longer
+      // exists -- the one case where a missed push has a user acting on
+      // something withdrawn. `<me>`'s other devices are told for the same
+      // reason accept tells them: their own outgoing list changed too.
+      //
+      // Only on a real change, like `DELETE /<me>/friends/<accountId>`: a
+      // no-op cancel (already cancelled, or somebody else's request) pushes
+      // nothing, so this cannot be used as a free way to make another
+      // account's devices poll on demand.
+      unawaited(
+        _notifyAccountDevices(
+          accountStore,
+          deviceNotifier,
+          updated!.toAccountId,
+        ),
+      );
       unawaited(_notifyAccountDevices(accountStore, deviceNotifier, me));
     }
     return _respondOutcomeResponse(outcome, updated, accountStore);

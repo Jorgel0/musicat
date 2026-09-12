@@ -14,6 +14,11 @@ String _generateId() {
   ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }
 
+/// Which of a request's two accounts is taking an action on it -- the only
+/// thing that differs between answering a request and withdrawing one. See
+/// [FriendRequestStore._respond].
+enum _RequestSide { recipient, sender }
+
 enum RespondOutcome {
   updated,
   alreadyInThatState,
@@ -65,23 +70,60 @@ class FriendRequestStore {
     return null;
   }
 
-  /// Every request currently addressed *to* [accountId], optionally
+  /// Every request [accountId] is on the [direction] side of, optionally
   /// narrowed to a single [status] (e.g. `pending`, for
   /// `GET /accounts/<me>/friend-requests?status=pending`).
   /// Omitting [status] returns requests in every status.
-  Future<List<FriendRequest>> listAddressedTo(
+  ///
+  /// One method for all three directions rather than one per direction:
+  /// they differ only in which field is compared to [accountId], and the
+  /// authorization, the status filter and the username projection that wrap
+  /// them are identical -- two implementations would be free to drift on
+  /// which statuses they include, which is precisely the kind of drift that
+  /// shows a user a request they have already answered.
+  ///
+  /// Order is the file's own (oldest first), and stable across directions:
+  /// [FriendRequestDirection.both] does not group by side, it filters one
+  /// pass over the same list, so a caller diffing successive responses sees
+  /// real changes rather than reordering.
+  Future<List<FriendRequest>> list(
     String accountId, {
+    FriendRequestDirection direction = FriendRequestDirection.incoming,
     FriendRequestStatus? status,
   }) async {
     final requests = await loadAll();
     return requests
         .where(
           (request) =>
-              request.toAccountId == accountId &&
+              _isOn(request, accountId, direction) &&
               (status == null || request.status == status),
         )
         .toList();
   }
+
+  static bool _isOn(
+    FriendRequest request,
+    String accountId,
+    FriendRequestDirection direction,
+  ) => switch (direction) {
+    FriendRequestDirection.incoming => request.toAccountId == accountId,
+    FriendRequestDirection.outgoing => request.fromAccountId == accountId,
+    FriendRequestDirection.both =>
+      request.toAccountId == accountId || request.fromAccountId == accountId,
+  };
+
+  /// [list]'s incoming case, kept under its original name because that is
+  /// what every existing call site means and reads better than a direction
+  /// argument spelled out at each of them. A one-line delegation, so the two
+  /// cannot disagree.
+  Future<List<FriendRequest>> listAddressedTo(
+    String accountId, {
+    FriendRequestStatus? status,
+  }) => list(
+    accountId,
+    direction: FriendRequestDirection.incoming,
+    status: status,
+  );
 
   /// If [request] is an `accepted` friendship that [accountId] is one side
   /// of, who the *other* side is; `null` otherwise.
@@ -173,22 +215,33 @@ class FriendRequestStore {
       });
 
   /// Flips the request [id]'s status to [newStatus], but only if
-  /// [callerAccountId] is really its [FriendRequest.toAccountId] (the
-  /// sender can never accept/decline their own request) -- checked
+  /// [callerAccountId] really is the [actor] side of it -- checked
   /// atomically inside [_mutationLock] alongside the read, rather than by
   /// the caller doing its own [findById] first, so there's no window for a
   /// second concurrent response to race this authorization check.
+  ///
+  /// [actor] is what makes accept/decline and cancel one operation instead of
+  /// two near-identical ones: they differ *only* in which side of the request
+  /// is allowed to act (the recipient answers an offer; the sender withdraws
+  /// it), and every other rule -- unknown id, already in that state, already
+  /// terminal, write-under-the-lock -- is the same rule. Two copies would be
+  /// free to drift on the one thing here that is a permission check.
   Future<(RespondOutcome, FriendRequest?)> _respond({
     required String id,
     required String callerAccountId,
     required FriendRequestStatus newStatus,
+    _RequestSide actor = _RequestSide.recipient,
   }) => _locked(() async {
     final requests = await loadAll();
     final index = requests.indexWhere((request) => request.id == id);
     if (index == -1) return (RespondOutcome.notFound, null);
 
     final existing = requests[index];
-    if (existing.toAccountId != callerAccountId) {
+    final actingAccountId = switch (actor) {
+      _RequestSide.recipient => existing.toAccountId,
+      _RequestSide.sender => existing.fromAccountId,
+    };
+    if (actingAccountId != callerAccountId) {
       return (RespondOutcome.forbidden, existing);
     }
     if (existing.status == newStatus) {
@@ -220,6 +273,25 @@ class FriendRequestStore {
     id: id,
     callerAccountId: callerAccountId,
     newStatus: FriendRequestStatus.declined,
+  );
+
+  /// Withdraws the still-pending request [id], which only its **sender** may
+  /// do ([RespondOutcome.forbidden] for anyone else, the recipient very much
+  /// included -- their way out is [decline], and the two are recorded
+  /// differently on purpose; see [FriendRequestStatus.cancelled]).
+  ///
+  /// [RespondOutcome.conflict] once it has been answered: a request the other
+  /// side already accepted is a friendship, and ending one of those is
+  /// [revokeFriendship]'s job, not this one. Cancelling an already-cancelled
+  /// request is [RespondOutcome.alreadyInThatState], so a retry is free.
+  Future<(RespondOutcome, FriendRequest?)> cancel(
+    String id,
+    String callerAccountId,
+  ) => _respond(
+    id: id,
+    callerAccountId: callerAccountId,
+    newStatus: FriendRequestStatus.cancelled,
+    actor: _RequestSide.sender,
   );
 
   /// Ends the friendship between [a] and [b], whichever of them sent the

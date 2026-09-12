@@ -1,19 +1,45 @@
 import 'account.dart';
 
-/// The last set of incoming, still-pending friend requests this node fetched
-/// from the account service, plus when it fetched them.
+/// The last set of still-pending friend requests this node fetched from the
+/// account service -- both the ones addressed to it and the ones it sent --
+/// plus when it fetched them.
 ///
 /// [fetchedAt] is `null` exactly when this node has never had a successful
 /// fetch, which is the one case a caller must not present as "you have no
-/// friend requests": an empty list with a real [fetchedAt] means the account
-/// service said so, an empty list with no [fetchedAt] means nobody has ever
+/// friend requests": empty lists with a real [fetchedAt] mean the account
+/// service said so, empty lists with no [fetchedAt] mean nobody has ever
 /// asked.
+///
+/// Both directions live in one object, stamped by one [fetchedAt], because
+/// they come from one fetch (see
+/// [AccountServiceClient.pendingFriendRequestsOf]). Two caches would be able
+/// to disagree about how current they are, and an app showing "waiting on
+/// them" beside "they are waiting on you" would then be quietly mixing two
+/// different moments.
 class PendingFriendRequests {
-  const PendingFriendRequests({required this.requests, this.fetchedAt});
+  const PendingFriendRequests({
+    required this.requests,
+    this.outgoing = const [],
+    this.fetchedAt,
+  });
 
-  const PendingFriendRequests.empty() : requests = const [], fetchedAt = null;
+  const PendingFriendRequests.empty()
+    : requests = const [],
+      outgoing = const [],
+      fetchedAt = null;
 
+  /// The requests addressed *to* this account. Keeps its original name
+  /// (rather than becoming `incoming`) because that is what every existing
+  /// caller and the `{requests: [...]}` wire field already mean by it, and
+  /// renaming a field to gain symmetry would be a contract change bought with
+  /// nothing.
   final List<AccountFriendRequest> requests;
+
+  /// The still-pending requests this account *sent*, which nothing could see
+  /// before this existed -- so a user could not tell "they haven't answered"
+  /// from "I typed the username wrong", and could not take one back.
+  final List<AccountFriendRequest> outgoing;
+
   final DateTime? fetchedAt;
 
   bool get isKnown => fetchedAt != null;
@@ -36,7 +62,7 @@ class PendingFriendRequests {
 /// (`federation/account_update_poller.dart`) and the app-facing
 /// `GET /api/v1/account/friend-requests`, which refreshes it on the way past
 /// -- and read by that same route when the account service can't be reached,
-/// which is how a node with a dead relay still shows the list it had a
+/// which is how a node with a dead relay still shows the lists it had a
 /// minute ago instead of an error.
 ///
 /// A failed fetch never touches it: [store] is only ever called with a real
@@ -46,11 +72,22 @@ class PendingFriendRequestCache {
 
   PendingFriendRequests get current => _current;
 
-  /// Records [requests] as the current answer, stamped [fetchedAt] (now by
-  /// default; a parameter only so tests can be deterministic).
-  void store(List<AccountFriendRequest> requests, {DateTime? fetchedAt}) {
+  /// Records [requests] (incoming) and [outgoing] as the current answer,
+  /// stamped [fetchedAt] (now by default; a parameter only so tests can be
+  /// deterministic).
+  ///
+  /// Both directions are replaced together, always: they were fetched
+  /// together, and storing one without the other would leave a snapshot whose
+  /// halves are from different moments while still carrying a single
+  /// [PendingFriendRequests.fetchedAt] claiming otherwise.
+  void store(
+    List<AccountFriendRequest> requests, {
+    List<AccountFriendRequest> outgoing = const [],
+    DateTime? fetchedAt,
+  }) {
     _current = PendingFriendRequests(
       requests: List.unmodifiable(requests),
+      outgoing: List.unmodifiable(outgoing),
       fetchedAt: fetchedAt ?? DateTime.now().toUtc(),
     );
   }

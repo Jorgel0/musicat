@@ -251,6 +251,11 @@ class AccountStore {
   /// a relay it is no longer connected to, which costs them a wasted
   /// reachability attempt each time and can never succeed.
   ///
+  /// [deviceName] (see [DeviceLink.deviceName]) is refreshed on exactly the
+  /// same terms and for the same reason: it is something the node says about
+  /// itself right now, not a stored preference, so `null` means "I did not
+  /// say" and overwrites whatever was there.
+  ///
   /// [username] is matched and stored **case-insensitively**
   /// ([normalizeUsername]); [LoginOutcome.ambiguousUsername] reports the one
   /// state that cannot be resolved that way (two pre-existing accounts
@@ -276,6 +281,7 @@ class AccountStore {
     required String nodeId,
     required String publicKeyBase64,
     String? relayUrl,
+    String? deviceName,
     bool allowCreate = true,
   }) => _locked(
     () => _loginOrSignupLocked(
@@ -284,6 +290,7 @@ class AccountStore {
       nodeId: nodeId,
       publicKeyBase64: publicKeyBase64,
       relayUrl: relayUrl,
+      deviceName: deviceName,
       allowCreate: allowCreate,
     ),
   );
@@ -294,6 +301,7 @@ class AccountStore {
     required String nodeId,
     required String publicKeyBase64,
     String? relayUrl,
+    String? deviceName,
     required bool allowCreate,
   }) async {
     final canonicalUsername = normalizeUsername(username);
@@ -336,6 +344,7 @@ class AccountStore {
             publicKeyBase64: publicKeyBase64,
             linkedAt: now,
             relayUrl: relayUrl,
+            deviceName: deviceName,
           ),
         ],
         createdAt: now,
@@ -371,10 +380,11 @@ class AccountStore {
       // and [DeviceLink.linkedAt] keeps its original value, so re-logging in
       // never reshuffles a friend's reachability preference order
       // (`Friend.devicesByPreference`). What a re-login *does* refresh is
-      // [DeviceLink.relayUrl]; if that hasn't changed either, nothing is
-      // written at all -- unless this login moved the device off another
-      // account, which is a change to somebody's file either way.
-      if (existing.relayUrl == relayUrl) {
+      // [DeviceLink.relayUrl] and [DeviceLink.deviceName]; if neither has
+      // changed, nothing is written at all -- unless this login moved the
+      // device off another account, which is a change to somebody's file
+      // either way.
+      if (existing.relayUrl == relayUrl && existing.deviceName == deviceName) {
         if (movedHere) await _save(accounts);
         return LoginResult.linked(account);
       }
@@ -385,6 +395,7 @@ class AccountStore {
         publicKeyBase64: existing.publicKeyBase64,
         linkedAt: existing.linkedAt,
         relayUrl: relayUrl,
+        deviceName: deviceName,
       );
       final refreshed = account.copyWith(devices: devices);
       accounts[index] = refreshed;
@@ -400,6 +411,7 @@ class AccountStore {
           publicKeyBase64: publicKeyBase64,
           linkedAt: now,
           relayUrl: relayUrl,
+          deviceName: deviceName,
         ),
       ],
     );

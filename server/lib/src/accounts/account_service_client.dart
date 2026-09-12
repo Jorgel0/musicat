@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -222,6 +223,56 @@ enum RevokeFriendshipOutcome {
   failed,
 }
 
+/// How [AccountServiceClient.unlinkDevice] ended.
+///
+/// Four outcomes rather than a `bool` for the same reason
+/// [RevokeFriendshipOutcome] has three: the caller is a person who pressed
+/// "remove this device" and is waiting, and "done", "the service says no",
+/// "the service is down" and "the service is broken" ask different things of
+/// them. Getting this wrong here is worse than elsewhere -- this is the
+/// recovery path for a lost or stolen device, and "it didn't work" reported
+/// as "done" would leave someone believing they had revoked a phone they
+/// hadn't.
+enum UnlinkDeviceOutcome {
+  /// `204`: unlinked, or already was (the route is idempotent).
+  unlinked,
+
+  /// The service answered and refused -- a `401`/`403` (this node's own
+  /// device isn't linked to the account it claims), or any other `4xx`.
+  /// Retrying reproduces it exactly.
+  refused,
+
+  /// Never answered at all: connection refused, DNS failure, or
+  /// [AccountServiceClient.timeout] elapsed. Worth retrying; nothing has
+  /// been unlinked.
+  unreachable,
+
+  /// Answered with something unusable -- a `5xx` or an unexpected status.
+  failed,
+}
+
+/// This device's own platform, as [DeviceLink.deviceName] -- the only thing a
+/// node truthfully knows about itself that helps a human pick it out of a
+/// device list.
+///
+/// Deliberately **not** `Platform.localHostname`, which is the obvious
+/// alternative and frequently somebody's own name: this value is disclosed to
+/// every mutual friend (see [DeviceLink.deviceName]), and a platform label is
+/// the least identifying thing that still answers "which of these is my old
+/// phone?".
+///
+/// An unrecognized platform is reported verbatim rather than as "unknown" --
+/// it is already a short lowercase ASCII token from `dart:io`, and a name
+/// that says `fuchsia` is more use than one that says nothing.
+String defaultDeviceName() => switch (Platform.operatingSystem) {
+  'android' => 'Android',
+  'ios' => 'iOS',
+  'linux' => 'Linux',
+  'macos' => 'macOS',
+  'windows' => 'Windows',
+  final other => other,
+};
+
 /// A Musicat Server's *client* for the account service (`account_routes.dart`,
 /// hosted on the relay process, ADR 0048) — the only code in a node that
 /// talks to it.
@@ -245,9 +296,11 @@ class AccountServiceClient {
     required this.identity,
     http.Client? httpClient,
     this.timeout = const Duration(seconds: 5),
+    String? deviceName,
   }) : baseUrl = baseUrl.endsWith('/')
            ? baseUrl.substring(0, baseUrl.length - 1)
            : baseUrl,
+       deviceName = deviceName ?? defaultDeviceName(),
        _client = httpClient ?? http.Client(),
        _ownsClient = httpClient == null;
 
@@ -258,6 +311,12 @@ class AccountServiceClient {
   final String baseUrl;
 
   final NodeIdentity identity;
+
+  /// What this node calls itself in its own account's device list, published
+  /// at every login and nowhere else (see [DeviceLink.deviceName]). Defaults
+  /// to [defaultDeviceName]; a parameter only so tests are not at the mercy
+  /// of which platform they run on.
+  final String deviceName;
 
   /// Bounds every call: this service is never on a hot path, but a hung
   /// connection to it must not hold anything else up either.
@@ -363,6 +422,10 @@ class AccountServiceClient {
               // relay, so an older account service that doesn't know this
               // field sees the exact request it always did.
               if (relayUrl != null && relayUrl.isNotEmpty) 'relayUrl': relayUrl,
+              // Same "omit rather than send null" rule as relayUrl above, so
+              // an account service too old to know this field sees exactly
+              // the request it always did.
+              if (deviceName.isNotEmpty) 'deviceName': deviceName,
               // Same rule: only sent when it is not the default, so a
               // request that allows creation is byte-for-byte the one this
               // client has always sent. An account service too old to know
@@ -577,28 +640,41 @@ class AccountServiceClient {
     }
   }
 
-  /// Every friend request currently *pending* and addressed to [accountId] --
-  /// `GET <baseUrl>/<accountId>/friend-requests?status=pending`, signed as
-  /// this node's own device.
+  /// Every *pending* friend request [accountId] is on either side of --
+  /// `GET <baseUrl>/<accountId>/friend-requests?status=pending&direction=both`,
+  /// signed as this node's own device -- split into the ones it has to answer
+  /// and the ones it is waiting on.
+  ///
+  /// **One request for both lists**, not two: they are the same query with
+  /// the same authentication and the same projection, and an app showing both
+  /// (which is every app) should not cost two signed round trips per poll.
+  /// The split is done here, once, from `fromAccountId`, rather than by each
+  /// caller re-deriving the rule.
   ///
   /// `null` on any failure at all (unreachable service, `401`/`403`, an
   /// unparseable body), collapsed exactly like [devicesOf] and [friendsOf]:
   /// every caller does the same thing with all of them, which is to keep
-  /// whatever it already had. An empty list, by contrast, is a real answer
-  /// ("nobody has asked to be your friend") and is distinct from `null` --
-  /// [PendingFriendRequestCache] stores the former and ignores the latter,
-  /// which is what stops a moment of downtime from silently emptying the
-  /// app's list.
+  /// whatever it already had. Two empty lists, by contrast, are a real answer
+  /// ("nobody has asked to be your friend, and you are waiting on nobody")
+  /// and are distinct from `null` -- [PendingFriendRequestCache] stores the
+  /// former and ignores the latter, which is what stops a moment of downtime
+  /// from silently emptying the app's lists.
   ///
-  /// Only *incoming* requests exist to be listed: the account service has
-  /// never had a way to see your own outgoing ones (see
-  /// `account_routes.dart`), so neither does this.
-  Future<List<AccountFriendRequest>?> pendingFriendRequestsOf(
-    String accountId,
-  ) async {
+  /// Against an account service too old to know `direction`, the parameter is
+  /// ignored and the answer is the incoming list alone -- so `outgoing` comes
+  /// back empty rather than the whole call failing. That degradation is worth
+  /// knowing about: an empty outgoing list from an old service is
+  /// indistinguishable from a genuinely empty one.
+  Future<
+    ({
+      List<AccountFriendRequest> incoming,
+      List<AccountFriendRequest> outgoing,
+    })?
+  >
+  pendingFriendRequestsOf(String accountId) async {
     final uri = Uri.parse(
       '$baseUrl/${Uri.encodeComponent(accountId)}/friend-requests',
-    ).replace(queryParameters: {'status': 'pending'});
+    ).replace(queryParameters: {'status': 'pending', 'direction': 'both'});
     try {
       // Signed over the *path only*, matching `RequestSigner`'s canonical
       // string and the account service's own `request.requestedUri.path`:
@@ -612,10 +688,15 @@ class AccountServiceClient {
           .timeout(timeout);
       if (response.statusCode != 200) return null;
       final body = jsonDecode(response.body) as List<dynamic>;
-      return [
-        for (final entry in body)
-          AccountFriendRequest.fromJson(entry as Map<String, dynamic>),
-      ];
+      final incoming = <AccountFriendRequest>[];
+      final outgoing = <AccountFriendRequest>[];
+      for (final entry in body) {
+        final request = AccountFriendRequest.fromJson(
+          entry as Map<String, dynamic>,
+        );
+        (request.fromAccountId == accountId ? outgoing : incoming).add(request);
+      }
+      return (incoming: incoming, outgoing: outgoing);
     } catch (_) {
       return null;
     }
@@ -673,9 +754,71 @@ class AccountServiceClient {
     }, successStatus: 200);
   }
 
-  /// The shared status-to-outcome mapping for the two actions above --
-  /// written once because they answer with the same statuses and the same
-  /// body, and two copies would be free to disagree about what a `409` means.
+  /// Withdraws the still-pending friend request [requestId] that [accountId]
+  /// sent -- `POST <baseUrl>/<accountId>/friend-requests/<requestId>/cancel`,
+  /// signed as this node's own device.
+  ///
+  /// The service only lets a request's **sender** cancel
+  /// ([FriendRequestActionOutcome.forbidden] otherwise), and only while it is
+  /// still pending ([FriendRequestActionOutcome.conflict] once it isn't --
+  /// notably once the other side accepted, at which point the thing to end is
+  /// a friendship, not a request).
+  Future<FriendRequestActionResult> cancelFriendRequest({
+    required String accountId,
+    required String requestId,
+  }) async {
+    final uri = Uri.parse(
+      '$baseUrl/${Uri.encodeComponent(accountId)}/friend-requests/'
+      '${Uri.encodeComponent(requestId)}/cancel',
+    );
+    return _friendRequestAction(() async {
+      final headers = await RequestSigner(
+        identity,
+      ).sign(method: 'POST', path: uri.path);
+      return _client.post(uri, headers: headers);
+    }, successStatus: 200);
+  }
+
+  /// Unlinks the device [nodeId] from [accountId] --
+  /// `DELETE <baseUrl>/<accountId>/devices/<nodeId>`, signed as this node's
+  /// own device, which the service requires to be a device of that same
+  /// account.
+  ///
+  /// **This is the recovery path for a lost or stolen device** (ADR 0048), so
+  /// it deliberately does not collapse its failures: see
+  /// [UnlinkDeviceOutcome]. Idempotent upstream -- unlinking a nodeId that
+  /// was never linked is [UnlinkDeviceOutcome.unlinked], like any `DELETE`.
+  Future<UnlinkDeviceOutcome> unlinkDevice({
+    required String accountId,
+    required String nodeId,
+  }) async {
+    final uri = Uri.parse(
+      '$baseUrl/${Uri.encodeComponent(accountId)}/devices/'
+      '${Uri.encodeComponent(nodeId)}',
+    );
+    final http.Response response;
+    try {
+      final headers = await RequestSigner(
+        identity,
+      ).sign(method: 'DELETE', path: uri.path);
+      response = await _client.delete(uri, headers: headers).timeout(timeout);
+    } catch (_) {
+      return UnlinkDeviceOutcome.unreachable;
+    }
+
+    // Everything from here on is the service having answered, so a refusal is
+    // never reported as it being down.
+    if (response.statusCode == 204) return UnlinkDeviceOutcome.unlinked;
+    if (response.statusCode >= 400 && response.statusCode < 500) {
+      return UnlinkDeviceOutcome.refused;
+    }
+    return UnlinkDeviceOutcome.failed;
+  }
+
+  /// The shared status-to-outcome mapping for the three friend-request
+  /// actions above (send, respond, cancel) -- written once because they
+  /// answer with the same statuses and the same body, and separate copies
+  /// would be free to disagree about what a `409` means.
   Future<FriendRequestActionResult> _friendRequestAction(
     Future<http.Response> Function() send, {
     required int successStatus,

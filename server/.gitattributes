@@ -1,0 +1,12 @@
+# `git archive` substitutes `$Format:...$` placeholders only in files marked
+# export-subst -- which is how the deployed relay learns which commit it was
+# built from without a build step (see `lib/src/relay/build_info.dart` and
+# the "Deploying the relay" section of README.md). Deployment here is
+# `git archive` -> scp -> `systemctl restart`, so this substitution is the
+# only moment anything knows the commit at all.
+#
+# Kept in `server/.gitattributes` rather than the repository root on purpose:
+# attributes are read from the tree being archived, so a root-level file
+# would be missed by an archive rooted at this directory, while this one
+# applies either way.
+lib/src/relay/build_info.dart export-subst
